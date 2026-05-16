@@ -2,19 +2,20 @@ package middleware
 
 import (
 	"bytes"
+	"io"
+	"strconv"
+	"time"
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/model"
+	auditservice "github.com/QuantumNous/new-api/service/audit"
 
 	"github.com/bytedance/gopkg/util/gopool"
 	"github.com/gin-gonic/gin"
 )
 
-// auditResponseWriter 包装 gin.ResponseWriter，捕获响应状态码并将响应体复制一份到
-// 有限大小的缓冲区，用于判断业务是否成功（解析响应 JSON 的 success 字段）。
-// 缓冲区有上限，避免大响应（如密钥导出）占用过多内存；超出上限则不再缓存，
-// 此时仅依据 HTTP 状态码判断成败。
+// auditResponseWriter wraps gin.ResponseWriter for admin operation auditing.
 type auditResponseWriter struct {
 	gin.ResponseWriter
 	body    *bytes.Buffer
@@ -37,9 +38,7 @@ func (w *auditResponseWriter) WriteString(s string) (int, error) {
 	return w.Write([]byte(s))
 }
 
-// auditRouteActions 将「METHOD + 路由模板」映射为语言无关的操作标识 action。
-// 这些是未被 handler 手动埋点的写操作，由中间件兜底记录；前端依据 action 用 i18n 本地化展示。
-// 未命中的写操作回退为 action="generic"，前端展示 "METHOD route"。
+// auditRouteActions maps "METHOD + route template" to language-neutral action ids.
 var auditRouteActions = map[string]string{
 	// 用户管理
 	"POST /api/user/topup/complete":                    "user.topup_complete",
@@ -96,13 +95,7 @@ var auditRouteActions = map[string]string{
 	"DELETE /api/log/": "log.clear",
 }
 
-// beginAdminAudit 在管理/root 写操作进入 handler 前包装 ResponseWriter，
-// 以便事后解析响应判断业务是否成功。仅对写方法（POST/PUT/PATCH/DELETE）生效；
-// 只读请求返回 nil，调用方据此跳过事后兜底记录。
-//
-// 该函数由 authHelper 在鉴权通过、c.Next() 之前调用：因为任何管理/root 接口都
-// 必然经过 AdminAuth/RootAuth，将审计兜底内聚到鉴权链路即可保证「新增接口自动留痕」，
-// 无需在路由上再单独挂一层审计中间件（避免漏挂）。
+// beginAdminAudit wraps admin/root write requests after auth has passed.
 func beginAdminAudit(c *gin.Context) *auditResponseWriter {
 	method := c.Request.Method
 	if method != "POST" && method != "PUT" && method != "PATCH" && method != "DELETE" {
@@ -117,15 +110,13 @@ func beginAdminAudit(c *gin.Context) *auditResponseWriter {
 	return writer
 }
 
-// finishAdminAudit 在 c.Next() 之后对管理/高危写操作做兜底审计记录。
-// 若 handler 内已手动埋点（设置 ContextKeyAuditLogged），则跳过，避免重复。
+// finishAdminAudit records fallback admin/root write-operation audit logs.
 func finishAdminAudit(c *gin.Context, writer *auditResponseWriter) {
 	if writer == nil {
 		return
 	}
 	method := c.Request.Method
 
-	// handler 已手动记录更精细的审计日志，跳过兜底。
 	if common.GetContextKeyBool(c, constant.ContextKeyAuditLogged) {
 		return
 	}
@@ -148,14 +139,12 @@ func finishAdminAudit(c *gin.Context, writer *auditResponseWriter) {
 		routeParams[p.Key] = p.Value
 	}
 
-	// op.params 为语言无关参数，供前端 i18n 渲染；generic 时携带 method/route。
 	opParams := map[string]interface{}{}
 	if action == "generic" {
 		opParams["method"] = method
 		opParams["route"] = route
 	}
 
-	// content 为英文兜底文本（导出/经典前端用）。
 	content := method + " " + route
 
 	adminInfo := map[string]interface{}{
@@ -187,8 +176,7 @@ func auditAuthMethod(c *gin.Context) string {
 	return "session"
 }
 
-// auditResponseSuccess 依据 HTTP 状态码与响应体推断操作是否成功。
-// 优先解析响应 JSON 中的 success 字段；无法解析时退回到状态码判断。
+// auditResponseSuccess infers operation success from HTTP status and JSON success field.
 func auditResponseSuccess(status int, body []byte) bool {
 	if status >= 400 {
 		return false
@@ -203,4 +191,146 @@ func auditResponseSuccess(status int, body []byte) bool {
 		}
 	}
 	return status < 400
+}
+
+type requestResponseAuditWriter struct {
+	gin.ResponseWriter
+	capture *auditservice.CaptureBuffer
+}
+
+func (w *requestResponseAuditWriter) Write(data []byte) (int, error) {
+	w.capture.Write(data)
+	return w.ResponseWriter.Write(data)
+}
+
+func (w *requestResponseAuditWriter) WriteString(data string) (int, error) {
+	w.capture.Write(common.StringToByteSlice(data))
+	return w.ResponseWriter.WriteString(data)
+}
+
+func Audit() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		if !auditservice.Enabled() {
+			c.Next()
+			return
+		}
+
+		startedAt := time.Now()
+		responseCapture := auditservice.NewCaptureBuffer(auditservice.MaxBodyBytes())
+		originalWriter := c.Writer
+		c.Writer = &requestResponseAuditWriter{
+			ResponseWriter: originalWriter,
+			capture:        responseCapture,
+		}
+
+		c.Next()
+
+		requestBody := captureRequestBody(c, auditservice.MaxBodyBytes())
+		responseBody := responseCapture.Body(c.Writer.Header().Get("Content-Type"))
+		responseBody.StatusCode = c.Writer.Status()
+		modelInfo := auditModelInfo(c)
+
+		auditservice.ReportAsync(auditservice.Event{
+			Version:   auditservice.ProtocolVersion,
+			Event:     auditservice.EventRequestResponse,
+			RequestID: c.GetString(common.RequestIdKey),
+			Timestamp: time.Now(),
+			Node:      auditservice.NodeName(),
+			Route:     c.FullPath(),
+			User: auditservice.UserInfo{
+				ID: c.GetInt("id"),
+				Username: firstNonEmpty(
+					c.GetString("username"),
+					common.GetContextKeyString(c, constant.ContextKeyUserName),
+				),
+			},
+			Key: auditservice.KeyInfo{
+				ID:   c.GetInt("token_id"),
+				Name: c.GetString("token_name"),
+			},
+			Client: auditservice.ClientInfo{
+				IP:        c.ClientIP(),
+				Method:    c.Request.Method,
+				Path:      c.Request.URL.RequestURI(),
+				UserAgent: c.Request.UserAgent(),
+			},
+			Model:      modelInfo,
+			Billing:    auditservice.BillingInfoFromContext(c),
+			Request:    requestBody,
+			Response:   responseBody,
+			DurationMS: time.Since(startedAt).Milliseconds(),
+			Metadata:   auditMetadata(c),
+		})
+
+		c.Writer = originalWriter
+	}
+}
+
+func captureRequestBody(c *gin.Context, maxBodyBytes int64) auditservice.Body {
+	storage, err := common.GetBodyStorage(c)
+	if err != nil {
+		common.SysError("audit request body capture failed: " + err.Error())
+		return auditservice.Body{ContentType: c.Request.Header.Get("Content-Type")}
+	}
+
+	data, err := storage.Bytes()
+	if err != nil {
+		common.SysError("audit request body read failed: " + err.Error())
+		return auditservice.Body{ContentType: c.Request.Header.Get("Content-Type")}
+	}
+	if _, err := storage.Seek(0, io.SeekStart); err != nil {
+		common.SysError("audit request body rewind failed: " + err.Error())
+	}
+	c.Request.Body = io.NopCloser(storage)
+
+	return auditservice.BodyFromBytes(data, c.Request.Header.Get("Content-Type"), maxBodyBytes)
+}
+
+func auditModelInfo(c *gin.Context) auditservice.ModelInfo {
+	info := auditservice.ModelInfoFromContext(c)
+	if info.Name == "" {
+		info.Name = common.GetContextKeyString(c, constant.ContextKeyOriginalModel)
+	}
+	if info.OriginName == "" {
+		info.OriginName = common.GetContextKeyString(c, constant.ContextKeyOriginalModel)
+	}
+	return info
+}
+
+func auditMetadata(c *gin.Context) map[string]string {
+	metadata := make(map[string]string)
+	putString := func(key string, value string) {
+		if value != "" {
+			metadata[key] = value
+		}
+	}
+	putInt := func(key string, value int) {
+		if value != 0 {
+			metadata[key] = strconv.Itoa(value)
+		}
+	}
+
+	putString("model", common.GetContextKeyString(c, constant.ContextKeyOriginalModel))
+	putString("group", common.GetContextKeyString(c, constant.ContextKeyUsingGroup))
+	putString("token_group", common.GetContextKeyString(c, constant.ContextKeyTokenGroup))
+	putString("channel_name", common.GetContextKeyString(c, constant.ContextKeyChannelName))
+	if _, exists := common.GetContextKey(c, constant.ContextKeyIsStream); exists {
+		putString("is_stream", strconv.FormatBool(common.GetContextKeyBool(c, constant.ContextKeyIsStream)))
+	}
+	putInt("channel_id", common.GetContextKeyInt(c, constant.ContextKeyChannelId))
+	putInt("channel_type", common.GetContextKeyInt(c, constant.ContextKeyChannelType))
+
+	if len(metadata) == 0 {
+		return nil
+	}
+	return metadata
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if value != "" {
+			return value
+		}
+	}
+	return ""
 }
