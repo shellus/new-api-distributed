@@ -23,6 +23,7 @@ import (
 	"github.com/QuantumNous/new-api/relay"
 	"github.com/QuantumNous/new-api/router"
 	"github.com/QuantumNous/new-api/service"
+	auditservice "github.com/QuantumNous/new-api/service/audit"
 	_ "github.com/QuantumNous/new-api/setting/performance_setting"
 	"github.com/QuantumNous/new-api/setting/ratio_setting"
 
@@ -269,6 +270,7 @@ func InitResources() error {
 	common.InitEnv()
 
 	logger.SetupLogger()
+	auditservice.InitFromEnv()
 
 	// Initialize model settings
 	ratio_setting.InitRatioSettings()
