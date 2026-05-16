@@ -20,21 +20,26 @@ func (c Config) Enabled() bool {
 }
 
 type Event struct {
-	Version    string            `json:"version"`
-	Event      string            `json:"event"`
-	RequestID  string            `json:"request_id,omitempty"`
-	Timestamp  time.Time         `json:"timestamp"`
-	Node       string            `json:"node,omitempty"`
-	Route      string            `json:"route,omitempty"`
-	User       UserInfo          `json:"user"`
-	Key        KeyInfo           `json:"key"`
-	Client     ClientInfo        `json:"client"`
-	Model      ModelInfo         `json:"model,omitempty"`
-	Billing    BillingInfo       `json:"billing,omitempty"`
-	Request    Body              `json:"request"`
-	Response   Body              `json:"response"`
-	DurationMS int64             `json:"duration_ms"`
-	Metadata   map[string]string `json:"metadata,omitempty"`
+	Version      string            `json:"version"`
+	Event        string            `json:"event"`
+	RequestID    string            `json:"request_id,omitempty"`
+	Timestamp    time.Time         `json:"timestamp"`
+	Node         string            `json:"node,omitempty"`
+	Route        string            `json:"route,omitempty"`
+	User         UserInfo          `json:"user"`
+	Key          KeyInfo           `json:"key"`
+	Client       ClientInfo        `json:"client"`
+	Model        ModelInfo         `json:"model,omitempty"`
+	Billing      BillingInfo       `json:"billing,omitempty"`
+	Request      Body              `json:"request"`
+	Response     Body              `json:"response"`
+	DurationMS   int64             `json:"duration_ms"`
+	Conversation ConversationInfo  `json:"conversation,omitempty"`
+	Metadata     map[string]string `json:"metadata,omitempty"`
+}
+
+type ConversationInfo struct {
+	Candidates map[string]string `json:"candidates,omitempty"`
 }
 
 type UserInfo struct {
