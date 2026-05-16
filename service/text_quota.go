@@ -11,6 +11,7 @@ import (
 	"github.com/QuantumNous/new-api/logger"
 	"github.com/QuantumNous/new-api/model"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
+	auditservice "github.com/QuantumNous/new-api/service/audit"
 	"github.com/QuantumNous/new-api/setting/operation_setting"
 	"github.com/QuantumNous/new-api/types"
 
@@ -412,6 +413,41 @@ func PostTextConsumeQuota(ctx *gin.Context, relayInfo *relaycommon.RelayInfo, us
 		// prompt/cache fields here, otherwise old upstream payloads may be double-counted.
 		other["input_tokens_total"] = usage.InputTokens
 	}
+	auditservice.SetModelInfo(ctx, auditservice.ModelInfo{
+		Name:         summary.ModelName,
+		OriginName:   relayInfo.OriginModelName,
+		UpstreamName: relayInfo.UpstreamModelName,
+	})
+	auditservice.SetBillingInfo(ctx, auditservice.BillingInfo{
+		Quota:                 summary.Quota,
+		PromptTokens:          summary.PromptTokens,
+		CompletionTokens:      summary.CompletionTokens,
+		TotalTokens:           summary.TotalTokens,
+		CacheTokens:           summary.CacheTokens,
+		CacheCreationTokens:   summary.CacheCreationTokens,
+		CacheCreationTokens5m: summary.CacheCreationTokens5m,
+		CacheCreationTokens1h: summary.CacheCreationTokens1h,
+		ImageTokens:           summary.ImageTokens,
+		AudioTokens:           summary.AudioTokens,
+		UseTimeSeconds:        summary.UseTimeSeconds,
+		ModelRatio:            summary.ModelRatio,
+		GroupRatio:            summary.GroupRatio,
+		CompletionRatio:       summary.CompletionRatio,
+		CacheRatio:            summary.CacheRatio,
+		CacheCreationRatio:    summary.CacheCreationRatio,
+		CacheCreationRatio5m:  summary.CacheCreationRatio5m,
+		CacheCreationRatio1h:  summary.CacheCreationRatio1h,
+		ImageRatio:            summary.ImageRatio,
+		ModelPrice:            summary.ModelPrice,
+		UsePrice:              relayInfo.PriceData.UsePrice,
+		FreeModel:             relayInfo.PriceData.FreeModel,
+		QuotaToPreConsume:     relayInfo.PriceData.QuotaToPreConsume,
+		FinalPreConsumedQuota: relayInfo.FinalPreConsumedQuota,
+		QuotaPerUnit:          common.QuotaPerUnit,
+		UsageSemantic:         summary.UsageSemantic,
+		OtherRatios:           relayInfo.PriceData.OtherRatios,
+		Details:               other,
+	})
 
 	model.RecordConsumeLog(ctx, relayInfo.UserId, model.RecordConsumeLogParams{
 		ChannelId:        relayInfo.ChannelId,

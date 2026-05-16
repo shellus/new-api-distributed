@@ -19,6 +19,7 @@ import (
 	relayconstant "github.com/QuantumNous/new-api/relay/constant"
 	"github.com/QuantumNous/new-api/relay/helper"
 	"github.com/QuantumNous/new-api/service"
+	auditservice "github.com/QuantumNous/new-api/service/audit"
 	"github.com/gin-gonic/gin"
 )
 
@@ -248,6 +249,23 @@ func RelayTaskSubmit(c *gin.Context, info *relaycommon.RelayInfo) (*TaskSubmitRe
 		info.PriceData.OtherRatios = adjustedRatios
 		info.PriceData.Quota = finalQuota
 	}
+	auditservice.SetModelInfo(c, auditservice.ModelInfo{
+		Name:         modelName,
+		OriginName:   info.OriginModelName,
+		UpstreamName: info.UpstreamModelName,
+	})
+	auditservice.SetBillingInfo(c, auditservice.BillingInfo{
+		Quota:                 finalQuota,
+		ModelRatio:            info.PriceData.ModelRatio,
+		GroupRatio:            info.PriceData.GroupRatioInfo.GroupRatio,
+		ModelPrice:            info.PriceData.ModelPrice,
+		UsePrice:              info.PriceData.UsePrice,
+		FreeModel:             info.PriceData.FreeModel,
+		QuotaToPreConsume:     info.PriceData.QuotaToPreConsume,
+		FinalPreConsumedQuota: info.FinalPreConsumedQuota,
+		QuotaPerUnit:          common.QuotaPerUnit,
+		OtherRatios:           info.PriceData.OtherRatios,
+	})
 
 	return &TaskSubmitResult{
 		UpstreamTaskID: upstreamTaskID,
