@@ -2,13 +2,16 @@ package middleware
 
 import (
 	"io"
+	"regexp"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
 	auditservice "github.com/QuantumNous/new-api/service/audit"
 	"github.com/gin-gonic/gin"
+	"github.com/tidwall/gjson"
 )
 
 type auditResponseWriter struct {
@@ -72,12 +75,13 @@ func Audit() gin.HandlerFunc {
 				Path:      c.Request.URL.RequestURI(),
 				UserAgent: c.Request.UserAgent(),
 			},
-			Model:      modelInfo,
-			Billing:    auditservice.BillingInfoFromContext(c),
-			Request:    requestBody,
-			Response:   responseBody,
-			DurationMS: time.Since(startedAt).Milliseconds(),
-			Metadata:   auditMetadata(c),
+			Model:        modelInfo,
+			Billing:      auditservice.BillingInfoFromContext(c),
+			Request:      requestBody,
+			Response:     responseBody,
+			DurationMS:   time.Since(startedAt).Milliseconds(),
+			Conversation: auditConversation(c, requestBody, responseBody),
+			Metadata:     auditMetadata(c),
 		})
 
 		c.Writer = originalWriter
@@ -102,6 +106,80 @@ func captureRequestBody(c *gin.Context, maxBodyBytes int64) auditservice.Body {
 	c.Request.Body = io.NopCloser(storage)
 
 	return auditservice.BodyFromBytes(data, c.Request.Header.Get("Content-Type"), maxBodyBytes)
+}
+
+var auditSessionPattern = regexp.MustCompile(`_session_([A-Za-z0-9-]+)$`)
+
+func auditConversation(c *gin.Context, requestBody auditservice.Body, responseBody auditservice.Body) auditservice.ConversationInfo {
+	candidates := make(map[string]string)
+	put := func(key string, value string) {
+		if value != "" {
+			candidates[key] = value
+		}
+	}
+
+	put("header.session_id", c.GetHeader("Session_id"))
+	put("header.x_amp_thread_id", c.GetHeader("X-Amp-Thread-Id"))
+	put("header.x_session_id", c.GetHeader("X-Session-ID"))
+	put("header.x_client_request_id", c.GetHeader("X-Client-Request-Id"))
+
+	requestContent := requestBody.Content
+	put("body.conversation_id", gjson.Get(requestContent, "conversation_id").String())
+	put("body.session_id", gjson.Get(requestContent, "session_id").String())
+	put("body.previous_response_id", gjson.Get(requestContent, "previous_response_id").String())
+	put("body.prompt_cache_key", gjson.Get(requestContent, "prompt_cache_key").String())
+	put("body.metadata.conversation_id", gjson.Get(requestContent, "metadata.conversation_id").String())
+	put("body.metadata.session_id", gjson.Get(requestContent, "metadata.session_id").String())
+	userID := gjson.Get(requestContent, "metadata.user_id").String()
+	put("body.metadata.user_id", userID)
+	if matches := auditSessionPattern.FindStringSubmatch(userID); len(matches) >= 2 {
+		put("body.metadata.user_id_session", matches[1])
+	} else if len(userID) > 0 && userID[0] == '{' {
+		put("body.metadata.user_id_session", gjson.Get(userID, "session_id").String())
+	}
+
+	responseID, messageID := auditResponseIDs(responseBody.Content)
+	put("response.id", responseID)
+	put("response.message_id", messageID)
+
+	if len(candidates) == 0 {
+		return auditservice.ConversationInfo{}
+	}
+	return auditservice.ConversationInfo{Candidates: candidates}
+}
+
+func auditResponseIDs(content string) (string, string) {
+	if id := gjson.Get(content, "id").String(); id != "" {
+		return id, ""
+	}
+	if id := gjson.Get(content, "response.id").String(); id != "" {
+		return id, ""
+	}
+	if id := gjson.Get(content, "message.id").String(); id != "" {
+		return "", id
+	}
+
+	for _, line := range strings.Split(content, "\n") {
+		line = strings.TrimSpace(line)
+		if !strings.HasPrefix(line, "data:") {
+			continue
+		}
+		data := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
+		if data == "" || data == "[DONE]" {
+			continue
+		}
+		if id := gjson.Get(data, "response.id").String(); id != "" {
+			return id, ""
+		}
+		if id := gjson.Get(data, "id").String(); id != "" {
+			return id, ""
+		}
+		if id := gjson.Get(data, "message.id").String(); id != "" {
+			return "", id
+		}
+	}
+
+	return "", ""
 }
 
 func auditModelInfo(c *gin.Context) auditservice.ModelInfo {
