@@ -582,6 +582,14 @@ func detectImageMimeType(filename string) string {
 }
 
 func (a *Adaptor) ConvertOpenAIResponsesRequest(c *gin.Context, info *relaycommon.RelayInfo, request dto.OpenAIResponsesRequest) (any, error) {
+	if info != nil {
+		updatedInstructions, _, err := relaycommon.ApplyChannelSystemPromptToInstructions(info.ChannelSetting, request.Instructions)
+		if err != nil {
+			return nil, err
+		}
+		request.Instructions = updatedInstructions
+	}
+
 	//  转换模型推理力度后缀
 	effort, originModel := reasoning.ParseOpenAIReasoningEffortFromModelSuffix(request.Model)
 	if effort != "" {
