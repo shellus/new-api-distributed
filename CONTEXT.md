@@ -1,0 +1,67 @@
+# Distributed New API
+
+This context describes the trusted master/edge system that distributes New API request traffic while keeping business configuration and accounting authoritative at the master.
+
+## Nodes and execution
+
+**Master**:
+The authoritative node for users, tokens, business policy, quota allocation, settlement, and statistics. It is not a proxy for normal edge user requests.
+_Avoid_: Primary request gateway, shared database server
+
+**Edge**:
+A trusted data-plane node that authenticates and serves user requests from local snapshots and quota leases, then reports usage asynchronously.
+_Avoid_: Slave database replica, New API cluster worker
+
+**CPA**:
+The edge-local upstream execution engine that owns OAuth credentials, credential scheduling, retries, and provider execution.
+_Avoid_: Billing authority, public user gateway
+
+**Node Credential**:
+The identity material by which the master trusts one edge and accepts its signed declarations and reports.
+_Avoid_: User API key, CPA credential
+
+## Synchronized business state
+
+**Authentication Index**:
+The complete set of safe token fingerprints and minimal authorization facts needed for an edge to authenticate eligible users locally.
+_Avoid_: User database replica, plaintext token list
+
+**Business Snapshot**:
+A versioned projection of the user, group, model, channel, and pricing policy required by an edge to execute requests consistently with the master.
+_Avoid_: Database dump, runtime status
+
+**Edge Channel Projection**:
+The locally generated channel state derived from a master channel and the standard edge CPA service convention.
+_Avoid_: Manually maintained edge channel
+
+## Accounting
+
+**Quota Lease**:
+Quota reserved by the master for one trusted edge so that the edge can serve requests without consulting the master each time.
+_Avoid_: Copied balance, local wallet
+
+**Reservation**:
+A temporary local hold against a quota lease created before an edge sends one request to CPA.
+_Avoid_: Final charge, master lease
+
+**Usage Event**:
+The durable local accounting fact produced when one edge request finishes or fails.
+_Avoid_: Volatile metric, CPA usage callback
+
+**Settlement Block**:
+An ordered, idempotent batch of usage events submitted by an edge and acknowledged by the master.
+_Avoid_: Audit log upload, synchronous request charge
+
+**Outbox**:
+The durable edge-owned queue of usage events and settlement blocks that have not yet been acknowledged by the master.
+_Avoid_: In-memory usage queue
+
+## Addresses and configuration
+
+**Public Address**:
+The user-facing URL authoritatively declared by an authenticated edge and observed by the master for reachability and latency.
+_Avoid_: Master-approved URL, CPA address
+
+**CPA Internal Address**:
+The standard container-network address used by New API Edge to reach its local CPA service.
+_Avoid_: Public edge URL, per-node channel mapping

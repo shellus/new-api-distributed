@@ -41,6 +41,18 @@ web/             — Frontend themes container
   web/default/src/i18n/ — Frontend internationalization (i18next, zh/en/fr/ru/ja/vi)
 ```
 
+## Distributed Edge Development
+
+- Before changing distributed behavior, read `CONTEXT.md`, `docs/distributed-design-context.md`, the accepted ADRs under `docs/adr/`, `docs/distributed-architecture.md`, `docs/distributed-configuration.md`, and `docs/distributed-implementation-plan.md` in that order.
+- The default root entry remains the upstream-compatible master build. The edge runtime is an additional build entry in the same Go module.
+- Master and edge must reuse the same relay, protocol adapter, authentication context, billing expression, quota conversion, and billing-session packages. Do not copy these implementations into parallel edge packages.
+- Normal user requests on an edge node must not make synchronous master calls. Authentication uses the local signed token snapshot; master communication is limited to policy sync, lease acquisition, settlement upload, and heartbeat.
+- A request without a valid local lease must fail before reaching the local CPA when the master cannot grant a lease.
+- CPA remains the local upstream execution engine and must not be exposed as a public bypass around edge authentication and billing.
+- An authenticated edge node is authoritative for its advertised public URL. The master records the signed declaration without manual approval; active probes provide reachability and latency observations only.
+- The stable architecture overview is maintained in `docs/distributed-architecture.md`; the current implementation order and verification gates are maintained in `docs/distributed-implementation-plan.md`.
+- Changes that contradict an accepted distributed ADR require an explicit replacement ADR; implementation convenience alone is not sufficient reason to bypass a recorded decision.
+
 ## Internationalization (i18n)
 
 ### Backend (`i18n/`)
