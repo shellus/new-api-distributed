@@ -13,6 +13,9 @@ import (
 )
 
 func SetRouter(router *gin.Engine, assets ThemeAssets) {
+	if common.GetEnvOrDefaultBool("EDGE_DISTRIBUTED_ENABLED", false) {
+		SetEdgeControlRouter(router)
+	}
 	SetApiRouter(router)
 	SetDashboardRouter(router)
 	SetRelayRouter(router)

@@ -1,6 +1,7 @@
 package router
 
 import (
+	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/controller"
 	"github.com/QuantumNous/new-api/middleware"
 
@@ -229,6 +230,9 @@ func SetApiRouter(router *gin.Engine) {
 		}
 		registerChannelRoutes(apiRouter)
 		registerAuthzRoutes(apiRouter)
+		if common.GetEnvOrDefaultBool("EDGE_DISTRIBUTED_ENABLED", false) {
+			registerEdgeAdminRoutes(apiRouter)
+		}
 		tokenRoute := apiRouter.Group("/token")
 		tokenRoute.Use(middleware.UserAuth())
 		{

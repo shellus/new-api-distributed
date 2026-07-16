@@ -83,7 +83,11 @@ func isLegacyClaudeDerivedOpenAIUsage(relayInfo *relaycommon.RelayInfo, usage *d
 
 func calculateTextToolCallSurcharge(ctx *gin.Context, relayInfo *relaycommon.RelayInfo, summary *textQuotaSummary) decimal.Decimal {
 	dGroupRatio := decimal.NewFromFloat(summary.GroupRatio)
-	dQuotaPerUnit := decimal.NewFromFloat(common.QuotaPerUnit)
+	quotaPerUnit := common.QuotaPerUnit
+	if common.IsEdgeMode() && relayInfo.EdgePricingPolicy != nil {
+		quotaPerUnit = relayInfo.EdgePricingPolicy.QuotaPerUnit
+	}
+	dQuotaPerUnit := decimal.NewFromFloat(quotaPerUnit)
 
 	var surcharge decimal.Decimal
 
@@ -245,7 +249,11 @@ func calculateTextQuotaSummary(ctx *gin.Context, relayInfo *relaycommon.RelayInf
 	dCacheCreationRatio := decimal.NewFromFloat(summary.CacheCreationRatio)
 	dCacheCreationRatio5m := decimal.NewFromFloat(summary.CacheCreationRatio5m)
 	dCacheCreationRatio1h := decimal.NewFromFloat(summary.CacheCreationRatio1h)
-	dQuotaPerUnit := decimal.NewFromFloat(common.QuotaPerUnit)
+	quotaPerUnit := common.QuotaPerUnit
+	if common.IsEdgeMode() && relayInfo.EdgePricingPolicy != nil {
+		quotaPerUnit = relayInfo.EdgePricingPolicy.QuotaPerUnit
+	}
+	dQuotaPerUnit := decimal.NewFromFloat(quotaPerUnit)
 
 	ratio := dModelRatio.Mul(dGroupRatio)
 	summary.ToolCallSurchargeQuota = calculateTextToolCallSurcharge(ctx, relayInfo, &summary)
@@ -391,13 +399,36 @@ func PostTextConsumeQuota(ctx *gin.Context, relayInfo *relaycommon.RelayInfo, us
 	if summary.TotalTokens == 0 {
 		extraContent = append(extraContent, "上游没有返回计费信息，无法扣费（可能是上游超时）")
 		logger.LogError(ctx, fmt.Sprintf("total tokens is 0, cannot consume quota, userId %d, channelId %d, tokenId %d, model %s， pre-consumed quota %d", relayInfo.UserId, relayInfo.ChannelId, relayInfo.TokenId, summary.ModelName, relayInfo.FinalPreConsumedQuota))
-	} else {
+	} else if !common.IsEdgeMode() {
 		model.UpdateUserUsedQuotaAndRequestCount(relayInfo.UserId, summary.Quota)
 		model.UpdateChannelUsedQuota(relayInfo.ChannelId, summary.Quota)
 	}
 
+	if common.IsEdgeMode() {
+		if originUsage != nil && originUsage.BillingUsage != nil {
+			relayInfo.SettlementUsage = dto.CloneBillingUsage(originUsage.BillingUsage)
+		} else {
+			settlementUsage := billingUsage
+			if settlementUsage == nil {
+				settlementUsage = &dto.Usage{
+					PromptTokens:     summary.PromptTokens,
+					CompletionTokens: summary.CompletionTokens,
+					TotalTokens:      summary.TotalTokens,
+				}
+			}
+			if strings.HasPrefix(relayInfo.RequestURLPath, "/v1/responses") {
+				relayInfo.SettlementUsage = dto.NewOpenAIResponsesBillingUsage(settlementUsage)
+			} else {
+				relayInfo.SettlementUsage = dto.NewOpenAIChatBillingUsage(settlementUsage)
+			}
+		}
+	}
+
 	if err := SettleBilling(ctx, relayInfo, summary.Quota); err != nil {
 		logger.LogError(ctx, "error settling billing: "+err.Error())
+	}
+	if common.IsEdgeMode() {
+		return
 	}
 
 	logModel := summary.ModelName

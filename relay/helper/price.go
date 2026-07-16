@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/QuantumNous/new-api/common"
+	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/logger"
 	"github.com/QuantumNous/new-api/model"
 	"github.com/QuantumNous/new-api/pkg/billingexpr"
@@ -46,6 +47,18 @@ func HandleGroupRatio(ctx *gin.Context, relayInfo *relaycommon.RelayInfo) types.
 		GroupRatio:        1.0, // default ratio
 		GroupSpecialRatio: -1,
 	}
+	if common.IsEdgeMode() {
+		if ratio, ok := common.GetContextKeyType[float64](ctx, constant.ContextKeyEdgeGroupRatio); ok {
+			groupRatioInfo.GroupRatio = ratio
+			groupRatioInfo.GroupSpecialRatio = ratio
+			groupRatioInfo.HasSpecialRatio = true
+		} else {
+			// Missing signed group policy must fail closed. ModelPriceHelper returns
+			// a concrete error before relay; retries retain a zero ratio here.
+			groupRatioInfo.GroupRatio = 0
+		}
+		return groupRatioInfo
+	}
 
 	// check auto group
 	autoGroup, exists := ctx.Get("auto_group")
@@ -70,6 +83,9 @@ func HandleGroupRatio(ctx *gin.Context, relayInfo *relaycommon.RelayInfo) types.
 }
 
 func ModelPriceHelper(c *gin.Context, info *relaycommon.RelayInfo, promptTokens int, meta *types.TokenCountMeta) (types.PriceData, error) {
+	if common.IsEdgeMode() {
+		return edgeModelPriceHelper(c, info, promptTokens, meta)
+	}
 	modelPrice, usePrice := ratio_setting.GetModelPrice(info.OriginModelName, false)
 
 	groupRatioInfo := HandleGroupRatio(c, info)

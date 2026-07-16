@@ -9,8 +9,8 @@ type BillingSettler interface {
 	// 同时调整资金来源（钱包/订阅）和令牌额度。
 	Settle(actualQuota int) error
 
-	// Refund 退还所有预扣费额度（资金来源 + 令牌），幂等安全。
-	// 通过 gopool 异步执行。如果已经结算或退款则不做任何操作。
+	// Refund 同步退还所有预扣费额度（资金来源 + 令牌）。如果已经结算、
+	// 已完成退款或当前正在退款则不做任何操作；仅幂等失败项可保留待补偿状态。
 	Refund(c *gin.Context)
 
 	// NeedsRefund 返回会话是否存在需要退还的预扣状态（未结算且未退款）。

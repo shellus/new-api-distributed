@@ -1391,10 +1391,40 @@ func RefundSubscriptionPreConsume(requestId string) error {
 			record.Status = "refunded"
 			return tx.Save(&record).Error
 		}
-		if err := PostConsumeUserSubscriptionDelta(record.UserSubscriptionId, -record.PreConsumed); err != nil {
+		if err := postConsumeUserSubscriptionDeltaTx(tx, record.UserSubscriptionId, -record.PreConsumed); err != nil {
 			return err
 		}
 		record.Status = "refunded"
+		return tx.Save(&record).Error
+	})
+}
+
+// AdjustSubscriptionPreConsume atomically changes both the subscription hold
+// and its request-scoped idempotency record. Positive deltas extend a hold;
+// negative deltas are only used to roll back an extension before settlement.
+func AdjustSubscriptionPreConsume(requestId string, delta int64) error {
+	requestId = strings.TrimSpace(requestId)
+	if requestId == "" {
+		return errors.New("requestId is empty")
+	}
+	if delta == 0 {
+		return nil
+	}
+	return DB.Transaction(func(tx *gorm.DB) error {
+		var record SubscriptionPreConsumeRecord
+		if err := lockForUpdate(tx).Where("request_id = ?", requestId).First(&record).Error; err != nil {
+			return err
+		}
+		if record.Status != "consumed" {
+			return errors.New("subscription pre-consume is not active")
+		}
+		if delta < 0 && record.PreConsumed < -delta {
+			return errors.New("subscription pre-consume rollback exceeds reserved quota")
+		}
+		if err := postConsumeUserSubscriptionDeltaTx(tx, record.UserSubscriptionId, delta); err != nil {
+			return err
+		}
+		record.PreConsumed += delta
 		return tx.Save(&record).Error
 	})
 }
@@ -1490,20 +1520,33 @@ func PostConsumeUserSubscriptionDelta(userSubscriptionId int, delta int64) error
 		return nil
 	}
 	return DB.Transaction(func(tx *gorm.DB) error {
-		var sub UserSubscription
-		if err := lockForUpdate(tx).
-			Where("id = ?", userSubscriptionId).
-			First(&sub).Error; err != nil {
-			return err
-		}
-		newUsed := sub.AmountUsed + delta
-		if newUsed < 0 {
-			newUsed = 0
-		}
-		if sub.AmountTotal > 0 && newUsed > sub.AmountTotal {
-			return fmt.Errorf("subscription used exceeds total, used=%d total=%d", newUsed, sub.AmountTotal)
-		}
-		sub.AmountUsed = newUsed
-		return tx.Save(&sub).Error
+		return postConsumeUserSubscriptionDeltaTx(tx, userSubscriptionId, delta)
 	})
+}
+
+func postConsumeUserSubscriptionDeltaTx(tx *gorm.DB, userSubscriptionId int, delta int64) error {
+	if tx == nil {
+		return errors.New("database is nil")
+	}
+	if userSubscriptionId <= 0 {
+		return errors.New("invalid userSubscriptionId")
+	}
+	if delta == 0 {
+		return nil
+	}
+	var sub UserSubscription
+	if err := lockForUpdate(tx).
+		Where("id = ?", userSubscriptionId).
+		First(&sub).Error; err != nil {
+		return err
+	}
+	newUsed := sub.AmountUsed + delta
+	if newUsed < 0 {
+		return fmt.Errorf("subscription used cannot become negative, used=%d delta=%d", sub.AmountUsed, delta)
+	}
+	if sub.AmountTotal > 0 && newUsed > sub.AmountTotal {
+		return fmt.Errorf("subscription used exceeds total, used=%d total=%d", newUsed, sub.AmountTotal)
+	}
+	sub.AmountUsed = newUsed
+	return tx.Save(&sub).Error
 }

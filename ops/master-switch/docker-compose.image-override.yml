@@ -1,0 +1,6 @@
+services:
+  new-api:
+    image: ${TARGET_APP_IMAGE:?TARGET_APP_IMAGE is required}
+    build: !reset null
+    environment:
+      EDGE_DISTRIBUTED_ENABLED: ${TARGET_DISTRIBUTED_ENABLED:-false}

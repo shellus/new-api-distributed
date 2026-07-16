@@ -1,6 +1,7 @@
 package common
 
 import (
+	"context"
 	"sync/atomic"
 	"time"
 
@@ -35,18 +36,37 @@ func init() {
 
 // StartSystemMonitor 启动系统监控
 func StartSystemMonitor() {
-	go func() {
-		for {
-			config := GetPerformanceMonitorConfig()
-			if !config.Enabled {
-				time.Sleep(30 * time.Second)
-				continue
-			}
+	go RunSystemMonitor(context.Background())
+}
 
-			updateSystemStatus()
-			time.Sleep(5 * time.Second)
+// RunSystemMonitor runs until ctx is cancelled. Application runtimes that own
+// an orderly shutdown should use this entry and join the goroutine before
+// releasing process resources.
+func RunSystemMonitor(ctx context.Context) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		default:
 		}
-	}()
+
+		interval := 30 * time.Second
+		if GetPerformanceMonitorConfig().Enabled {
+			updateSystemStatus()
+			interval = 5 * time.Second
+		}
+
+		timer := time.NewTimer(interval)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return
+		case <-timer.C:
+		}
+	}
 }
 
 func updateSystemStatus() {

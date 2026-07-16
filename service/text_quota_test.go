@@ -740,3 +740,31 @@ func TestCalculateTextQuotaSummaryFixedPriceAppliesImageCountOnceAndAllowsOverri
 	summary = calculateTextQuotaSummary(ctx, relayInfo, usage)
 	require.Equal(t, 120000, summary.Quota)
 }
+
+func TestCalculateTextQuotaSummaryUsesPinnedEdgeQuotaUnit(t *testing.T) {
+	require.NoError(t, common.SetRuntimeMode(common.RuntimeModeEdge))
+	t.Cleanup(func() {
+		require.NoError(t, common.SetRuntimeMode(common.RuntimeModeMaster))
+	})
+	gin.SetMode(gin.TestMode)
+	ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
+	price := 0.5
+	relayInfo := &relaycommon.RelayInfo{
+		OriginModelName: "gpt-edge-fixed",
+		PriceData: types.PriceData{
+			ModelPrice: price,
+			UsePrice:   true,
+			GroupRatioInfo: types.GroupRatioInfo{
+				GroupRatio: 1,
+			},
+		},
+		EdgePricingPolicy: &dto.EdgePricingPolicyV1{
+			PolicyID: "edge-fixed", Version: "v1", Model: "gpt-edge-fixed",
+			BillingMode: dto.EdgeBillingModeFixedPriceV1, ModelPrice: &price, QuotaPerUnit: 100,
+		},
+		StartTime: time.Now(),
+	}
+
+	summary := calculateTextQuotaSummary(ctx, relayInfo, &dto.Usage{PromptTokens: 1, TotalTokens: 1})
+	require.Equal(t, 50, summary.Quota)
+}

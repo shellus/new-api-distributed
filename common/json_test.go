@@ -1,6 +1,7 @@
 package common
 
 import (
+	"bytes"
 	"encoding/json"
 	"testing"
 
@@ -40,4 +41,17 @@ func TestJsonRawMessageToString(t *testing.T) {
 			require.Equal(t, tt.want, JsonRawMessageToString(tt.data))
 		})
 	}
+}
+
+func TestDecodeJsonStrictRejectsUnknownAndTrailingValues(t *testing.T) {
+	type payload struct {
+		Name string `json:"name"`
+	}
+
+	var decoded payload
+	require.NoError(t, DecodeJsonStrict(bytes.NewBufferString(`{"name":"edge"}`), &decoded))
+	require.Equal(t, "edge", decoded.Name)
+
+	require.Error(t, DecodeJsonStrict(bytes.NewBufferString(`{"name":"edge","secret":"no"}`), &decoded))
+	require.Error(t, DecodeJsonStrict(bytes.NewBufferString(`{"name":"edge"} {"name":"second"}`), &decoded))
 }

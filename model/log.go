@@ -77,7 +77,12 @@ type Log struct {
 	Ip                string `json:"ip" gorm:"index;default:''"`
 	RequestId         string `json:"request_id,omitempty" gorm:"type:varchar(64);index:idx_logs_request_id;default:''"`
 	UpstreamRequestId string `json:"upstream_request_id,omitempty" gorm:"type:varchar(128);index:idx_logs_upstream_request_id;default:''"`
-	Other             string `json:"other"`
+	// BillingEventKey is set only for consume logs materialized from an edge
+	// settlement event. A nullable unique key lets the master retry the durable
+	// outbox without duplicating the official consume log while ordinary logs
+	// continue to store NULL here.
+	BillingEventKey *string `json:"-" gorm:"type:varchar(64);uniqueIndex:ux_logs_billing_event_key"`
+	Other           string  `json:"other"`
 }
 
 // don't use iota, avoid change log type value

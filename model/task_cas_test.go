@@ -49,11 +49,28 @@ func TestMain(m *testing.M) {
 		&SubscriptionPlan{},
 		&SubscriptionOrder{},
 		&UserSubscription{},
+		&SubscriptionPreConsumeRecord{},
 		&UserOAuthBinding{},
 		&PerfMetric{},
 		&SystemInstance{},
 		&SystemTask{},
 		&SystemTaskLock{},
+		&EdgeNode{},
+		&EdgeNodeCredential{},
+		&EdgeRequestReceipt{},
+		&EdgeRequestNonceClaim{},
+		&EdgePolicySnapshot{},
+		&EdgeNodeHeartbeat{},
+		&EdgeCompiledSnapshot{},
+		&EdgeCompiledSnapshotDataset{},
+		&EdgeCompiledSnapshotPage{},
+		&EdgeQuotaLease{},
+		&EdgeLeaseFunding{},
+		&EdgeSettlementBlock{},
+		&EdgeUsageEvent{},
+		&EdgeConsumeLogOutbox{},
+		&EdgeQuotaDataEvent{},
+		&EdgeQuotaDataBucket{},
 	); err != nil {
 		panic("failed to migrate: " + err.Error())
 	}
@@ -77,12 +94,29 @@ func truncateTables(t *testing.T) {
 		DB.Exec("DELETE FROM abilities")
 		DB.Exec("DELETE FROM top_ups")
 		DB.Exec("DELETE FROM subscription_orders")
+		DB.Exec("DELETE FROM subscription_pre_consume_records")
 		DB.Exec("DELETE FROM subscription_plans")
 		DB.Exec("DELETE FROM user_subscriptions")
 		DB.Exec("DELETE FROM perf_metrics")
 		DB.Exec("DELETE FROM system_instances")
 		DB.Exec("DELETE FROM system_task_locks")
 		DB.Exec("DELETE FROM system_tasks")
+		DB.Exec("DELETE FROM edge_request_nonce_claims")
+		DB.Exec("DELETE FROM edge_request_receipts")
+		DB.Exec("DELETE FROM edge_node_credentials")
+		DB.Exec("DELETE FROM edge_policy_snapshots")
+		DB.Exec("DELETE FROM edge_node_heartbeats")
+		DB.Exec("DELETE FROM edge_consume_log_outboxes")
+		DB.Exec("DELETE FROM edge_quota_data_events")
+		DB.Exec("DELETE FROM edge_quota_data_buckets")
+		DB.Exec("DELETE FROM edge_usage_events")
+		DB.Exec("DELETE FROM edge_settlement_blocks")
+		DB.Exec("DELETE FROM edge_lease_fundings")
+		DB.Exec("DELETE FROM edge_quota_leases")
+		DB.Exec("DELETE FROM edge_compiled_snapshot_pages")
+		DB.Exec("DELETE FROM edge_compiled_snapshot_datasets")
+		DB.Exec("DELETE FROM edge_compiled_snapshots")
+		DB.Exec("DELETE FROM edge_nodes")
 	})
 }
 

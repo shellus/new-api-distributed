@@ -9,12 +9,20 @@ import (
 	"gorm.io/gorm"
 )
 
+const (
+	quotaDataModelNameMaxLength         = 256
+	quotaDataModelNameIndexPrefixLength = 120
+)
+
 // QuotaData 柱状图数据
 type QuotaData struct {
-	Id        int    `json:"id"`
-	UserID    int    `json:"user_id" gorm:"index"`
-	Username  string `json:"username" gorm:"index:idx_qdt_model_user_name,priority:2;size:64;default:''"`
-	ModelName string `json:"model_name" gorm:"index:idx_qdt_model_user_name,priority:1;size:64;default:''"`
+	Id       int    `json:"id"`
+	UserID   int    `json:"user_id" gorm:"index"`
+	Username string `json:"username" gorm:"index:idx_qdt_model_user_name,priority:2;size:64;default:''"`
+	// Edge usage accepts model names up to 256 bytes. MySQL indexes only the
+	// first 120 characters so this composite index remains below the legacy
+	// 767-byte InnoDB limit even with utf8mb4 and the 64-character username.
+	ModelName string `json:"model_name" gorm:"index:idx_qdt_model_user_name,priority:1,length:120;size:256;default:''"`
 	CreatedAt int64  `json:"created_at" gorm:"bigint;index:idx_qdt_created_at,priority:2"`
 	UseGroup  string `json:"use_group" gorm:"index;size:64;default:''"`
 	TokenID   int    `json:"token_id" gorm:"index;default:0"`

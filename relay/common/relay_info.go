@@ -172,6 +172,20 @@ type RelayInfo struct {
 	// captured at pre-consume time. Non-nil only when billing mode is "tiered_expr".
 	TieredBillingSnapshot *billingexpr.BillingSnapshot
 	BillingRequestInput   *billingexpr.RequestInput
+	// SettlementUsage is the canonical usage payload handed to a distributed
+	// funding source before BillingSession settles. Master wallet/subscription
+	// funding ignores it; edge lease funding persists it with the reservation
+	// and durable usage outbox in the same local transaction.
+	SettlementUsage *dto.BillingUsage
+	// EdgePricingPolicy pins the signed pricing projection used for both local
+	// quota calculation and authoritative settlement verification.
+	EdgePricingPolicy *dto.EdgePricingPolicyV1
+	// EdgeLeaseSnapshot* pins the immutable snapshot carried by the local lease.
+	// Edge retry selection must still match these values before it may read a
+	// replacement channel from the mutable edge-local runtime projection.
+	EdgeLeaseSnapshotID       string
+	EdgeLeaseSnapshotRevision int64
+	EdgeLeasePricingRevision  int64
 
 	Request dto.Request
 

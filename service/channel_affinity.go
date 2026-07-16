@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/QuantumNous/new-api/common"
@@ -38,7 +39,60 @@ var (
 	channelAffinityUsageCacheStatsCache *cachex.HybridCache[ChannelAffinityUsageCacheCounters]
 
 	channelAffinityRegexCache sync.Map // map[string]*regexp.Regexp
+	edgeChannelAffinityPolicy atomic.Pointer[operation_setting.ChannelAffinitySetting]
 )
+
+func effectiveChannelAffinitySetting() *operation_setting.ChannelAffinitySetting {
+	if common.IsEdgeMode() {
+		if setting := edgeChannelAffinityPolicy.Load(); setting != nil {
+			return setting
+		}
+		return &operation_setting.ChannelAffinitySetting{}
+	}
+	return operation_setting.GetChannelAffinitySetting()
+}
+
+// SetEdgeChannelAffinityPolicy installs the typed routing projection after a
+// snapshot has been verified and atomically applied. The converted structure
+// is immutable after publication, so concurrent relay requests never observe
+// a partially updated rule set.
+func SetEdgeChannelAffinityPolicy(policy dto.EdgeChannelAffinityPolicyV1) error {
+	if err := policy.Validate(); err != nil {
+		return err
+	}
+	setting := &operation_setting.ChannelAffinitySetting{
+		Enabled: policy.Enabled, SwitchOnSuccess: policy.SwitchOnSuccess,
+		KeepOnChannelDisabled: policy.KeepOnChannelDisabled, MaxEntries: policy.MaxEntries,
+		DefaultTTLSeconds: int(policy.DefaultTTLSeconds),
+		Rules:             make([]operation_setting.ChannelAffinityRule, 0, len(policy.Rules)),
+	}
+	for _, projected := range policy.Rules {
+		rule := operation_setting.ChannelAffinityRule{
+			Name: projected.Name, ModelRegex: append([]string(nil), projected.ModelRegex...),
+			PathRegex: append([]string(nil), projected.PathRegex...), UserAgentInclude: append([]string(nil), projected.UserAgentInclude...),
+			ValueRegex: projected.ValueRegex, TTLSeconds: int(projected.TTLSeconds),
+			SkipRetryOnFailure: projected.SkipRetry, IncludeUsingGroup: projected.IncludeUsingGroup,
+			IncludeModelName: projected.IncludeModelName, IncludeRuleName: projected.IncludeRuleName,
+			KeySources: make([]operation_setting.ChannelAffinityKeySource, 0, len(projected.KeySources)),
+		}
+		for _, source := range projected.KeySources {
+			rule.KeySources = append(rule.KeySources, operation_setting.ChannelAffinityKeySource{
+				Type: string(source.Type), Key: source.Key, Path: source.Path,
+			})
+		}
+		if len(projected.PassHeaders) > 0 {
+			rule.ParamOverrideTemplate = map[string]interface{}{
+				"operations": []map[string]interface{}{{
+					"mode": "pass_headers", "value": append([]string(nil), projected.PassHeaders...), "keep_origin": projected.KeepOrigin,
+				}},
+			}
+		}
+		setting.Rules = append(setting.Rules, rule)
+	}
+	edgeChannelAffinityPolicy.Store(setting)
+	ClearChannelAffinityCacheAll()
+	return nil
+}
 
 type channelAffinityMeta struct {
 	CacheKey       string
@@ -80,7 +134,7 @@ type ChannelAffinityCacheStats struct {
 
 func getChannelAffinityCache() *cachex.HybridCache[int] {
 	channelAffinityCacheOnce.Do(func() {
-		setting := operation_setting.GetChannelAffinitySetting()
+		setting := effectiveChannelAffinitySetting()
 		capacity := setting.MaxEntries
 		if capacity <= 0 {
 			capacity = 100_000
@@ -109,7 +163,7 @@ func getChannelAffinityCache() *cachex.HybridCache[int] {
 }
 
 func GetChannelAffinityCacheStats() ChannelAffinityCacheStats {
-	setting := operation_setting.GetChannelAffinitySetting()
+	setting := effectiveChannelAffinitySetting()
 	if setting == nil {
 		return ChannelAffinityCacheStats{
 			Enabled:    false,
@@ -216,7 +270,7 @@ func ClearChannelAffinityCacheByRuleName(ruleName string) (int, error) {
 		return 0, fmt.Errorf("rule_name 不能为空")
 	}
 
-	setting := operation_setting.GetChannelAffinitySetting()
+	setting := effectiveChannelAffinitySetting()
 	if setting == nil {
 		return 0, fmt.Errorf("channel_affinity_setting 未初始化")
 	}
@@ -548,7 +602,7 @@ func ApplyChannelAffinityOverrideTemplate(c *gin.Context, paramOverride map[stri
 }
 
 func GetPreferredChannelByAffinity(c *gin.Context, modelName string, usingGroup string) (int, bool) {
-	setting := operation_setting.GetChannelAffinitySetting()
+	setting := effectiveChannelAffinitySetting()
 	if setting == nil || !setting.Enabled {
 		return 0, false
 	}
@@ -666,7 +720,7 @@ func ClearCurrentChannelAffinityCache(c *gin.Context) bool {
 }
 
 func ShouldKeepChannelAffinityOnChannelDisabled() bool {
-	setting := operation_setting.GetChannelAffinitySetting()
+	setting := effectiveChannelAffinitySetting()
 	if setting == nil {
 		return false
 	}
@@ -714,7 +768,7 @@ func RecordChannelAffinity(c *gin.Context, channelID int) {
 	if channelID <= 0 {
 		return
 	}
-	setting := operation_setting.GetChannelAffinitySetting()
+	setting := effectiveChannelAffinitySetting()
 	if setting == nil || !setting.Enabled {
 		return
 	}
@@ -965,7 +1019,7 @@ func usageTotalTokens(usage *dto.Usage) int {
 
 func getChannelAffinityUsageCacheStatsCache() *cachex.HybridCache[ChannelAffinityUsageCacheCounters] {
 	channelAffinityUsageCacheStatsOnce.Do(func() {
-		setting := operation_setting.GetChannelAffinitySetting()
+		setting := effectiveChannelAffinitySetting()
 		capacity := 100_000
 		defaultTTLSeconds := 3600
 		if setting != nil {

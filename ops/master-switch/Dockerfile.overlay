@@ -1,0 +1,4 @@
+ARG ORIGINAL_IMAGE=newapi-master-switch:original
+FROM ${ORIGINAL_IMAGE}
+
+COPY ops/master-switch/.build/new-api /new-api

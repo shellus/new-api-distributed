@@ -21,6 +21,7 @@ import (
 	relayconstant "github.com/QuantumNous/new-api/relay/constant"
 	"github.com/QuantumNous/new-api/relay/helper"
 	"github.com/QuantumNous/new-api/service"
+	edgeservice "github.com/QuantumNous/new-api/service/edge"
 	"github.com/QuantumNous/new-api/setting"
 	"github.com/QuantumNous/new-api/setting/operation_setting"
 	"github.com/QuantumNous/new-api/types"
@@ -158,7 +159,7 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 
 	// common.SetContextKey(c, constant.ContextKeyTokenCountMeta, meta)
 
-	if priceData.FreeModel {
+	if priceData.FreeModel && !common.IsEdgeMode() {
 		logger.LogInfo(c, fmt.Sprintf("模型 %s 免费，跳过预扣费", relayInfo.OriginModelName))
 	} else {
 		newAPIError = service.PreConsumeBilling(c, priceData.QuotaToPreConsume, relayInfo)
@@ -304,6 +305,26 @@ func getChannel(c *gin.Context, info *relaycommon.RelayInfo, retryParam *service
 			AutoBan: &autoBanInt,
 		}, nil
 	}
+	if common.IsEdgeMode() {
+		var channel *model.Channel
+		var channelErr *types.NewAPIError
+		if err := edgeservice.WithEdgeDataPlanePolicyRead(func() error {
+			if err := validateEdgeRetrySnapshot(info); err != nil {
+				return err
+			}
+			channel, channelErr = getRetryChannel(c, info, retryParam)
+			return nil
+		}); err != nil {
+			return nil, types.NewErrorWithStatusCode(
+				err, types.ErrorCodeGetChannelFailed, http.StatusServiceUnavailable, types.ErrOptionWithSkipRetry(),
+			)
+		}
+		return channel, channelErr
+	}
+	return getRetryChannel(c, info, retryParam)
+}
+
+func getRetryChannel(c *gin.Context, info *relaycommon.RelayInfo, retryParam *service.RetryParam) (*model.Channel, *types.NewAPIError) {
 	channel, selectGroup, err := service.CacheGetRandomSatisfiedChannel(retryParam)
 
 	info.PriceData.GroupRatioInfo = helper.HandleGroupRatio(c, info)
@@ -320,6 +341,40 @@ func getChannel(c *gin.Context, info *relaycommon.RelayInfo, retryParam *service
 		return nil, newAPIError
 	}
 	return channel, nil
+}
+
+func validateEdgeRetrySnapshot(info *relaycommon.RelayInfo) error {
+	if info == nil || info.EdgeLeaseSnapshotID == "" || info.EdgeLeaseSnapshotRevision <= 0 || info.EdgeLeasePricingRevision <= 0 {
+		return errors.New("edge retry has no pinned lease snapshot")
+	}
+	if model.DB == nil {
+		return errors.New("edge policy is not ready for retry")
+	}
+	expiresAt, err := model.GetEdgeLocalSnapshotExpiry(model.DB)
+	if err != nil {
+		return fmt.Errorf("load edge retry snapshot expiry: %w", err)
+	}
+	if expiresAt <= time.Now().UnixMilli() {
+		return errors.New("edge policy expired while the request was in flight; retry is denied")
+	}
+	state, err := model.GetEdgeLocalSnapshotState(model.DB)
+	if err != nil {
+		return fmt.Errorf("load edge retry snapshot: %w", err)
+	}
+	if state.SnapshotID != info.EdgeLeaseSnapshotID || state.Revision != info.EdgeLeaseSnapshotRevision {
+		return errors.New("edge policy changed while the request was in flight; cross-snapshot retry is denied")
+	}
+	pricingRevision := int64(0)
+	for _, dataset := range state.Datasets {
+		if dataset.Dataset == dto.EdgeSnapshotDatasetPricingV1 {
+			pricingRevision = dataset.Revision
+			break
+		}
+	}
+	if pricingRevision != info.EdgeLeasePricingRevision {
+		return errors.New("edge pricing changed while the request was in flight; cross-snapshot retry is denied")
+	}
+	return nil
 }
 
 func shouldRetry(c *gin.Context, openaiErr *types.NewAPIError, retryTimes int) bool {

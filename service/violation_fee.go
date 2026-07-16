@@ -105,6 +105,12 @@ func ChargeViolationFeeIfNeeded(ctx *gin.Context, relayInfo *relaycommon.RelayIn
 	if ctx == nil || relayInfo == nil || apiErr == nil {
 		return false
 	}
+	// Edge control v1 does not project violation-fee policy. Charging from the
+	// process defaults would diverge from the frozen snapshot and bypass the
+	// local lease usage-event transaction.
+	if common.IsEdgeMode() {
+		return false
+	}
 	//if relayInfo.IsPlayground {
 	//	return false
 	//}

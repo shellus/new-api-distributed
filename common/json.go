@@ -3,6 +3,7 @@ package common
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"io"
 )
 
@@ -16,6 +17,25 @@ func UnmarshalJsonStr(data string, v any) error {
 
 func DecodeJson(reader io.Reader, v any) error {
 	return json.NewDecoder(reader).Decode(v)
+}
+
+// DecodeJsonStrict decodes exactly one JSON value and rejects unknown object
+// fields or trailing JSON values. Control-plane DTOs use it to keep signed
+// protocol payloads versioned and fail closed when a peer sends new fields.
+func DecodeJsonStrict(reader io.Reader, v any) error {
+	decoder := json.NewDecoder(reader)
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(v); err != nil {
+		return err
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); err != io.EOF {
+		if err == nil {
+			return errors.New("multiple JSON values are not allowed")
+		}
+		return err
+	}
+	return nil
 }
 
 func Marshal(v any) ([]byte, error) {

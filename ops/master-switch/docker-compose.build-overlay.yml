@@ -1,0 +1,8 @@
+services:
+  master-build:
+    image: ${MASTER_IMAGE:?MASTER_IMAGE is required}
+    build:
+      context: ../..
+      dockerfile: ops/master-switch/Dockerfile.overlay
+      args:
+        ORIGINAL_IMAGE: ${ORIGINAL_IMAGE:?ORIGINAL_IMAGE is required}

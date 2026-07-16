@@ -2,8 +2,9 @@ package service
 
 import (
 	"fmt"
-	"net/http"
+	"sync"
 
+	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/logger"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	"github.com/QuantumNous/new-api/types"
@@ -13,30 +14,55 @@ import (
 const (
 	BillingSourceWallet       = "wallet"
 	BillingSourceSubscription = "subscription"
+	BillingSourceEdgeLease    = "edge_lease"
 )
+
+type EdgeBillingSessionFactory func(c *gin.Context, preConsumedQuota int, relayInfo *relaycommon.RelayInfo) (*BillingSession, *types.NewAPIError)
+
+var (
+	edgeBillingSessionFactoryMu sync.RWMutex
+	edgeBillingSessionFactory   EdgeBillingSessionFactory
+)
+
+// SetEdgeBillingSessionFactory installs the edge-local lease funding adapter.
+// The application sets it once before the edge HTTP server accepts requests.
+func SetEdgeBillingSessionFactory(factory EdgeBillingSessionFactory) {
+	edgeBillingSessionFactoryMu.Lock()
+	edgeBillingSessionFactory = factory
+	edgeBillingSessionFactoryMu.Unlock()
+}
 
 // PreConsumeBilling 根据用户计费偏好创建 BillingSession 并执行预扣费。
 // 会话存储在 relayInfo.Billing 上，供后续 Settle / Refund 使用。
 func PreConsumeBilling(c *gin.Context, preConsumedQuota int, relayInfo *relaycommon.RelayInfo) *types.NewAPIError {
-	if relayInfo != nil && relayInfo.QuotaClamp != nil {
-		return types.NewErrorWithStatusCode(
-			relayInfo.QuotaClamp,
-			types.ErrorCodeModelPriceError,
-			http.StatusBadRequest,
-			types.ErrOptionWithSkipRetry(),
-		)
+	if relayInfo == nil {
+		return types.NewError(fmt.Errorf("relayInfo is nil"), types.ErrorCodeInvalidRequest, types.ErrOptionWithSkipRetry())
 	}
-	if preConsumedQuota < 0 {
-		return types.NewErrorWithStatusCode(
-			fmt.Errorf("pre-consume quota cannot be negative: %d", preConsumedQuota),
-			types.ErrorCodeModelPriceError,
-			http.StatusBadRequest,
-			types.ErrOptionWithSkipRetry(),
-		)
+	var session *BillingSession
+	var apiErr *types.NewAPIError
+	if common.IsEdgeMode() {
+		edgeBillingSessionFactoryMu.RLock()
+		factory := edgeBillingSessionFactory
+		edgeBillingSessionFactoryMu.RUnlock()
+		if factory == nil {
+			return types.NewError(fmt.Errorf("edge billing session factory is not initialized"), types.ErrorCodeUpdateDataError, types.ErrOptionWithSkipRetry())
+		}
+		session, apiErr = factory(c, preConsumedQuota, relayInfo)
+	} else {
+		session, apiErr = NewBillingSession(c, relayInfo, preConsumedQuota)
 	}
-	session, apiErr := NewBillingSession(c, relayInfo, preConsumedQuota)
 	if apiErr != nil {
+		if session != nil {
+			relayInfo.Billing = session
+			session.Refund(c)
+			if session.NeedsRefund() {
+				logger.LogError(c, "计费预扣补偿失败，仍有待退款 reservation")
+			}
+		}
 		return apiErr
+	}
+	if session == nil {
+		return types.NewError(fmt.Errorf("billing session factory returned no session"), types.ErrorCodeUpdateDataError, types.ErrOptionWithSkipRetry())
 	}
 	relayInfo.Billing = session
 	return nil
@@ -76,7 +102,10 @@ func SettleBilling(ctx *gin.Context, relayInfo *relaycommon.RelayInfo, actualQuo
 		}
 
 		// 发送额度通知（订阅计费使用订阅剩余额度）
-		if actualQuota != 0 {
+		// Edge settlement is backed by a local lease and the master remains the
+		// authoritative notification sender. Sending wallet/subscription alerts
+		// from an edge would use snapshot balances and could notify twice.
+		if actualQuota != 0 && relayInfo.BillingSource != BillingSourceEdgeLease {
 			if relayInfo.BillingSource == BillingSourceSubscription {
 				checkAndSendSubscriptionQuotaNotify(relayInfo)
 			} else {

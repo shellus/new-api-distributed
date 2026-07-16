@@ -66,6 +66,12 @@ const (
 	// ContextKeyLanguage stores the user's language preference for i18n
 	ContextKeyLanguage ContextKey = "language"
 	ContextKeyIsStream ContextKey = "is_stream"
+	// ContextKeyEdgeControlPrincipal stores the verified master control-plane
+	// node identity and the exact signed request bytes.
+	ContextKeyEdgeControlPrincipal ContextKey = "edge_control_principal"
+	// ContextKeyEdgeGroupRatio pins the effective group ratio selected from the
+	// atomically applied edge snapshot for the lifetime of one relay request.
+	ContextKeyEdgeGroupRatio ContextKey = "edge_group_ratio"
 
 	// ContextKeyAuditLogged marks that the current request has already recorded
 	// a manage/operation audit log inside the handler. When set, the admin-audit

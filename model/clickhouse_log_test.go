@@ -83,11 +83,20 @@ func TestClickHouseLogCreateTableSQL(t *testing.T) {
 	assert.Contains(t, withoutTTL, "ENGINE = MergeTree()")
 	assert.Contains(t, withoutTTL, "PARTITION BY toYYYYMM(toDateTime(created_at))")
 	assert.Contains(t, withoutTTL, "ORDER BY (created_at, request_id)")
+	assert.Contains(t, withoutTTL, "billing_event_key Nullable(String)")
+	assert.Contains(t, withoutTTL, "SETTINGS non_replicated_deduplication_window = 100000")
 	assert.NotContains(t, withoutTTL, "TTL ")
 
 	withTTL := clickHouseLogCreateTableSQL(30)
 	assert.Contains(t, withTTL, "ORDER BY (created_at, request_id)")
 	assert.Contains(t, withTTL, "TTL toDateTime(created_at) + INTERVAL 30 DAY DELETE")
+}
+
+func TestClickHouseLogDeduplicationSettingSQL(t *testing.T) {
+	assert.Equal(t,
+		"ALTER TABLE logs MODIFY SETTING non_replicated_deduplication_window = 100000",
+		clickHouseLogDeduplicationSettingSQL(),
+	)
 }
 
 func TestClickHouseCreateTableHasTTL(t *testing.T) {

@@ -27,6 +27,8 @@ var commonFalseVal string
 var logKeyCol string
 var logGroupCol string
 
+const clickHouseLogDeduplicationWindow = 100_000
+
 func initCol() {
 	// init common column names
 	if common.UsingMainDatabase(common.DatabaseTypePostgreSQL) {
@@ -261,6 +263,9 @@ func InitLogDB() (err error) {
 }
 
 func migrateDB() error {
+	if err := prepareQuotaDataModelNameMigration(); err != nil {
+		return err
+	}
 	// Migrate price_amount column from float/double to decimal for existing tables
 	migrateSubscriptionPlanPriceAmount()
 	// Migrate model_limits column from varchar to text for existing tables
@@ -297,6 +302,22 @@ func migrateDB() error {
 		&SystemInstance{},
 		&SystemTask{},
 		&SystemTaskLock{},
+		&EdgeNode{},
+		&EdgeNodeCredential{},
+		&EdgeRequestReceipt{},
+		&EdgeRequestNonceClaim{},
+		&EdgePolicySnapshot{},
+		&EdgeNodeHeartbeat{},
+		&EdgeCompiledSnapshot{},
+		&EdgeCompiledSnapshotDataset{},
+		&EdgeCompiledSnapshotPage{},
+		&EdgeQuotaLease{},
+		&EdgeLeaseFunding{},
+		&EdgeSettlementBlock{},
+		&EdgeUsageEvent{},
+		&EdgeConsumeLogOutbox{},
+		&EdgeQuotaDataEvent{},
+		&EdgeQuotaDataBucket{},
 		&CasbinRule{},
 		&AuthzRole{},
 	)
@@ -316,6 +337,9 @@ func migrateDB() error {
 }
 
 func migrateDBFast() error {
+	if err := prepareQuotaDataModelNameMigration(); err != nil {
+		return err
+	}
 
 	var wg sync.WaitGroup
 
@@ -351,6 +375,22 @@ func migrateDBFast() error {
 		{&SystemInstance{}, "SystemInstance"},
 		{&SystemTask{}, "SystemTask"},
 		{&SystemTaskLock{}, "SystemTaskLock"},
+		{&EdgeNode{}, "EdgeNode"},
+		{&EdgeNodeCredential{}, "EdgeNodeCredential"},
+		{&EdgeRequestReceipt{}, "EdgeRequestReceipt"},
+		{&EdgeRequestNonceClaim{}, "EdgeRequestNonceClaim"},
+		{&EdgePolicySnapshot{}, "EdgePolicySnapshot"},
+		{&EdgeNodeHeartbeat{}, "EdgeNodeHeartbeat"},
+		{&EdgeCompiledSnapshot{}, "EdgeCompiledSnapshot"},
+		{&EdgeCompiledSnapshotDataset{}, "EdgeCompiledSnapshotDataset"},
+		{&EdgeCompiledSnapshotPage{}, "EdgeCompiledSnapshotPage"},
+		{&EdgeQuotaLease{}, "EdgeQuotaLease"},
+		{&EdgeLeaseFunding{}, "EdgeLeaseFunding"},
+		{&EdgeSettlementBlock{}, "EdgeSettlementBlock"},
+		{&EdgeUsageEvent{}, "EdgeUsageEvent"},
+		{&EdgeConsumeLogOutbox{}, "EdgeConsumeLogOutbox"},
+		{&EdgeQuotaDataEvent{}, "EdgeQuotaDataEvent"},
+		{&EdgeQuotaDataBucket{}, "EdgeQuotaDataBucket"},
 	}
 	// 动态计算migration数量，确保errChan缓冲区足够大
 	errChan := make(chan error, len(migrations))
@@ -398,6 +438,12 @@ func migrateLOGDB() error {
 func migrateClickHouseLogDB() error {
 	ttlDays := clickHouseLogTTLDays()
 	if err := LOG_DB.Exec(clickHouseLogCreateTableSQL(ttlDays)).Error; err != nil {
+		return err
+	}
+	if err := LOG_DB.Exec("ALTER TABLE logs ADD COLUMN IF NOT EXISTS billing_event_key Nullable(String) AFTER upstream_request_id").Error; err != nil {
+		return err
+	}
+	if err := LOG_DB.Exec(clickHouseLogDeduplicationSettingSQL()).Error; err != nil {
 		return err
 	}
 	return syncClickHouseLogTTL(ttlDays)
@@ -448,11 +494,20 @@ CREATE TABLE IF NOT EXISTS logs (
 	ip String DEFAULT '',
 	request_id String DEFAULT '',
 	upstream_request_id String DEFAULT '',
+	billing_event_key Nullable(String),
 	other String DEFAULT ''
 )
 ENGINE = MergeTree()
 PARTITION BY toYYYYMM(toDateTime(created_at))
-ORDER BY (created_at, request_id)%s`, clickHouseLogTTLClause(ttlDays))
+ORDER BY (created_at, request_id)%s
+SETTINGS non_replicated_deduplication_window = %d`, clickHouseLogTTLClause(ttlDays), clickHouseLogDeduplicationWindow)
+}
+
+func clickHouseLogDeduplicationSettingSQL() string {
+	return fmt.Sprintf(
+		"ALTER TABLE logs MODIFY SETTING non_replicated_deduplication_window = %d",
+		clickHouseLogDeduplicationWindow,
+	)
 }
 
 func syncClickHouseLogTTL(ttlDays int) error {
@@ -617,6 +672,52 @@ func migrateTokenModelLimitsToText() error {
 			return fmt.Errorf("failed to migrate %s.%s to text: %w", tableName, columnName, err)
 		}
 		common.SysLog(fmt.Sprintf("Successfully migrated %s.%s to text", tableName, columnName))
+	}
+	return nil
+}
+
+// prepareQuotaDataModelNameMigration removes the legacy full-width MySQL
+// composite index before widening model_name. Recreating it from QuotaData's
+// prefix-index tag keeps utf8mb4 key width at 736 bytes (120*4 + 64*4), below
+// the 767-byte limit used by COMPACT tables and older InnoDB configurations.
+func prepareQuotaDataModelNameMigration() error {
+	if !common.UsingMainDatabase(common.DatabaseTypeMySQL) || !DB.Migrator().HasTable(&QuotaData{}) {
+		return nil
+	}
+	if !DB.Migrator().HasColumn(&QuotaData{}, "model_name") {
+		return nil
+	}
+
+	var metadata struct {
+		DataType  string `gorm:"column:data_type"`
+		MaxLength int64  `gorm:"column:max_length"`
+	}
+	if err := DB.Raw(`SELECT DATA_TYPE AS data_type,
+		COALESCE(CHARACTER_MAXIMUM_LENGTH, 0) AS max_length
+		FROM information_schema.columns
+		WHERE table_schema = DATABASE() AND table_name = ? AND column_name = ?`,
+		"quota_data", "model_name").Scan(&metadata).Error; err != nil {
+		return fmt.Errorf("inspect quota_data.model_name migration state: %w", err)
+	}
+	dataType := strings.ToLower(metadata.DataType)
+	needsResize := (dataType == "char" || dataType == "varchar") && metadata.MaxLength < quotaDataModelNameMaxLength
+	if !needsResize && dataType != "char" && dataType != "varchar" && !strings.HasSuffix(dataType, "text") {
+		return fmt.Errorf("unsupported quota_data.model_name type %q", metadata.DataType)
+	}
+	if needsResize {
+		if DB.Migrator().HasIndex(&QuotaData{}, "idx_qdt_model_user_name") {
+			if err := DB.Migrator().DropIndex(&QuotaData{}, "idx_qdt_model_user_name"); err != nil {
+				return fmt.Errorf("drop legacy quota_data model/username index: %w", err)
+			}
+		}
+		if err := DB.Migrator().AlterColumn(&QuotaData{}, "ModelName"); err != nil {
+			return fmt.Errorf("widen quota_data.model_name: %w", err)
+		}
+	}
+	if !DB.Migrator().HasIndex(&QuotaData{}, "idx_qdt_model_user_name") {
+		if err := DB.Migrator().CreateIndex(&QuotaData{}, "idx_qdt_model_user_name"); err != nil {
+			return fmt.Errorf("create quota_data model/username prefix index: %w", err)
+		}
 	}
 	return nil
 }

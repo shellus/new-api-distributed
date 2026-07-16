@@ -1,0 +1,44 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-labelledby="title desc">
+  <title id="title">New API Distributed Logo</title>
+  <desc id="desc">A central master core connected to three distributed edge nodes.</desc>
+  <defs>
+    <linearGradient id="plate" x1="86" y1="54" x2="426" y2="458" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#172554"/>
+      <stop offset="0.55" stop-color="#312E81"/>
+      <stop offset="1" stop-color="#111827"/>
+    </linearGradient>
+    <linearGradient id="route" x1="128" y1="356" x2="386" y2="126" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#FB7185"/>
+      <stop offset="0.5" stop-color="#22D3EE"/>
+      <stop offset="1" stop-color="#818CF8"/>
+    </linearGradient>
+    <linearGradient id="core" x1="206" y1="201" x2="310" y2="315" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#67E8F9"/>
+      <stop offset="0.52" stop-color="#818CF8"/>
+      <stop offset="1" stop-color="#FB7185"/>
+    </linearGradient>
+  </defs>
+
+  <rect x="32" y="32" width="448" height="448" rx="132" fill="url(#plate)"/>
+  <rect x="48" y="48" width="416" height="416" rx="116" fill="none" stroke="#FFFFFF" stroke-opacity="0.08" stroke-width="2"/>
+
+  <path d="M256 148V201M156 345L211 294M356 345L301 294" fill="none" stroke="#0B1026" stroke-opacity="0.72" stroke-width="32" stroke-linecap="round"/>
+  <path d="M256 148V201M156 345L211 294M356 345L301 294" fill="none" stroke="url(#route)" stroke-width="18" stroke-linecap="round"/>
+
+  <circle cx="256" cy="128" r="48" fill="#0B1026" stroke="#818CF8" stroke-width="8"/>
+  <circle cx="256" cy="128" r="20" fill="#C7D2FE"/>
+
+  <circle cx="132" cy="368" r="48" fill="#0B1026" stroke="#FB7185" stroke-width="8"/>
+  <circle cx="132" cy="368" r="20" fill="#FECDD3"/>
+
+  <circle cx="380" cy="368" r="48" fill="#0B1026" stroke="#22D3EE" stroke-width="8"/>
+  <circle cx="380" cy="368" r="20" fill="#A5F3FC"/>
+
+  <path d="M256 188L321 225V299L256 336L191 299V225L256 188Z" fill="#0B1026" stroke="url(#core)" stroke-width="12" stroke-linejoin="round"/>
+  <path d="M256 219L294 241V283L256 305L218 283V241L256 219Z" fill="url(#core)"/>
+  <path d="M256 238L277 250V274L256 286L235 274V250L256 238Z" fill="#F8FAFC"/>
+
+  <circle cx="256" cy="176" r="6" fill="#E0E7FF"/>
+  <circle cx="184" cy="319" r="6" fill="#FFE4E6"/>
+  <circle cx="328" cy="319" r="6" fill="#CFFAFE"/>
+</svg>
