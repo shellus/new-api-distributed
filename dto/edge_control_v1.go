@@ -617,6 +617,9 @@ type EdgeRuntimeStatusV1 struct {
 
 // EdgeCPAStatusV1 reports a logical local service and observations only. It
 // does not disclose the service address or any OAuth credential.
+// Deprecated: the edge no longer probes local services; heartbeats send an
+// empty list. The type and the heartbeat field remain for wire and database
+// compatibility only.
 type EdgeCPAStatusV1 struct {
 	LocalService        EdgeLocalServiceV1 `json:"local_service"`
 	Healthy             bool               `json:"healthy"`

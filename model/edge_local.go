@@ -582,20 +582,10 @@ func ApplyEdgeLocalSnapshot(db *gorm.DB, snapshot EdgeLocalSnapshotProjectionDat
 // keys to the durable Channel/Ability runtime projection without changing the
 // signed business snapshot or any accounting state.
 func RefreshEdgeLocalChannelRuntime(db *gorm.DB) error {
-	return refreshEdgeLocalChannelRuntime(db, nil)
+	return refreshEdgeLocalChannelRuntime(db)
 }
 
-// RefreshEdgeLocalChannelRuntimeWithHealth rebuilds the runtime projection and
-// atomically disables channels whose local CPA health probe failed. A missing
-// service entry is treated as unhealthy.
-func RefreshEdgeLocalChannelRuntimeWithHealth(db *gorm.DB, healthy map[dto.EdgeLocalServiceV1]bool) error {
-	if healthy == nil {
-		return errors.New("edge local CPA health map is nil")
-	}
-	return refreshEdgeLocalChannelRuntime(db, healthy)
-}
-
-func refreshEdgeLocalChannelRuntime(db *gorm.DB, healthy map[dto.EdgeLocalServiceV1]bool) error {
+func refreshEdgeLocalChannelRuntime(db *gorm.DB) error {
 	if db == nil || db.Dialector.Name() != "sqlite" {
 		return errors.New("edge local channel runtime refresh requires SQLite")
 	}
@@ -630,24 +620,6 @@ func refreshEdgeLocalChannelRuntime(db *gorm.DB, healthy map[dto.EdgeLocalServic
 	legacyChannels, legacyAbilities, err := buildEdgeLocalLegacyRuntime(channels, models, control.SnapshotAppliedAtUnixMilli)
 	if err != nil {
 		return err
-	}
-	if healthy != nil {
-		unhealthyChannels := make(map[int]struct{})
-		for i := range channels {
-			if !healthy[channels[i].LocalService] {
-				unhealthyChannels[int(channels[i].ChannelID)] = struct{}{}
-			}
-		}
-		for i := range legacyChannels {
-			if _, unhealthy := unhealthyChannels[legacyChannels[i].Id]; unhealthy {
-				legacyChannels[i].Status = common.ChannelStatusAutoDisabled
-			}
-		}
-		for i := range legacyAbilities {
-			if _, unhealthy := unhealthyChannels[legacyAbilities[i].ChannelId]; unhealthy {
-				legacyAbilities[i].Enabled = false
-			}
-		}
 	}
 	return db.Transaction(func(tx *gorm.DB) error {
 		for _, table := range []any{&Ability{}, &Channel{}} {

@@ -27,11 +27,8 @@ const (
 )
 
 var (
-	errEdgeCPANotReady        = errors.New("edge has no healthy CPA service with available models")
 	edgeControlReady          atomic.Bool
 	edgeControlSnapshotExpiry atomic.Int64
-	edgeCPAReadinessRequired  atomic.Bool
-	edgeCPAReady              atomic.Bool
 	activeEdgeControlClient   atomic.Pointer[EdgeControlClient]
 	activeEdgeControlConfig   atomic.Pointer[dto.EdgeNodeControlConfigV1]
 	edgeSettlementUploadMu    sync.Mutex
@@ -54,20 +51,16 @@ type EdgeControlLocalStore interface {
 }
 
 type EdgeControlLoopDependencies struct {
-	Client            *EdgeControlClient
-	Store             EdgeControlLocalStore
-	ProbeCPA          func(context.Context) ([]dto.EdgeCPAStatusV1, error)
-	RequireHealthyCPA bool
-	RuntimeStatus     func() dto.EdgeRuntimeStatusV1
-	Ready             func(bool)
-	Now               func() time.Time
+	Client        *EdgeControlClient
+	Store         EdgeControlLocalStore
+	RuntimeStatus func() dto.EdgeRuntimeStatusV1
+	Ready         func(bool)
+	Now           func() time.Time
 }
 
 type edgeControlLoop struct {
 	client        *EdgeControlClient
 	store         EdgeControlLocalStore
-	probeCPA      func(context.Context) ([]dto.EdgeCPAStatusV1, error)
-	requireCPA    bool
 	runtimeStatus func() dto.EdgeRuntimeStatusV1
 	setReady      func(bool)
 	now           func() time.Time
@@ -80,10 +73,7 @@ type edgeControlGormStore struct {
 // EdgeControlReady reports whether bootstrap completed and a fully verified
 // snapshot is available in the edge-local database for request admission.
 func EdgeControlReady() bool {
-	if !edgeControlReady.Load() || time.Now().UTC().UnixMilli() >= edgeControlSnapshotExpiry.Load() {
-		return false
-	}
-	return !edgeCPAReadinessRequired.Load() || edgeCPAReady.Load()
+	return edgeControlReady.Load() && time.Now().UTC().UnixMilli() < edgeControlSnapshotExpiry.Load()
 }
 
 // ActiveEdgeControlClient returns the single validated client owned by the
@@ -127,10 +117,8 @@ func RunEdgeControlLoops(ctx context.Context) error {
 		return errors.New("edge local database is not initialized")
 	}
 	return RunEdgeControlLoopsWithDependencies(ctx, EdgeControlLoopDependencies{
-		Client:            client,
-		Store:             &edgeControlGormStore{db: model.DB},
-		ProbeCPA:          ProbeEdgeCPA,
-		RequireHealthyCPA: true,
+		Client: client,
+		Store:  &edgeControlGormStore{db: model.DB},
 		RuntimeStatus: func() dto.EdgeRuntimeStatusV1 {
 			uptime := time.Now().Unix() - common.StartTime
 			if uptime < 0 {
@@ -158,19 +146,9 @@ func RunEdgeControlLoopsWithDependencies(ctx context.Context, dependencies EdgeC
 	}
 	defer activeEdgeControlClient.CompareAndSwap(dependencies.Client, nil)
 	defer activeEdgeControlConfig.Store(nil)
-	edgeCPAReadinessRequired.Store(dependencies.RequireHealthyCPA)
-	edgeCPAReady.Store(false)
-	defer func() {
-		edgeCPAReady.Store(false)
-		edgeCPAReadinessRequired.Store(false)
-	}()
 	now := dependencies.Now
 	if now == nil {
 		now = time.Now
-	}
-	probeCPA := dependencies.ProbeCPA
-	if probeCPA == nil {
-		probeCPA = func(context.Context) ([]dto.EdgeCPAStatusV1, error) { return nil, nil }
 	}
 	runtimeStatus := dependencies.RuntimeStatus
 	if runtimeStatus == nil {
@@ -188,8 +166,7 @@ func RunEdgeControlLoopsWithDependencies(ctx context.Context, dependencies EdgeC
 		}
 	}
 	runner := edgeControlLoop{
-		client: dependencies.Client, store: dependencies.Store, probeCPA: probeCPA,
-		requireCPA:    dependencies.RequireHealthyCPA,
+		client: dependencies.Client, store: dependencies.Store,
 		runtimeStatus: runtimeStatus, setReady: setReady, now: now,
 	}
 	return runner.run(ctx)
@@ -199,7 +176,7 @@ func (r *edgeControlLoop) run(ctx context.Context) error {
 	r.setReady(false)
 	defer r.setReady(false)
 
-	if err := r.restoreLocalReadiness(ctx); err != nil && !errors.Is(err, errEdgeCPANotReady) {
+	if err := r.restoreLocalReadiness(ctx); err != nil {
 		return fmt.Errorf("restore edge local readiness: %w", err)
 	}
 	var control dto.EdgeNodeControlConfigV1
@@ -218,7 +195,7 @@ func (r *edgeControlLoop) run(ctx context.Context) error {
 		common.SysError("edge control bootstrap failed: " + err.Error())
 		if !EdgeControlReady() {
 			restoreErr := r.restoreLocalReadiness(ctx)
-			if restoreErr != nil && !errors.Is(restoreErr, errEdgeCPANotReady) {
+			if restoreErr != nil {
 				return fmt.Errorf("restore edge local readiness while bootstrap is unavailable: %w", restoreErr)
 			}
 		}
@@ -320,7 +297,7 @@ func (r *edgeControlLoop) restoreLocalReadiness(ctx context.Context) error {
 	}); err != nil {
 		return err
 	}
-	return r.activateSnapshotAfterCPAProbe(ctx, expiresAt)
+	return r.activateSnapshot(expiresAt)
 }
 
 func (r *edgeControlLoop) bootstrap(ctx context.Context) (dto.EdgeNodeControlConfigV1, error) {
@@ -365,13 +342,9 @@ func (r *edgeControlLoop) heartbeat(ctx context.Context, current dto.EdgeNodeCon
 	if err != nil {
 		return current, err
 	}
-	cpa, err := r.probeCPAStatus(ctx)
-	if err != nil {
-		return current, err
-	}
 	response, err := r.client.Heartbeat(ctx, dto.EdgeHeartbeatRequestV1{
 		Declaration: r.client.Declaration(), Snapshot: *snapshot, Settlement: *settlement,
-		Leases: leases, Runtime: r.runtimeStatus(), CPA: cpa,
+		Leases: leases, Runtime: r.runtimeStatus(), CPA: nil,
 	})
 	if err != nil {
 		return current, err
@@ -387,41 +360,6 @@ func (r *edgeControlLoop) heartbeat(ctx context.Context, current dto.EdgeNodeCon
 		}
 	}
 	return response.Control, nil
-}
-
-func (r *edgeControlLoop) probeCPAStatus(ctx context.Context) ([]dto.EdgeCPAStatusV1, error) {
-	if r.probeCPA == nil {
-		return nil, nil
-	}
-	statuses, err := r.probeCPA(ctx)
-	if !r.requireCPA {
-		return statuses, err
-	}
-	if err != nil {
-		if readinessErr := withEdgeDataPlanePolicyMutation(func() error {
-			edgeCPAReady.Store(false)
-			return nil
-		}); readinessErr != nil {
-			return nil, errors.Join(err, readinessErr)
-		}
-		return nil, err
-	}
-	if err := withEdgeDataPlanePolicyMutation(func() error {
-		edgeCPAReady.Store(edgeCPAStatusesReady(statuses))
-		return nil
-	}); err != nil {
-		return nil, err
-	}
-	return statuses, nil
-}
-
-func edgeCPAStatusesReady(statuses []dto.EdgeCPAStatusV1) bool {
-	for _, status := range statuses {
-		if status.Healthy && len(status.AvailableModels) > 0 {
-			return true
-		}
-	}
-	return false
 }
 
 func (r *edgeControlLoop) transitionDataPlaneNotReady() {
@@ -443,13 +381,7 @@ func (r *edgeControlLoop) setDataPlaneReady(ready bool) {
 	edgeControlReady.Store(true)
 }
 
-func (r *edgeControlLoop) activateSnapshotAfterCPAProbe(ctx context.Context, expiresAtUnixMilli int64) error {
-	if _, err := r.probeCPAStatus(ctx); err != nil {
-		return err
-	}
-	if r.requireCPA && !edgeCPAReady.Load() {
-		return errEdgeCPANotReady
-	}
+func (r *edgeControlLoop) activateSnapshot(expiresAtUnixMilli int64) error {
 	return withEdgeDataPlanePolicyMutation(func() error {
 		edgeControlSnapshotExpiry.Store(expiresAtUnixMilli)
 		r.setDataPlaneReady(true)
@@ -530,7 +462,7 @@ func (r *edgeControlLoop) syncSnapshot(ctx context.Context, manifest dto.EdgeSna
 		}); err != nil {
 			return false, err
 		}
-		if err := r.activateSnapshotAfterCPAProbe(ctx, manifest.ExpiresAtUnixMilli); err != nil {
+		if err := r.activateSnapshot(manifest.ExpiresAtUnixMilli); err != nil {
 			return false, err
 		}
 		return false, nil
@@ -551,7 +483,7 @@ func (r *edgeControlLoop) syncSnapshot(ctx context.Context, manifest dto.EdgeSna
 	}); err != nil {
 		return false, err
 	}
-	if err := r.activateSnapshotAfterCPAProbe(ctx, manifest.ExpiresAtUnixMilli); err != nil {
+	if err := r.activateSnapshot(manifest.ExpiresAtUnixMilli); err != nil {
 		return false, err
 	}
 	return true, nil

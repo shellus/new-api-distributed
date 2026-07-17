@@ -158,7 +158,7 @@ func TestEdgeControlRestoresUnexpiredPersistedSnapshotOffline(t *testing.T) {
 	assert.Equal(t, 1, installs)
 }
 
-func TestEdgeControlRestoresPersistedSnapshotWhenCPARecoversOffline(t *testing.T) {
+func TestEdgeControlRestoresPersistedSnapshotDuringBootstrapRetry(t *testing.T) {
 	fixture := newEdgeControlTransportFixture(t)
 	server := httptest.NewServer(http.NotFoundHandler())
 	client := newEdgeControlTestClient(t, fixture, server.URL)
@@ -173,20 +173,11 @@ func TestEdgeControlRestoresPersistedSnapshotWhenCPARecoversOffline(t *testing.T
 		store.state.Datasets = append(store.state.Datasets, dto.EdgeSnapshotDatasetStateV1{Dataset: dataset, Revision: 9})
 	}
 	store.expiresAt = fixture.now.Add(time.Minute).UnixMilli()
-	probeCalls := 0
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
 	err := RunEdgeControlLoopsWithDependencies(ctx, EdgeControlLoopDependencies{
-		Client: client, Store: store, Now: func() time.Time { return fixture.now }, RequireHealthyCPA: true,
-		ProbeCPA: func(context.Context) ([]dto.EdgeCPAStatusV1, error) {
-			probeCalls++
-			status := dto.EdgeCPAStatusV1{LocalService: dto.EdgeLocalServiceCPAPro20x4V1, Healthy: true}
-			if probeCalls > 1 {
-				status.AvailableModels = []string{"gpt-5.4"}
-			}
-			return []dto.EdgeCPAStatusV1{status}, nil
-		},
+		Client: client, Store: store, Now: func() time.Time { return fixture.now },
 		Ready: func(ready bool) {
 			if ready {
 				cancel()
@@ -194,7 +185,6 @@ func TestEdgeControlRestoresPersistedSnapshotWhenCPARecoversOffline(t *testing.T
 		},
 	})
 	require.NoError(t, err)
-	assert.GreaterOrEqual(t, probeCalls, 2)
 }
 
 func TestEdgeControlBootstrapReusesAlreadyAppliedSnapshot(t *testing.T) {
@@ -225,6 +215,28 @@ func TestEdgeControlBootstrapReusesAlreadyAppliedSnapshot(t *testing.T) {
 	runUntilReady()
 	assert.Equal(t, firstPageCalls, handler.pageCallCount())
 	assert.Equal(t, 1, store.applyCountValue())
+}
+
+func TestEdgeHeartbeatOmitsDeprecatedCPAObservations(t *testing.T) {
+	fixture := newEdgeControlTransportFixture(t)
+	handler := &edgeControlTestHandler{t: t, fixture: fixture}
+	server := httptest.NewServer(handler)
+	defer server.Close()
+	client := newEdgeControlTestClient(t, fixture, server.URL)
+	runner := edgeControlLoop{
+		client:        client,
+		store:         newEdgeControlTestStore(),
+		runtimeStatus: func() dto.EdgeRuntimeStatusV1 { return dto.EdgeRuntimeStatusV1{} },
+	}
+
+	_, err := runner.heartbeat(context.Background(), fixture.control)
+	require.NoError(t, err)
+
+	handler.mu.Lock()
+	defer handler.mu.Unlock()
+	require.NoError(t, handler.err)
+	require.Len(t, handler.heartbeatCPA, 1)
+	assert.Empty(t, handler.heartbeatCPA[0])
 }
 
 func TestEdgeSnapshotApplyFailsClosedWhenRoutingInstallFails(t *testing.T) {
@@ -259,7 +271,7 @@ func TestEdgeSnapshotApplyFailsClosedWhenRoutingInstallFails(t *testing.T) {
 	assert.False(t, EdgeControlReady(), "partially switched policy must not remain request-admissible")
 }
 
-func TestEdgeSnapshotApplyProbesNewCPAProjectionBeforeReadiness(t *testing.T) {
+func TestEdgeSnapshotApplyActivatesAfterRoutingInstall(t *testing.T) {
 	fixture := newEdgeControlTransportFixture(t)
 	handler := &edgeControlTestHandler{t: t, fixture: fixture}
 	server := httptest.NewServer(handler)
@@ -267,7 +279,6 @@ func TestEdgeSnapshotApplyProbesNewCPAProjectionBeforeReadiness(t *testing.T) {
 	client := newEdgeControlTestClient(t, fixture, server.URL)
 	store := newEdgeControlTestStore()
 	readyTransitions := make([]bool, 0, 2)
-	probeCalls := 0
 
 	edgeControlReady.Store(true)
 	edgeControlSnapshotExpiry.Store(fixture.now.Add(time.Minute).UnixMilli())
@@ -286,134 +297,12 @@ func TestEdgeSnapshotApplyProbesNewCPAProjectionBeforeReadiness(t *testing.T) {
 	}
 	runner := edgeControlLoop{
 		client: client, store: store, setReady: setReady, now: func() time.Time { return fixture.now },
-		probeCPA: func(context.Context) ([]dto.EdgeCPAStatusV1, error) {
-			probeCalls++
-			assert.False(t, EdgeControlReady(), "new snapshot must stay fail-closed while its CPA projection is probed")
-			return nil, nil
-		},
 	}
 
 	changed, err := runner.syncSnapshot(context.Background(), fixture.manifest, fixture.control)
 	require.NoError(t, err)
 	assert.True(t, changed)
-	assert.Equal(t, 1, probeCalls)
 	assert.Equal(t, []bool{false, true}, readyTransitions)
-	assert.True(t, EdgeControlReady())
-}
-
-func TestEdgeSnapshotApplyRemainsFailClosedWhenCPAProbeFails(t *testing.T) {
-	fixture := newEdgeControlTransportFixture(t)
-	handler := &edgeControlTestHandler{t: t, fixture: fixture}
-	server := httptest.NewServer(handler)
-	defer server.Close()
-	client := newEdgeControlTestClient(t, fixture, server.URL)
-	store := newEdgeControlTestStore()
-
-	edgeControlReady.Store(true)
-	edgeControlSnapshotExpiry.Store(fixture.now.Add(time.Minute).UnixMilli())
-	t.Cleanup(func() {
-		edgeControlReady.Store(false)
-		edgeControlSnapshotExpiry.Store(0)
-	})
-	setReady := func(ready bool) {
-		if !ready {
-			edgeControlReady.Store(false)
-			edgeControlSnapshotExpiry.Store(0)
-			return
-		}
-		edgeControlReady.Store(true)
-	}
-	runner := edgeControlLoop{
-		client: client, store: store, setReady: setReady, now: func() time.Time { return fixture.now },
-		probeCPA: func(context.Context) ([]dto.EdgeCPAStatusV1, error) {
-			return nil, errors.New("CPA probe failed")
-		},
-	}
-
-	changed, err := runner.syncSnapshot(context.Background(), fixture.manifest, fixture.control)
-	require.ErrorContains(t, err, "CPA probe failed")
-	assert.False(t, changed)
-	assert.Equal(t, 1, store.applyCountValue())
-	assert.False(t, EdgeControlReady())
-}
-
-func TestEdgeSnapshotApplyRequiresHealthyCPAWithModels(t *testing.T) {
-	fixture := newEdgeControlTransportFixture(t)
-	handler := &edgeControlTestHandler{t: t, fixture: fixture}
-	server := httptest.NewServer(handler)
-	defer server.Close()
-	client := newEdgeControlTestClient(t, fixture, server.URL)
-	store := newEdgeControlTestStore()
-	availableModels := []string(nil)
-
-	edgeControlReady.Store(true)
-	edgeControlSnapshotExpiry.Store(fixture.now.Add(time.Minute).UnixMilli())
-	edgeCPAReadinessRequired.Store(true)
-	edgeCPAReady.Store(true)
-	t.Cleanup(func() {
-		edgeControlReady.Store(false)
-		edgeControlSnapshotExpiry.Store(0)
-		edgeCPAReady.Store(false)
-		edgeCPAReadinessRequired.Store(false)
-	})
-	setReady := func(ready bool) {
-		if !ready {
-			edgeControlReady.Store(false)
-			edgeControlSnapshotExpiry.Store(0)
-			return
-		}
-		edgeControlReady.Store(true)
-	}
-	runner := edgeControlLoop{
-		client: client, store: store, setReady: setReady, now: func() time.Time { return fixture.now }, requireCPA: true,
-		probeCPA: func(context.Context) ([]dto.EdgeCPAStatusV1, error) {
-			return []dto.EdgeCPAStatusV1{{
-				LocalService: dto.EdgeLocalServiceCPAPro20x4V1, Healthy: true,
-				AvailableModels: append([]string(nil), availableModels...),
-			}}, nil
-		},
-	}
-
-	changed, err := runner.syncSnapshot(context.Background(), fixture.manifest, fixture.control)
-	require.ErrorContains(t, err, "no healthy CPA service")
-	assert.False(t, changed)
-	assert.False(t, EdgeControlReady(), "a healthy endpoint without advertised models is not a usable data plane")
-
-	availableModels = []string{"gpt-5.4"}
-	changed, err = runner.syncSnapshot(context.Background(), fixture.manifest, fixture.control)
-	require.NoError(t, err)
-	assert.False(t, changed, "the already applied signed snapshot should be reactivated without rewriting it")
-	assert.True(t, EdgeControlReady())
-}
-
-func TestEdgeCPAReadinessDropsAndRecoversWithProbeStatus(t *testing.T) {
-	edgeControlReady.Store(true)
-	edgeControlSnapshotExpiry.Store(time.Now().Add(time.Minute).UnixMilli())
-	edgeCPAReadinessRequired.Store(true)
-	edgeCPAReady.Store(true)
-	t.Cleanup(func() {
-		edgeControlReady.Store(false)
-		edgeControlSnapshotExpiry.Store(0)
-		edgeCPAReady.Store(false)
-		edgeCPAReadinessRequired.Store(false)
-	})
-
-	statuses := []dto.EdgeCPAStatusV1{{LocalService: dto.EdgeLocalServiceCPAPro20x4V1}}
-	runner := edgeControlLoop{
-		requireCPA: true,
-		probeCPA: func(context.Context) ([]dto.EdgeCPAStatusV1, error) {
-			return append([]dto.EdgeCPAStatusV1(nil), statuses...), nil
-		},
-	}
-
-	_, err := runner.probeCPAStatus(context.Background())
-	require.NoError(t, err)
-	assert.False(t, EdgeControlReady())
-
-	statuses[0].Healthy = true
-	statuses[0].AvailableModels = []string{"gpt-5.4"}
-	_, err = runner.probeCPAStatus(context.Background())
-	require.NoError(t, err)
 	assert.True(t, EdgeControlReady())
 }
 
@@ -588,6 +477,7 @@ type edgeControlTestHandler struct {
 	firstPageRequestIDs      []string
 	firstPageNonces          []string
 	userCursors              []string
+	heartbeatCPA             [][]dto.EdgeCPAStatusV1
 }
 
 func (h *edgeControlTestHandler) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
@@ -692,6 +582,18 @@ func (h *edgeControlTestHandler) ServeHTTP(writer http.ResponseWriter, request *
 			Dataset: pageRequest.Dataset, Revision: datasetManifest.Revision, Cursor: pageRequest.Cursor,
 			NextCursor: nextCursor, ItemCount: edgeControlTestPayloadCount(pageRequest.Dataset, payload),
 			Digest: digest, Payload: payload,
+		})
+	case "/control/v1/heartbeat":
+		var heartbeatRequest dto.EdgeHeartbeatRequestV1
+		if err := common.DecodeJsonStrict(bytes.NewReader(body), &heartbeatRequest); err != nil {
+			h.fail(writer, err)
+			return
+		}
+		h.mu.Lock()
+		h.heartbeatCPA = append(h.heartbeatCPA, append([]dto.EdgeCPAStatusV1(nil), heartbeatRequest.CPA...))
+		h.mu.Unlock()
+		h.writeJSON(writer, dto.EdgeHeartbeatResponseV1{
+			Meta: h.responseMeta(envelope.Meta.RequestID), Control: h.fixture.control,
 		})
 	default:
 		h.fail(writer, fmt.Errorf("unexpected request path %s", request.URL.Path))
