@@ -332,6 +332,26 @@ func loadEdgeSnapshotDatabaseState(now int64) (*edgeSnapshotDatabaseState, error
 	return state, nil
 }
 
+// edgeTextCapableModel reports whether a model can be served by the edge
+// text data plane. Edge only exposes Chat Completions and Responses; image,
+// embeddings, rerank and video models must not be projected because edge
+// admission would accept requests the relay cannot serve. Text models keep
+// both endpoints declared: the shared relay converts between chat and
+// responses formats in both directions, matching master runtime behavior.
+func edgeTextCapableModel(channelType int, modelName string) bool {
+	if common.IsImageGenerationModel(modelName) {
+		return false
+	}
+	for _, endpointType := range common.GetEndpointTypesByChannelType(channelType, modelName) {
+		switch endpointType {
+		case constant.EndpointTypeOpenAI, constant.EndpointTypeOpenAIResponse,
+			constant.EndpointTypeAnthropic, constant.EndpointTypeGemini:
+			return true
+		}
+	}
+	return false
+}
+
 func projectEdgeSnapshotDatabaseState(state *edgeSnapshotDatabaseState) (*edgeSnapshotProjection, error) {
 	if state == nil {
 		return nil, errors.New("edge snapshot database state is nil")
@@ -465,6 +485,9 @@ func projectEdgeSnapshotDatabaseState(state *edgeSnapshotDatabaseState) (*edgeSn
 		if strings.HasSuffix(ability.Model, ratio_setting.CompactModelSuffix) {
 			continue
 		}
+		if !edgeTextCapableModel(channel.Type, ability.Model) {
+			continue
+		}
 		if status, exists := state.ModelStatuses[ability.Model]; exists && status != 1 {
 			continue
 		}
@@ -499,6 +522,9 @@ func projectEdgeSnapshotDatabaseState(state *edgeSnapshotDatabaseState) (*edgeSn
 	}
 
 	for channelID, channel := range channelByID {
+		if len(channelModels[channelID]) == 0 {
+			continue
+		}
 		projectionChannel, err := projectEdgeSnapshotChannel(channel, serviceByChannelID[channelID])
 		if err != nil {
 			return nil, err

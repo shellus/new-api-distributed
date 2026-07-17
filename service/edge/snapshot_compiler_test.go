@@ -61,6 +61,33 @@ func TestEdgeSnapshotCompilerProjectsCanonicalSafePolicy(t *testing.T) {
 	assert.Equal(t, "zh-cn", projection.Users[1].Setting.Language)
 }
 
+func TestEdgeSnapshotCompilerExcludesNonTextModels(t *testing.T) {
+	state := edgeSnapshotCompilerTestState()
+	priority := int64(5)
+	weight := uint(20)
+	baseURL := "https://private-cpa.invalid"
+	channelSetting := `{"system_prompt":"edge text policy","system_prompt_override":true}`
+	state.Channels = append(state.Channels, model.Channel{
+		Id: 50, Type: constant.ChannelTypeJina, Key: "channel-key-secret", BaseURL: &baseURL,
+		Status: common.ChannelStatusEnabled, Name: "jina-local", Weight: &weight, Priority: &priority,
+		Setting: &channelSetting, OtherSettings: `{}`,
+	})
+	state.Abilities = append(state.Abilities,
+		model.Ability{Group: "default", Model: "jina-reranker-v2", ChannelId: 50, Enabled: true, Priority: &priority, Weight: weight},
+		model.Ability{Group: "default", Model: "dall-e-3", ChannelId: 30, Enabled: true, Priority: &priority, Weight: weight},
+	)
+
+	projection, err := projectEdgeSnapshotDatabaseState(state)
+	require.NoError(t, err)
+
+	assert.NotContains(t, projection.modelNames, "jina-reranker-v2", "rerank-only model must not reach the edge text plane")
+	assert.NotContains(t, projection.modelNames, "dall-e-3", "image generation model must not reach the edge text plane")
+	assert.Contains(t, projection.modelNames, "gpt-5.4", "text models keep flowing")
+	for _, channel := range projection.Channels {
+		assert.NotEqual(t, int64(50), channel.ChannelID, "channel with no text-capable model must be dropped")
+	}
+}
+
 func TestEdgeSnapshotCompilerDatabaseLoadDoesNotSelectChannelOrUserSecrets(t *testing.T) {
 	db := newEdgeSnapshotCompilerTestDB(t)
 	require.NoError(t, db.AutoMigrate(&model.Token{}, &model.User{}, &model.Channel{}, &model.Ability{}, &model.Model{}))
