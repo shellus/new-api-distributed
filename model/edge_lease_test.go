@@ -1,13 +1,36 @@
 package model
 
 import (
+	"math"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/QuantumNous/new-api/common"
+
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+func TestAddEdgeLeaseSettlementStatsSupportsCountersAboveLegacyQuotaLimit(t *testing.T) {
+	truncateTables(t)
+	high := int64(common.MaxQuota) + 1_000
+	user := &User{Id: 1, Username: "edge-stats-user", Password: "password", Status: common.UserStatusEnabled, UsedQuota: int(high)}
+	token := &Token{Id: 1, UserId: user.Id, Key: "edge-stats-token", Status: common.TokenStatusEnabled, UnlimitedQuota: true, UsedQuota: int(high)}
+	channel := &Channel{Id: 1, Name: "edge-stats-channel", Key: "test", Status: common.ChannelStatusEnabled, UsedQuota: high}
+	require.NoError(t, DB.Create(user).Error)
+	require.NoError(t, DB.Create(token).Error)
+	require.NoError(t, DB.Create(channel).Error)
+
+	require.NoError(t, AddEdgeLeaseSettlementStatsTx(DB, user.Id, token.Id, channel.Id, 100, time.Now().Unix()))
+	require.NoError(t, DB.First(user, user.Id).Error)
+	require.NoError(t, DB.First(token, token.Id).Error)
+	require.NoError(t, DB.First(channel, channel.Id).Error)
+	assert.Equal(t, high+100, int64(user.UsedQuota))
+	assert.Equal(t, high+100, int64(token.UsedQuota))
+	assert.Equal(t, high+100, channel.UsedQuota)
+	assert.Less(t, int64(user.UsedQuota), int64(math.MaxInt64))
+}
 
 func TestEdgeQuotaLeaseEnforcesLifecycleAndFullTerminalAccounting(t *testing.T) {
 	truncateTables(t)

@@ -126,11 +126,12 @@ edge 的人工配置只保留部署必需信息：
 | 变量 | 默认值或范围 | 作用 |
 |------|------|------|
 | `EDGE_SQLITE_PATH` | 必填 | 独立 edge SQLite 文件；不能复用 master 的 `SQL_DSN` 或日志库 |
+| `EDGE_CHANNEL_CONFIG_DIR` | `/config/channels` | edge 本地渠道 YAML 目录；只读取顶层 `.yaml`/`.yml` 文件 |
 | `EDGE_LEASE_REQUEST_QUOTA` | `100000`，范围 `1..common.MaxQuota` | 非免费请求首次申请或续租的目标额度 |
 | `EDGE_LEASE_MINIMUM_QUOTA` | `1000`，范围 `0..common.MaxQuota` | 非免费请求可接受的最小授予额度；实际请求所需额度会提高该下界 |
 | `EDGE_LEASE_MAINTENANCE_INTERVAL_SECONDS` | `15`，有效范围 `1..300` | staged settlement 恢复、主动续租和旧租约关闭周期 |
 | `EDGE_LEASE_RENEW_BEFORE_SECONDS` | `60`，有效范围 `1..3600` | 租约接近到期时提前续租的窗口 |
-| `EDGE_CPA_HEALTH_TIMEOUT_SECONDS` | `3`，有效范围 `1..30` | 单个 CPA `HEAD /healthz` 探测超时 |
+| `EDGE_CPA_HEALTH_TIMEOUT_SECONDS` | `3`，有效范围 `1..30` | 单个本地上游的连通性探测超时；变量名为 v1 兼容保留 |
 | `SHUTDOWN_TIMEOUT_SECONDS` | `120` | HTTP 优雅关闭时间；超时后强制关闭连接，但仍等待 handler 完成账务收尾 |
 | `EDGE_DRAIN_TIMEOUT_SECONDS` | `30` | 停止后台循环后，最终上传结算并关闭可关闭租约的时间预算 |
 
@@ -158,31 +159,43 @@ https://<edge-public-host>
 
 Master 观察到的来源 IP 只能作为辅助信息，不能替代公开访问地址。节点可能经过 Nginx、CDN、NAT、非标准端口或路径前缀。
 
-## CPA 内部地址
+## Edge 本地上游
 
-CPA 地址不是节点公开地址。它只存在于 edge 的本地容器网络中。
+上游地址、代理和凭证只存在于 edge 本地渠道 YAML。master 默认下发所有逻辑渠道和可结算模型，但不下发 URL、API key、OAuth/JSON 凭证、代理或任意请求覆盖。
 
-CPA 的 OpenAI 兼容 base URL 必须指向服务根路径，不能附加 `/v1`。当前默认内部端口为 `8317`。Docker 部署可使用逻辑服务别名：
+edge 使用渠道 `name` 与 master 快照匹配。本地文件采用与部署仓库 `config/channels/*.yaml` 相同的字段语义，但允许只写本节点需要覆盖的字段：
 
-```text
-http://<cpa-pro20x4-service>:8317
-http://<cpa-pro20x5-service>:8317
-http://<cpa-pro20x6-service>:8317
+```yaml
+name: mistral
+type: mistral
+base_url: https://api.mistral.ai
+auth: |
+  key-one
+  key-two
+channel_setting:
+  proxy: socks5h://edge-proxy:1080
 ```
 
-单进程本地验证可以使用 `http://localhost:8317`。edge 会自行拼接 relay 路径，并使用 `HEAD /healthz` 探测 CPA；base URL 包含路径、查询、片段、内嵌账号或端口 `0` 时会拒绝加载。
+CPA 等本地服务同样使用渠道 YAML：
 
-| 逻辑服务 | Base URL 变量 | API key 变量 | 未设置 Base URL 时的容器默认值 |
-|------|------|------|------|
-| `cpa-pro20x4` | `EDGE_CPA_PRO20X4_BASE_URL` | `EDGE_CPA_PRO20X4_API_KEY` | `http://cpa-pro20x4:8317` |
-| `cpa-pro20x5` | `EDGE_CPA_PRO20X5_BASE_URL` | `EDGE_CPA_PRO20X5_API_KEY` | `http://cpa-pro20x5:8317` |
-| `cpa-pro20x6` | `EDGE_CPA_PRO20X6_BASE_URL` | `EDGE_CPA_PRO20X6_API_KEY` | `http://cpa-pro20x6:8317` |
+```yaml
+name: cpa-vip
+type: openai
+base_url: http://cpa-vip:8317
+auth: local-cpa-api-key
+```
 
-API key 和 CPA OAuth 凭证都是 edge 本地秘密，不从 master 下发。某个 API key 为空时，对应渠道在本地投影中保持禁用；节点只部署部分 CPA 时，其余 key 应留空。
+支持的本地实现字段包括 `enabled`、`status`、`type`、`base_url`、`auth`、`auth_data`、`auth_files`、`openai_organization`、`other`、`models`、`groups`、`model_mapping`、`channel_setting`、`settings`、`priority`、`weight`、`multi_key_mode`、`param_override` 和 `header_override`。`auth`、`auth_data`、`auth_files` 互斥；多行 `auth` 默认使用随机多 Key 模式。
 
-master 快照编译要求存在名称精确为 `cpa-pro20x4`、`cpa-pro20x5` 和 `cpa-pro20x6` 的三个 OpenAI 类型渠道。渠道 ID、模型、分组、优先级和权重来自 master；本地 URL 与 API key 按逻辑服务名绑定，因此不维护 channel ID 到地址的人工映射。无法安全表达的代理、凭证或任意覆盖配置会使快照编译失败，而不是被静默下发。
+合并规则如下：
 
-edge 在快照安装后立即探测 CPA，并在每次心跳时重新探测。至少一个 CPA 必须同时满足健康检查成功且签名快照声明了可用模型；否则 `/readyz` 返回 `503`，新请求在鉴权和访问 CPA 前 fail closed。恢复健康后，渠道投影与 readiness 原子恢复。
+- master 是渠道 ID、类型、全局启停、模型、分组和计费上限的事实来源。
+- edge 本地 YAML 提供物理 URL、凭证、代理和节点特有请求行为。
+- 本地 `models`、`groups` 只能与 master 下发值取交集，不能扩张权限。
+- 本地 YAML 缺失、禁用或没有凭证时，对应渠道在该 edge 保持禁用；请求只匹配到该渠道时返回无可用渠道错误。
+- 没有可复核价格的模型不进入 edge 模型投影，不影响 master 启动和其他渠道。
+
+edge 在快照安装后立即探测已配置的本地上游，并在每次心跳时重新探测。探测使用 `HEAD /healthz`，任意非 5xx 响应都表示网络可达，因此不要求第三方直连渠道实现 CPA 健康接口。至少一个本地上游必须可达且声明了可用模型；否则 `/readyz` 返回 `503`。真实密钥错误和上游业务错误由用户请求直接返回。
 
 ## Edge 自动生成的数据
 
@@ -224,8 +237,8 @@ master 在接收结算区块的权威事务中校验节点代次、连续事件�
 ## 健康检查语义
 
 - `/healthz` 只表示 edge 进程存活，不代表可以接收用户请求。
-- `/readyz` 只有在 admission 开启、签名快照仍有效、至少一个 CPA 健康且声明了模型、账务状态可写且没有待恢复 staged settlement 时返回 `200`。
-- 应用新快照时先关闭数据面，在持有策略写锁的情况下原子替换投影并探测新 CPA，再恢复 readiness。请求完成本地 lease 预占后会固定快照与价格版本，重试不能跨快照使用新的价格或路由策略。
+- `/readyz` 只有在 admission 开启、签名快照仍有效、至少一个已配置本地上游可达且声明了模型、账务状态可写且没有待恢复 staged settlement 时返回 `200`。
+- 应用新快照时先关闭数据面，在持有策略写锁的情况下原子替换投影并探测本地上游，再恢复 readiness。请求完成本地 lease 预占后会固定快照与价格版本，重试不能跨快照使用新的价格或路由策略。
 
 ## 配置与状态流向
 
@@ -248,11 +261,11 @@ Edge 本地部署配置
 
 ### 首次部署
 
-1. 在 master 配置快照签名密钥、三个逻辑 CPA 渠道及可安全投影的模型和计费策略。
+1. 在 master 配置快照签名密钥、正常渠道和计费策略；所有渠道默认进入 edge 快照。
 2. 通过受 root 权限保护的 edge 管理接口创建节点；立即安全保存只返回一次的凭证 ID 和私钥。
-3. 准备 edge 与 CPA 编排，把节点身份、master 地址、公开访问地址、SQLite 路径和 CPA 凭证写入私有部署配置。
-4. 启动 CPA，确认根 base URL 下的 `HEAD /healthz` 可用；随后启动 edge。
-5. edge 使用节点凭证 bootstrap，原子生成 SQLite 投影、验证签名快照、探测 CPA 并开始心跳。
+3. 准备 edge 编排，把节点身份、master 地址、公开访问地址、SQLite 路径和需要启用的本地上游凭证写入私有部署配置。
+4. 启动本地 CPA 或确认直连上游网络可达；随后启动 edge。
+5. edge 使用节点凭证 bootstrap，原子生成 SQLite 投影、验证签名快照、探测本地上游并开始心跳。
 
 ### 重装或迁移
 
@@ -277,7 +290,7 @@ Edge 本地部署配置
 ## 部署前检查
 
 - master、edge 和 CPA 的时间必须由可靠时钟同步；允许偏差不能超过 `EDGE_CONTROL_CLOCK_SKEW_TOLERANCE_SECONDS`。
-- `EDGE_MASTER_URL` 和三个 CPA base URL 必须为根 URL；CPA base URL 不能带 `/v1`。
+- `EDGE_MASTER_URL` 和四个 CPA base URL 必须为根 URL；CPA base URL 不能带 `/v1`。
 - master 快照签名私钥与 edge 节点私钥必须属于不同密钥，并且都不能进入数据库、日志或版本库。
 - edge SQLite 必须位于持久化存储；未确认 usage、staged settlement、outbox 或 active lease 存在时不能删除或替换。
 - 生产探针应使用 `/readyz` 决定是否接流量，`/healthz` 只用于判断进程是否需要重启。

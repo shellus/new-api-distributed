@@ -4,8 +4,10 @@ import (
 	"bytes"
 	"crypto/ed25519"
 	"crypto/rand"
+	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -38,8 +40,13 @@ func newEdgeRuntimeTestDB(t *testing.T, cpaBaseURL string) (*gorm.DB, time.Time)
 	if cpaBaseURL == "" {
 		cpaBaseURL = "http://localhost"
 	}
-	t.Setenv("EDGE_CPA_PRO20X4_BASE_URL", cpaBaseURL)
-	t.Setenv("EDGE_CPA_PRO20X4_API_KEY", "runtime-test-key")
+	channelConfigDir := t.TempDir()
+	t.Setenv("EDGE_CHANNEL_CONFIG_DIR", channelConfigDir)
+	require.NoError(t, os.WriteFile(filepath.Join(channelConfigDir, "runtime-cpa.yaml"), []byte(fmt.Sprintf(`name: runtime-cpa
+type: openai
+base_url: %q
+auth: runtime-test-key
+`, cpaBaseURL)), 0o600))
 
 	db, err := model.OpenEdgeSQLite(filepath.Join(t.TempDir(), "edge-runtime.db"))
 	require.NoError(t, err)

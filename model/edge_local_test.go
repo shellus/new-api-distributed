@@ -2,6 +2,7 @@ package model
 
 import (
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -231,23 +232,34 @@ func TestApplyEdgeLocalSnapshotIsAtomicAndPreservesAccounting(t *testing.T) {
 	require.NoError(t, ApplyEdgeLocalSnapshot(db, replacement))
 }
 
-func TestApplyEdgeLocalSnapshotProjectsCPAEnvironmentAndTextPolicy(t *testing.T) {
+func TestApplyEdgeLocalSnapshotMergesLocalChannelYAMLAndTextPolicy(t *testing.T) {
 	db := openEdgeLocalTestDB(t, "cpa-config.db")
-	for _, env := range []struct {
-		baseName string
-		keyName  string
-		baseURL  string
-		apiKey   string
-	}{
-		{baseName: "EDGE_CPA_PRO20X4_BASE_URL", keyName: "EDGE_CPA_PRO20X4_API_KEY", baseURL: "http://test-cpa-x4.internal:9317", apiKey: "test-key-x4"},
-		{baseName: "EDGE_CPA_PRO20X5_BASE_URL", keyName: "EDGE_CPA_PRO20X5_API_KEY", baseURL: "https://test-cpa-x5.invalid", apiKey: "test-key-x5"},
-		{baseName: "EDGE_CPA_PRO20X6_BASE_URL", keyName: "EDGE_CPA_PRO20X6_API_KEY", baseURL: "http://test-cpa-x6.internal:8317/", apiKey: "test-key-x6"},
-	} {
-		t.Setenv(env.baseName, env.baseURL)
-		t.Setenv(env.keyName, env.apiKey)
-	}
+	writeEdgeLocalTestChannelConfig(t, "edge-channel", `name: edge-channel
+type: openai
+base_url: http://test-cpa-x4.internal:9317
+auth: test-key-x4
+channel_setting:
+  proxy: http://edge-proxy.internal:8080
+settings:
+  allow_speed: false
+`)
+	writeEdgeLocalTestChannelConfig(t, "edge-channel-x5", `name: edge-channel-x5
+type: openai
+base_url: https://test-cpa-x5.invalid
+auth: test-key-x5
+`)
+	writeEdgeLocalTestChannelConfig(t, "edge-channel-x6", `name: edge-channel-x6
+type: openai
+base_url: http://test-cpa-x6.internal:8317/
+auth: test-key-x6
+`)
+	writeEdgeLocalTestChannelConfig(t, "edge-channel-vip", `name: edge-channel-vip
+type: openai
+base_url: http://test-cpa-vip.internal:8317
+auth: test-key-vip
+`)
 	snapshot := edgeLocalTestSnapshot(7)
-	snapshot.Models[0].ChannelIDs = []int64{31, 32, 33}
+	snapshot.Models[0].ChannelIDs = []int64{31, 32, 33, 34}
 	snapshot.Channels[0].TextPolicy = dto.EdgeTextRequestPolicyV1{
 		ForceFormat: true, ThinkingToContent: true, PassThroughBodyEnabled: true,
 		SystemPrompt: "edge test prompt", SystemPromptOverride: true,
@@ -265,6 +277,11 @@ func TestApplyEdgeLocalSnapshotProjectsCPAEnvironmentAndTextPolicy(t *testing.T)
 			Groups: []string{"default"}, Models: []string{"gpt-4o-mini"},
 			Priority: 8, Weight: 80, LocalService: dto.EdgeLocalServiceCPAPro20x6V1,
 		},
+		dto.EdgeChannelProjectionV1{
+			ChannelID: 34, Type: 1, Name: "edge-channel-vip", Enabled: true,
+			Groups: []string{"default"}, Models: []string{"gpt-4o-mini"},
+			Priority: 7, Weight: 70, LocalService: dto.EdgeLocalServiceCPAVIPV1,
+		},
 	)
 	require.NoError(t, ApplyEdgeLocalSnapshot(db, snapshot))
 
@@ -276,6 +293,7 @@ func TestApplyEdgeLocalSnapshotProjectsCPAEnvironmentAndTextPolicy(t *testing.T)
 		{channelID: 31, baseURL: "http://test-cpa-x4.internal:9317", key: "test-key-x4"},
 		{channelID: 32, baseURL: "https://test-cpa-x5.invalid", key: "test-key-x5"},
 		{channelID: 33, baseURL: "http://test-cpa-x6.internal:8317", key: "test-key-x6"},
+		{channelID: 34, baseURL: "http://test-cpa-vip.internal:8317", key: "test-key-vip"},
 	} {
 		var channel Channel
 		require.NoError(t, db.First(&channel, expected.channelID).Error)
@@ -295,23 +313,32 @@ func TestApplyEdgeLocalSnapshotProjectsCPAEnvironmentAndTextPolicy(t *testing.T)
 	assert.True(t, setting.PassThroughBodyEnabled)
 	assert.Equal(t, "edge test prompt", setting.SystemPrompt)
 	assert.True(t, setting.SystemPromptOverride)
+	assert.Equal(t, "http://edge-proxy.internal:8080", setting.Proxy)
 	other := textChannel.GetOtherSettings()
 	assert.True(t, other.AllowServiceTier)
 	assert.True(t, other.AllowInferenceGeo)
-	assert.True(t, other.AllowSpeed)
+	assert.False(t, other.AllowSpeed)
 	assert.True(t, other.DisableStore)
 	assert.True(t, other.AllowSafetyIdentifier)
 	assert.True(t, other.AllowIncludeObfuscation)
 
-	t.Setenv("EDGE_CPA_PRO20X4_BASE_URL", "http://rotated-cpa-x4.internal:8317")
-	t.Setenv("EDGE_CPA_PRO20X4_API_KEY", "rotated-test-key-x4")
+	writeEdgeLocalTestChannelConfig(t, "edge-channel", `name: edge-channel
+type: openai
+base_url: http://rotated-cpa-x4.internal:8317
+auth: rotated-test-key-x4
+`)
 	require.NoError(t, RefreshEdgeLocalChannelRuntime(db))
 	require.NoError(t, db.First(&textChannel, 31).Error)
 	require.NotNil(t, textChannel.BaseURL)
 	assert.Equal(t, "http://rotated-cpa-x4.internal:8317", *textChannel.BaseURL)
 	assert.Equal(t, "rotated-test-key-x4", textChannel.Key)
 
-	t.Setenv("EDGE_CPA_PRO20X4_API_KEY", "")
+	writeEdgeLocalTestChannelConfig(t, "edge-channel", `name: edge-channel
+type: openai
+base_url: http://rotated-cpa-x4.internal:8317
+enabled: false
+auth: rotated-test-key-x4
+`)
 	require.NoError(t, RefreshEdgeLocalChannelRuntime(db))
 	require.NoError(t, db.First(&textChannel, 31).Error)
 	assert.Equal(t, common.ChannelStatusManuallyDisabled, textChannel.Status)
@@ -320,12 +347,10 @@ func TestApplyEdgeLocalSnapshotProjectsCPAEnvironmentAndTextPolicy(t *testing.T)
 	assert.False(t, disabledAbility.Enabled)
 }
 
-func TestApplyEdgeLocalSnapshotDisablesCPAWithoutLocalAPIKey(t *testing.T) {
+func TestApplyEdgeLocalSnapshotDisablesChannelWithoutLocalConfig(t *testing.T) {
 	db := openEdgeLocalTestDB(t, "cpa-disabled.db")
-	t.Setenv("EDGE_CPA_PRO20X5_BASE_URL", "")
-	t.Setenv("EDGE_CPA_PRO20X5_API_KEY", "")
+	t.Setenv(edgeChannelConfigDirEnv, t.TempDir())
 	snapshot := edgeLocalTestSnapshot(7)
-	snapshot.Channels[0].LocalService = dto.EdgeLocalServiceCPAPro20x5V1
 	require.NoError(t, ApplyEdgeLocalSnapshot(db, snapshot))
 
 	var channel Channel
@@ -333,7 +358,7 @@ func TestApplyEdgeLocalSnapshotDisablesCPAWithoutLocalAPIKey(t *testing.T) {
 	assert.Equal(t, common.ChannelStatusManuallyDisabled, channel.Status)
 	assert.Empty(t, channel.Key)
 	require.NotNil(t, channel.BaseURL)
-	assert.Equal(t, "http://cpa-pro20x5:8317", *channel.BaseURL)
+	assert.Empty(t, *channel.BaseURL)
 	var ability Ability
 	require.NoError(t, db.Where("channel_id = ?", 31).First(&ability).Error)
 	assert.False(t, ability.Enabled)
@@ -835,6 +860,13 @@ func TestEdgeLocalLeaseAcquireIntentSurvivesRestartAndReusesExactRequest(t *test
 
 func openEdgeLocalTestDB(t *testing.T, name string) *gorm.DB {
 	t.Helper()
+	channelConfigDir := t.TempDir()
+	t.Setenv(edgeChannelConfigDirEnv, channelConfigDir)
+	require.NoError(t, os.WriteFile(filepath.Join(channelConfigDir, "edge-channel.yaml"), []byte(`name: edge-channel
+type: openai
+base_url: http://edge-channel:8317
+auth: edge-test-key
+`), 0o600))
 	db, err := OpenEdgeSQLite(filepath.Join(t.TempDir(), name))
 	require.NoError(t, err)
 	t.Cleanup(func() {
@@ -844,6 +876,13 @@ func openEdgeLocalTestDB(t *testing.T, name string) *gorm.DB {
 		}
 	})
 	return db
+}
+
+func writeEdgeLocalTestChannelConfig(t *testing.T, name string, content string) {
+	t.Helper()
+	directory := os.Getenv(edgeChannelConfigDirEnv)
+	require.NotEmpty(t, directory)
+	require.NoError(t, os.WriteFile(filepath.Join(directory, name+".yaml"), []byte(content), 0o600))
 }
 
 func edgeLocalTestSnapshot(revision int64) EdgeLocalSnapshotProjectionData {

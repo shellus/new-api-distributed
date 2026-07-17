@@ -114,10 +114,10 @@ ops/master-switch/cutover.sh rollback
 
 数据和 Schema 兼容演练已经通过，但当前不能仅凭该结果直接切生产。还需要：
 
-- 将现网原版分支中的审计对接、对话归集候选字段、Seedance 时长计费与视频直链三个本地提交完整同步到 master，并做功能回归；
+- 逐项确认现网原版分支的本地补丁：需要保留的能力必须同步到 master 并回归；明确接受下线的能力记录为切换范围外，不得在验收时误判为仍受支持；
 - 发布一个不可变的 master 镜像，记录其镜像 ID，并让私有环境文件中的 `EXPECTED_MASTER_IMAGE_ID` 精确匹配；
 - 确认生产 Compose 中所有会写数据库的配套服务都列入 `QUIESCE_SERVICES`；
 - 在启用 edge 之前，把实际 CPA 池（包括 VIP 池）纳入快照编译配置并完成端到端验证；
 - 确认停写窗口、维护通知、监控和人工负责人。
 
-`MASTER_PARITY_APPROVED=YES` 是故意设置的人工门禁：上述功能对齐和发布验证没有完成前，不应设置它。
+`MASTER_PARITY_APPROVED=YES` 是故意设置的人工门禁：功能保留范围、明确下线范围和发布验证没有确认前，不应设置它。

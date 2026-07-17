@@ -13,10 +13,10 @@ import (
 	"github.com/QuantumNous/new-api/model"
 )
 
-// ProbeEdgeCPA checks the three signed local channel projections and applies
-// the result back to Channel/Ability in one SQLite transaction. Failed or
-// missing probes therefore become unavailable to the shared distributor
-// before any user request can reach them.
+// ProbeEdgeCPA checks every signed local channel projection and applies the
+// result back to Channel/Ability in one SQLite transaction. A configured
+// upstream is considered reachable when it returns any non-5xx HTTP response;
+// generic upstreams are not required to implement the CPA /healthz endpoint.
 func ProbeEdgeCPA(ctx context.Context) ([]dto.EdgeCPAStatusV1, error) {
 	var stored []model.EdgeLocalChannelProjection
 	if err := model.DB.WithContext(ctx).Order("channel_id asc").Find(&stored).Error; err != nil {
@@ -88,7 +88,7 @@ func ProbeEdgeCPA(ctx context.Context) ([]dto.EdgeCPAStatusV1, error) {
 			status.LatencyMilliseconds = latency
 			if err == nil {
 				response.Body.Close()
-				status.Healthy = response.StatusCode >= http.StatusOK && response.StatusCode < http.StatusMultipleChoices
+				status.Healthy = response.StatusCode < http.StatusInternalServerError
 			}
 			if status.Healthy {
 				status.AvailableModels = append([]string(nil), projection.Models...)

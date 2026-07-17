@@ -88,7 +88,7 @@ master 不实现用户请求转发、AI 协议解析或 CPA 调度。
 - 所有 edge 后台循环由 application 生命周期持有可取消的 context，不能使用无法停止的永久 goroutine。
 - 以本地部署配置为事实来源声明公开访问地址；地址变化后自动随控制通信更新 master。
 - master 失联时，在快照和 lease 有效范围内继续处理请求。
-- 至少一个 CPA 健康且声明了可用模型时数据面才 ready；CPA 全部不可用时在鉴权和 relay 前 fail closed，恢复后原子重新启用渠道。
+- 至少一个已配置本地上游可达且声明了可用模型时数据面才 ready；本地上游全部不可用时在鉴权和 relay 前 fail closed，恢复后原子重新启用渠道。
 
 edge 不实现协议适配、流式转发、OAuth 凭证调度或第二套计费引擎。
 
@@ -131,7 +131,7 @@ edge 不实现协议适配、流式转发、OAuth 凭证调度或第二套计费
 2. 验证 master 增加控制面延迟不会进入已有 lease 的用户请求路径。
 3. 验证 master 断开时，已有有效快照和 lease 继续服务；需要新 lease 的请求必须在访问 CPA 前失败。
 4. 验证正额度 lease 耗尽、零额度免费 lease、实际用量高于预扣和租约续租边界。
-5. 验证 CPA 全部不可用时 `/readyz` 失败且渠道被禁用，CPA 恢复后 readiness 与渠道原子恢复。
+5. 验证本地上游全部不可用时 `/readyz` 失败且渠道被禁用，上游恢复后 readiness 与渠道原子恢复。
 6. 验证 staged settlement 在进程重启后恢复，恢复完成前 accounting readiness 保持关闭。
 7. 验证重复、乱序和重放区块不会重复扣费、重复写 consume log 或重复累加 `quota_data`。
 8. 验证优雅关闭停止 admission、等待在途请求、上传剩余 outbox、关闭可关闭 lease，并在 drain 失败时保留 SQLite 状态。
@@ -202,7 +202,7 @@ go build ./cmd/newapi-edge
 - 无 lease 的请求不会访问 CPA。
 - master 延迟或暂时失联不进入正常用户请求路径。
 - 免费请求使用零额度 lease，不因用户钱包为零而偏离 master 计费语义。
-- CPA 全部不可用、快照过期或 accounting 未恢复时，`/readyz` 和 admission 同时 fail closed。
+- 本地上游全部不可用、快照过期或 accounting 未恢复时，`/readyz` 和 admission 同时 fail closed。
 - 已 staged 的请求不能退款；恢复后只生成一条 usage event 和一条 edge outbox。
 - 重复结算最多产生一次权威扣费、一次 consume log 和一次 `quota_data` 累加。
 - edge 关闭期间不再创建 reservation，已完成请求的 usage 在数据库关闭前进入 durable outbox。

@@ -58,27 +58,6 @@ var edgeSnapshotDatasetOrder = [...]dto.EdgeSnapshotDatasetV1{
 	dto.EdgeSnapshotDatasetRoutingV1,
 }
 
-var edgeSnapshotLocalServices = [...]struct {
-	name    string
-	service dto.EdgeLocalServiceV1
-}{
-	{name: "cpa-pro20x4", service: dto.EdgeLocalServiceCPAPro20x4V1},
-	{name: "cpa-pro20x5", service: dto.EdgeLocalServiceCPAPro20x5V1},
-	{name: "cpa-pro20x6", service: dto.EdgeLocalServiceCPAPro20x6V1},
-}
-
-var edgeSnapshotModelEndpoints = map[string][]dto.EdgeEndpointV1{
-	"gpt-5.1-codex-mini":  {dto.EdgeEndpointOpenAIResponsesV1},
-	"gpt-5.3-codex":       {dto.EdgeEndpointOpenAIResponsesV1},
-	"gpt-5.3-codex-spark": {dto.EdgeEndpointOpenAIResponsesV1},
-	"gpt-5.4":             {dto.EdgeEndpointOpenAIChatCompletionsV1, dto.EdgeEndpointOpenAIResponsesV1},
-	"gpt-5.4-mini":        {dto.EdgeEndpointOpenAIChatCompletionsV1, dto.EdgeEndpointOpenAIResponsesV1},
-	"gpt-5.5":             {dto.EdgeEndpointOpenAIChatCompletionsV1, dto.EdgeEndpointOpenAIResponsesV1},
-	"gpt-5.6-luna":        {dto.EdgeEndpointOpenAIChatCompletionsV1, dto.EdgeEndpointOpenAIResponsesV1},
-	"gpt-5.6-sol":         {dto.EdgeEndpointOpenAIChatCompletionsV1, dto.EdgeEndpointOpenAIResponsesV1},
-	"gpt-5.6-terra":       {dto.EdgeEndpointOpenAIChatCompletionsV1, dto.EdgeEndpointOpenAIResponsesV1},
-}
-
 var edgeSnapshotPassHeaderAllowlist = map[string]string{
 	"originator":                             "Originator",
 	"session_id":                             "Session_id",
@@ -305,16 +284,11 @@ func loadEdgeSnapshotDatabaseState(now int64) (*edgeSnapshotDatabaseState, error
 			}
 		}
 
-		channelNames := make([]string, 0, len(edgeSnapshotLocalServices))
-		for _, service := range edgeSnapshotLocalServices {
-			channelNames = append(channelNames, service.name)
-		}
 		channelFields := []string{
 			"Id", "Type", "OpenAIOrganization", "Status", "Name", "Weight", "Models", "Group",
 			"ModelMapping", "StatusCodeMapping", "Priority", "Setting", "ParamOverride", "HeaderOverride", "OtherSettings",
 		}
 		if err := tx.Select(channelFields).
-			Where("name IN ?", channelNames).
 			Order("id ASC").
 			Find(&state.Channels).Error; err != nil {
 			return err
@@ -332,18 +306,23 @@ func loadEdgeSnapshotDatabaseState(now int64) (*edgeSnapshotDatabaseState, error
 			}
 		}
 
-		modelNames := make([]string, 0, len(edgeSnapshotModelEndpoints))
-		for modelName := range edgeSnapshotModelEndpoints {
-			modelNames = append(modelNames, modelName)
+		modelSet := make(map[string]struct{}, len(state.Abilities))
+		for i := range state.Abilities {
+			if state.Abilities[i].Enabled && !strings.HasSuffix(state.Abilities[i].Model, ratio_setting.CompactModelSuffix) {
+				modelSet[state.Abilities[i].Model] = struct{}{}
+			}
 		}
-		var metadata []model.Model
-		if err := tx.Select([]string{"model_name", "status"}).
-			Where("model_name IN ?", modelNames).
-			Find(&metadata).Error; err != nil {
-			return err
-		}
-		for i := range metadata {
-			state.ModelStatuses[metadata[i].ModelName] = metadata[i].Status
+		if len(modelSet) > 0 {
+			modelNames := sortedEdgeSnapshotKeys(modelSet)
+			var metadata []model.Model
+			if err := tx.Select([]string{"model_name", "status"}).
+				Where("model_name IN ?", modelNames).
+				Find(&metadata).Error; err != nil {
+				return err
+			}
+			for i := range metadata {
+				state.ModelStatuses[metadata[i].ModelName] = metadata[i].Status
+			}
 		}
 		return nil
 	})
@@ -388,7 +367,7 @@ func projectEdgeSnapshotDatabaseState(state *edgeSnapshotDatabaseState) (*edgeSn
 			seenModels := make(map[string]struct{})
 			for _, modelName := range token.GetModelLimits() {
 				modelName = strings.TrimSpace(modelName)
-				if _, allowed := edgeSnapshotModelEndpoints[modelName]; !allowed {
+				if modelName == "" || strings.HasSuffix(modelName, ratio_setting.CompactModelSuffix) {
 					continue
 				}
 				if _, exists := seenModels[modelName]; exists {
@@ -446,7 +425,7 @@ func projectEdgeSnapshotDatabaseState(state *edgeSnapshotDatabaseState) (*edgeSn
 			DefaultGroup: user.Group,
 			Setting: dto.EdgeUserSettingV1{
 				AcceptUnsetRatioModel: userSetting.AcceptUnsetRatioModel,
-				Language:              userSetting.Language,
+				Language:              strings.ToLower(strings.TrimSpace(userSetting.Language)),
 			},
 		})
 	}
@@ -457,31 +436,21 @@ func projectEdgeSnapshotDatabaseState(state *edgeSnapshotDatabaseState) (*edgeSn
 	}
 	projection.userGroups = sortedEdgeSnapshotKeys(groupSet)
 
-	channelByName := make(map[string]model.Channel, len(state.Channels))
+	channelByID := make(map[int]model.Channel, len(state.Channels))
+	serviceByChannelID := make(map[int]dto.EdgeLocalServiceV1, len(state.Channels))
 	for i := range state.Channels {
 		channel := state.Channels[i]
-		if _, exists := channelByName[channel.Name]; exists {
-			return nil, fmt.Errorf("%w: duplicate channel name %q", ErrEdgeSnapshotUnrepresentable, channel.Name)
-		}
-		channelByName[channel.Name] = channel
-	}
-	channelByID := make(map[int]model.Channel, len(edgeSnapshotLocalServices))
-	serviceByChannelID := make(map[int]dto.EdgeLocalServiceV1, len(edgeSnapshotLocalServices))
-	for _, local := range edgeSnapshotLocalServices {
-		channel, exists := channelByName[local.name]
-		if !exists {
-			return nil, fmt.Errorf("required edge channel %q is missing", local.name)
-		}
-		if channel.Type != constant.ChannelTypeOpenAI {
-			return nil, fmt.Errorf("%w: channel %q must use OpenAI type", ErrEdgeSnapshotUnrepresentable, channel.Name)
-		}
 		switch channel.Status {
 		case common.ChannelStatusEnabled, common.ChannelStatusManuallyDisabled, common.ChannelStatusAutoDisabled:
 		default:
 			return nil, fmt.Errorf("%w: channel %q has invalid status", ErrEdgeSnapshotUnrepresentable, channel.Name)
 		}
+		localService := dto.EdgeLocalServiceV1(channel.Name)
+		if !localService.Valid() {
+			return nil, fmt.Errorf("%w: channel %q cannot be used as an edge local service name", ErrEdgeSnapshotUnrepresentable, channel.Name)
+		}
 		channelByID[channel.Id] = channel
-		serviceByChannelID[channel.Id] = local.service
+		serviceByChannelID[channel.Id] = localService
 	}
 
 	channelModels := make(map[int]map[string]struct{}, len(channelByID))
@@ -493,8 +462,7 @@ func projectEdgeSnapshotDatabaseState(state *edgeSnapshotDatabaseState) (*edgeSn
 		if !exists || !ability.Enabled || channel.Status != common.ChannelStatusEnabled {
 			continue
 		}
-		_, safeModel := edgeSnapshotModelEndpoints[ability.Model]
-		if !safeModel || strings.HasSuffix(ability.Model, ratio_setting.CompactModelSuffix) {
+		if strings.HasSuffix(ability.Model, ratio_setting.CompactModelSuffix) {
 			continue
 		}
 		if status, exists := state.ModelStatuses[ability.Model]; exists && status != 1 {
@@ -537,6 +505,15 @@ func projectEdgeSnapshotDatabaseState(state *edgeSnapshotDatabaseState) (*edgeSn
 		}
 		projectionChannel.Groups = sortedEdgeSnapshotKeys(channelGroups[channelID])
 		projectionChannel.Models = sortedEdgeSnapshotKeys(channelModels[channelID])
+		if len(projectionChannel.ModelMapping) > 0 {
+			filteredMapping := make(map[string]string)
+			for _, modelName := range projectionChannel.Models {
+				if upstreamModel, exists := projectionChannel.ModelMapping[modelName]; exists {
+					filteredMapping[modelName] = upstreamModel
+				}
+			}
+			projectionChannel.ModelMapping = filteredMapping
+		}
 		projection.Channels = append(projection.Channels, projectionChannel)
 	}
 	sort.Slice(projection.Channels, func(i, j int) bool { return projection.Channels[i].ChannelID < projection.Channels[j].ChannelID })
@@ -547,18 +524,17 @@ func projectEdgeSnapshotDatabaseState(state *edgeSnapshotDatabaseState) (*edgeSn
 			channelIDs = append(channelIDs, channelID)
 		}
 		sort.Slice(channelIDs, func(i, j int) bool { return channelIDs[i] < channelIDs[j] })
-		endpoints := append([]dto.EdgeEndpointV1(nil), edgeSnapshotModelEndpoints[modelName]...)
 		projection.Models = append(projection.Models, dto.EdgeModelPolicyV1{
 			Model:      modelName,
 			Enabled:    true,
-			Endpoints:  endpoints,
+			Endpoints:  []dto.EdgeEndpointV1{dto.EdgeEndpointOpenAIChatCompletionsV1, dto.EdgeEndpointOpenAIResponsesV1},
 			Streaming:  true,
 			ChannelIDs: channelIDs,
 		})
 	}
 	sort.Slice(projection.Models, func(i, j int) bool { return projection.Models[i].Model < projection.Models[j].Model })
 	if len(projection.Models) == 0 {
-		return nil, errors.New("no safe Chat or Responses models are available for edge")
+		return nil, errors.New("no channel models are available for edge")
 	}
 	projection.modelNames = make([]string, 0, len(projection.Models))
 	compiledModels := make(map[string]struct{}, len(projection.Models))
@@ -606,36 +582,12 @@ func projectEdgeSnapshotCIDRs(values []string) ([]string, error) {
 }
 
 func projectEdgeSnapshotChannel(channel model.Channel, localService dto.EdgeLocalServiceV1) (dto.EdgeChannelProjectionV1, error) {
-	if channel.OpenAIOrganization != nil && strings.TrimSpace(*channel.OpenAIOrganization) != "" {
-		return dto.EdgeChannelProjectionV1{}, fmt.Errorf("%w: channel %q uses OpenAI organization credentials", ErrEdgeSnapshotUnrepresentable, channel.Name)
-	}
-	for field, value := range map[string]*string{
-		"model_mapping":       channel.ModelMapping,
-		"status_code_mapping": channel.StatusCodeMapping,
-		"param_override":      channel.ParamOverride,
-		"header_override":     channel.HeaderOverride,
-	} {
-		if err := requireEmptyEdgeSnapshotObject(field, value); err != nil {
-			return dto.EdgeChannelProjectionV1{}, fmt.Errorf("%w: channel %q: %v", ErrEdgeSnapshotUnrepresentable, channel.Name, err)
-		}
-	}
-
 	settings := dto.ChannelSettings{}
-	if err := unmarshalAllowedEdgeSnapshotObject("channel setting", pointerString(channel.Setting), map[string]struct{}{
-		"force_format": {}, "thinking_to_content": {}, "proxy": {}, "pass_through_body_enabled": {},
-		"system_prompt": {}, "system_prompt_override": {},
-	}, &settings); err != nil {
+	if err := unmarshalEdgeSnapshotKnownFields("channel setting", pointerString(channel.Setting), &settings); err != nil {
 		return dto.EdgeChannelProjectionV1{}, fmt.Errorf("%w: channel %q: %v", ErrEdgeSnapshotUnrepresentable, channel.Name, err)
 	}
-	if strings.TrimSpace(settings.Proxy) != "" {
-		return dto.EdgeChannelProjectionV1{}, fmt.Errorf("%w: channel %q uses a proxy", ErrEdgeSnapshotUnrepresentable, channel.Name)
-	}
 	other := dto.ChannelOtherSettings{}
-	if err := unmarshalAllowedEdgeSnapshotObject("channel other settings", channel.OtherSettings, map[string]struct{}{
-		"allow_service_tier": {}, "allow_inference_geo": {}, "allow_speed": {}, "allow_safety_identifier": {},
-		"disable_store": {}, "allow_include_obfuscation": {}, "upstream_model_update_check_enabled": {},
-		"upstream_model_update_auto_sync_enabled": {},
-	}, &other); err != nil {
+	if err := unmarshalEdgeSnapshotKnownFields("channel other settings", channel.OtherSettings, &other); err != nil {
 		return dto.EdgeChannelProjectionV1{}, fmt.Errorf("%w: channel %q: %v", ErrEdgeSnapshotUnrepresentable, channel.Name, err)
 	}
 
@@ -672,6 +624,16 @@ func projectEdgeSnapshotChannel(channel model.Channel, localService dto.EdgeLoca
 			AllowIncludeObfuscation: other.AllowIncludeObfuscation,
 		},
 	}
+	if channel.ModelMapping != nil && strings.TrimSpace(*channel.ModelMapping) != "" && strings.TrimSpace(*channel.ModelMapping) != "null" {
+		if err := common.Unmarshal([]byte(*channel.ModelMapping), &projection.ModelMapping); err != nil {
+			return dto.EdgeChannelProjectionV1{}, fmt.Errorf("%w: channel %q: model_mapping is invalid JSON: %v", ErrEdgeSnapshotUnrepresentable, channel.Name, err)
+		}
+	}
+	if channel.StatusCodeMapping != nil && strings.TrimSpace(*channel.StatusCodeMapping) != "" && strings.TrimSpace(*channel.StatusCodeMapping) != "null" {
+		if err := common.Unmarshal([]byte(*channel.StatusCodeMapping), &projection.StatusCodeMapping); err != nil {
+			return dto.EdgeChannelProjectionV1{}, fmt.Errorf("%w: channel %q: status_code_mapping is invalid JSON: %v", ErrEdgeSnapshotUnrepresentable, channel.Name, err)
+		}
+	}
 	if err := projection.Validate(); err != nil {
 		return dto.EdgeChannelProjectionV1{}, err
 	}
@@ -685,33 +647,10 @@ func pointerString(value *string) string {
 	return *value
 }
 
-func requireEmptyEdgeSnapshotObject(field string, value *string) error {
-	if value == nil || strings.TrimSpace(*value) == "" || strings.TrimSpace(*value) == "null" {
-		return nil
-	}
-	var object map[string]json.RawMessage
-	if err := common.Unmarshal([]byte(*value), &object); err != nil {
-		return fmt.Errorf("%s is invalid JSON: %w", field, err)
-	}
-	if len(object) != 0 {
-		return fmt.Errorf("%s is not supported", field)
-	}
-	return nil
-}
-
-func unmarshalAllowedEdgeSnapshotObject(field string, value string, allowed map[string]struct{}, target any) error {
+func unmarshalEdgeSnapshotKnownFields(field string, value string, target any) error {
 	value = strings.TrimSpace(value)
 	if value == "" || value == "null" {
 		return nil
-	}
-	var object map[string]json.RawMessage
-	if err := common.Unmarshal([]byte(value), &object); err != nil {
-		return fmt.Errorf("%s is invalid JSON: %w", field, err)
-	}
-	for key := range object {
-		if _, ok := allowed[key]; !ok {
-			return fmt.Errorf("%s field %q is not supported", field, key)
-		}
 	}
 	if err := common.Unmarshal([]byte(value), target); err != nil {
 		return fmt.Errorf("%s is invalid: %w", field, err)
@@ -769,6 +708,7 @@ func captureEdgeSnapshotSettings(projection *edgeSnapshotProjection) error {
 		return err
 	}
 
+	billableModels := make(map[string]struct{}, len(projection.modelNames))
 	for _, modelName := range projection.modelNames {
 		input := edgeSnapshotPricingInput{
 			Mode:         billing_setting.GetBillingMode(modelName),
@@ -791,10 +731,12 @@ func captureEdgeSnapshotSettings(projection *edgeSnapshotProjection) error {
 
 		policy, err := projectEdgeSnapshotPricing(modelName, input)
 		if err != nil {
-			return err
+			continue
 		}
 		projection.Pricing = append(projection.Pricing, policy)
+		billableModels[modelName] = struct{}{}
 	}
+	filterEdgeSnapshotModelsByPricing(projection, billableModels)
 	sort.Slice(projection.Pricing, func(i, j int) bool { return projection.Pricing[i].PolicyID < projection.Pricing[j].PolicyID })
 
 	affinityBytes, err := common.Marshal(operation_setting.GetChannelAffinitySetting())
@@ -811,6 +753,46 @@ func captureEdgeSnapshotSettings(projection *edgeSnapshotProjection) error {
 	}
 	projection.Routing = []dto.EdgeRoutingPolicyV1{routing}
 	return nil
+}
+
+func filterEdgeSnapshotModelsByPricing(projection *edgeSnapshotProjection, billableModels map[string]struct{}) {
+	filteredModels := projection.Models[:0]
+	projection.modelNames = projection.modelNames[:0]
+	for i := range projection.Models {
+		if _, exists := billableModels[projection.Models[i].Model]; !exists {
+			continue
+		}
+		filteredModels = append(filteredModels, projection.Models[i])
+		projection.modelNames = append(projection.modelNames, projection.Models[i].Model)
+	}
+	projection.Models = filteredModels
+	for i := range projection.Channels {
+		filteredChannelModels := projection.Channels[i].Models[:0]
+		filteredMapping := make(map[string]string)
+		for _, modelName := range projection.Channels[i].Models {
+			if _, exists := billableModels[modelName]; !exists {
+				continue
+			}
+			filteredChannelModels = append(filteredChannelModels, modelName)
+			if upstreamModel, exists := projection.Channels[i].ModelMapping[modelName]; exists {
+				filteredMapping[modelName] = upstreamModel
+			}
+		}
+		projection.Channels[i].Models = filteredChannelModels
+		projection.Channels[i].ModelMapping = filteredMapping
+	}
+	for i := range projection.Authentication {
+		if !projection.Authentication[i].ModelLimitEnabled {
+			continue
+		}
+		filteredAllowedModels := projection.Authentication[i].AllowedModels[:0]
+		for _, modelName := range projection.Authentication[i].AllowedModels {
+			if _, exists := billableModels[modelName]; exists {
+				filteredAllowedModels = append(filteredAllowedModels, modelName)
+			}
+		}
+		projection.Authentication[i].AllowedModels = filteredAllowedModels
+	}
 }
 
 func filterEdgeSnapshotAuthorizationGroups(projection *edgeSnapshotProjection) error {

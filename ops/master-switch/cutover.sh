@@ -3,6 +3,7 @@ set -Eeuo pipefail
 
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 OVERRIDE_FILE="$SCRIPT_DIR/docker-compose.image-override.yml"
+CANDIDATE_OVERRIDE_FILE="$SCRIPT_DIR/docker-compose.candidate-override.yml"
 DB_AUDIT="$SCRIPT_DIR/db-audit.sh"
 CUTOVER_ENV_FILE=${CUTOVER_ENV_FILE:-}
 ROLLBACK_ARMED=false
@@ -14,7 +15,7 @@ log() {
 
 die() {
   printf '[master-cutover] ERROR: %s\n' "$*" >&2
-  exit 1
+  return 1
 }
 
 require_command() {
@@ -64,6 +65,20 @@ compose_for_image() {
     --project-directory "$TARGET_COMPOSE_DIR"
     -f "$TARGET_COMPOSE_DIR/docker-compose.yml"
     -f "$OVERRIDE_FILE")
+  if [[ -n "${COMPOSE_PROJECT_NAME:-}" ]]; then
+    command+=(--project-name "$COMPOSE_PROJECT_NAME")
+  fi
+  TARGET_APP_IMAGE="$image" "${command[@]}" "$@"
+}
+
+compose_candidate_for_image() {
+  local image=$1
+  shift
+  local command=(docker compose
+    --project-directory "$TARGET_COMPOSE_DIR"
+    -f "$TARGET_COMPOSE_DIR/docker-compose.yml"
+    -f "$OVERRIDE_FILE"
+    -f "$CANDIDATE_OVERRIDE_FILE")
   if [[ -n "${COMPOSE_PROJECT_NAME:-}" ]]; then
     command+=(--project-name "$COMPOSE_PROJECT_NAME")
   fi
@@ -217,7 +232,7 @@ assert_candidate_isolated() {
 validate_candidate() {
   local image=$1 schema_check=$2 baseline=$3 actual=$4 candidate
   remove_candidate
-  candidate=$(compose_for_image "$image" run -d --no-deps --name "$CANDIDATE_CONTAINER" "$APP_SERVICE")
+  candidate=$(compose_candidate_for_image "$image" run -d --no-deps --name "$CANDIDATE_CONTAINER" "$APP_SERVICE")
   assert_container_image "$candidate" "$image"
   assert_candidate_isolated "$candidate"
   wait_container_healthy "$candidate" "$HEALTH_TIMEOUT_SECONDS" || die "候选容器启动失败"

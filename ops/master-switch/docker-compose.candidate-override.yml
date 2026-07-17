@@ -1,0 +1,4 @@
+services:
+  new-api:
+    networks: !override
+      - new-api-network

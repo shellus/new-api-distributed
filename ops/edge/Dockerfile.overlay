@@ -1,0 +1,4 @@
+ARG ORIGINAL_IMAGE=shellus/new-api:distributed-edge
+FROM ${ORIGINAL_IMAGE}
+
+COPY ops/edge/.build/new-api-edge /new-api-edge

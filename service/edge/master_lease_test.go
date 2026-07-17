@@ -518,8 +518,8 @@ func TestProcessSettlementRejectionRollsBackAccountingAndReplaysReceipt(t *testi
 	// ExecuteControlMutation revalidates the credential at wall-clock time,
 	// while this deterministic accounting fixture settles at a fixed future
 	// instant. Make the credential valid across both instants.
-	fixture.credential.NotBefore = time.Now().Add(-time.Hour).Unix()
-	fixture.credential.ExpiresAt = fixture.now.Add(2 * time.Hour).Unix()
+	fixture.credential.NotBefore = fixture.now.Add(-time.Hour).Unix()
+	fixture.credential.ExpiresAt = time.Now().Add(2 * time.Hour).Unix()
 	require.NoError(t, fixture.db.Model(&model.EdgeNodeCredential{}).Where("id = ?", fixture.credential.ID).
 		Updates(map[string]any{
 			"not_before": fixture.credential.NotBefore,

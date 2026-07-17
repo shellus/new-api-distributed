@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/QuantumNous/new-api/common"
+	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/dto"
 	"github.com/QuantumNous/new-api/pkg/edgeauth"
 
@@ -115,7 +116,7 @@ func (EdgeLocalModelProjection) TableName() string { return "edge_local_model_pr
 type EdgeLocalChannelProjection struct {
 	ChannelID    int64                  `gorm:"primaryKey;autoIncrement:false"`
 	Enabled      bool                   `gorm:"not null;index"`
-	LocalService dto.EdgeLocalServiceV1 `gorm:"type:varchar(32);not null;index"`
+	LocalService dto.EdgeLocalServiceV1 `gorm:"type:varchar(64);not null;index"`
 	Payload      string                 `gorm:"type:text;not null"`
 }
 
@@ -662,6 +663,10 @@ func refreshEdgeLocalChannelRuntime(db *gorm.DB, healthy map[dto.EdgeLocalServic
 }
 
 func buildEdgeLocalLegacyRuntime(channels []dto.EdgeChannelProjectionV1, models []dto.EdgeModelPolicyV1, appliedAtUnixMilli int64) ([]Channel, []Ability, error) {
+	localConfigs, err := loadEdgeLocalChannelConfigs()
+	if err != nil {
+		return nil, nil, err
+	}
 	modelPolicies := make(map[string]dto.EdgeModelPolicyV1, len(models))
 	for i := range models {
 		modelPolicies[models[i].Model] = models[i]
@@ -669,7 +674,8 @@ func buildEdgeLocalLegacyRuntime(channels []dto.EdgeChannelProjectionV1, models 
 	legacyChannels := make([]Channel, 0, len(channels))
 	legacyAbilities := make([]Ability, 0)
 	for i := range channels {
-		legacyChannel, abilities, err := edgeLocalLegacyChannel(channels[i], modelPolicies, appliedAtUnixMilli)
+		localConfig, configured := localConfigs[channels[i].Name]
+		legacyChannel, abilities, err := edgeLocalLegacyChannel(channels[i], modelPolicies, appliedAtUnixMilli, localConfig, configured)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -787,16 +793,52 @@ func validateEdgeLocalSnapshot(snapshot EdgeLocalSnapshotProjectionData) error {
 	return snapshot.Routing[0].Validate()
 }
 
-func edgeLocalLegacyChannel(projection dto.EdgeChannelProjectionV1, models map[string]dto.EdgeModelPolicyV1, appliedAtUnixMilli int64) (Channel, []Ability, error) {
-	baseURL, apiKey, err := edgeLocalCPAConfig(projection.LocalService)
-	if err != nil {
-		return Channel{}, nil, err
+func edgeLocalLegacyChannel(
+	projection dto.EdgeChannelProjectionV1,
+	models map[string]dto.EdgeModelPolicyV1,
+	appliedAtUnixMilli int64,
+	localConfig edgeLocalChannelConfig,
+	configured bool,
+) (Channel, []Ability, error) {
+	if configured && localConfig.Type != constant.ChannelTypeUnknown && localConfig.Type != projection.Type {
+		return Channel{}, nil, fmt.Errorf("edge channel %q type does not match master projection", projection.Name)
 	}
-	channelEnabled := projection.Enabled && apiKey != ""
+	baseURL := ""
+	apiKey := ""
+	channelModels := append([]string(nil), projection.Models...)
+	channelGroups := append([]string(nil), projection.Groups...)
+	if configured {
+		baseURL = localConfig.BaseURL
+		apiKey = localConfig.Auth
+		channelModels = filterEdgeLocalChannelValues(channelModels, localConfig.Models)
+		channelGroups = filterEdgeLocalChannelValues(channelGroups, localConfig.Groups)
+	}
+	channelEnabled := projection.Enabled && configured && localConfig.Enabled && apiKey != ""
 	weight := uint(projection.Weight)
 	priority := projection.Priority
+	if configured && localConfig.Weight != nil {
+		weight = *localConfig.Weight
+	}
+	if configured && localConfig.Priority != nil {
+		priority = *localConfig.Priority
+	}
 	autoBan := 0
-	modelMappingPayload, err := common.Marshal(projection.ModelMapping)
+	modelMapping := make(map[string]string, len(projection.ModelMapping)+len(localConfig.ModelMapping))
+	for source, target := range projection.ModelMapping {
+		modelMapping[source] = target
+	}
+	if configured {
+		for source, target := range localConfig.ModelMapping {
+			modelMapping[source] = target
+		}
+	}
+	allowedModels := stringSet(channelModels)
+	for source := range modelMapping {
+		if _, exists := allowedModels[source]; !exists {
+			delete(modelMapping, source)
+		}
+	}
+	modelMappingPayload, err := common.Marshal(modelMapping)
 	if err != nil {
 		return Channel{}, nil, err
 	}
@@ -808,40 +850,74 @@ func edgeLocalLegacyChannel(projection dto.EdgeChannelProjectionV1, models map[s
 	if err != nil {
 		return Channel{}, nil, err
 	}
-	channelSettingPayload, err := common.Marshal(dto.ChannelSettings{
+	masterChannelSetting := dto.ChannelSettings{
 		ForceFormat: projection.TextPolicy.ForceFormat, ThinkingToContent: projection.TextPolicy.ThinkingToContent,
 		PassThroughBodyEnabled: projection.TextPolicy.PassThroughBodyEnabled,
 		SystemPrompt:           projection.TextPolicy.SystemPrompt, SystemPromptOverride: projection.TextPolicy.SystemPromptOverride,
-	})
+	}
+	channelSetting, err := edgeLocalChannelStructMap(masterChannelSetting)
 	if err != nil {
 		return Channel{}, nil, err
 	}
-	channelOtherSettingsPayload, err := common.Marshal(dto.ChannelOtherSettings{
+	if configured {
+		mergeEdgeLocalChannelMap(channelSetting, localConfig.ChannelSetting)
+	}
+	channelSettingPayload, err := common.Marshal(channelSetting)
+	if err != nil {
+		return Channel{}, nil, err
+	}
+	masterOtherSettings := dto.ChannelOtherSettings{
 		AllowServiceTier: projection.TextPolicy.AllowServiceTier, AllowInferenceGeo: projection.TextPolicy.AllowInferenceGeo,
 		AllowSpeed: projection.TextPolicy.AllowSpeed, DisableStore: projection.TextPolicy.DisableStore,
 		AllowSafetyIdentifier:   projection.TextPolicy.AllowSafetyIdentifier,
 		AllowIncludeObfuscation: projection.TextPolicy.AllowIncludeObfuscation,
-	})
+	}
+	channelOtherSettings, err := edgeLocalChannelStructMap(masterOtherSettings)
 	if err != nil {
 		return Channel{}, nil, err
 	}
-	modelMapping := string(modelMappingPayload)
+	if configured {
+		mergeEdgeLocalChannelMap(channelOtherSettings, localConfig.Settings)
+	}
+	channelOtherSettingsPayload, err := common.Marshal(channelOtherSettings)
+	if err != nil {
+		return Channel{}, nil, err
+	}
+	modelMappingJSON := string(modelMappingPayload)
 	statusMapping := string(statusMappingPayload)
-	channelSetting := string(channelSettingPayload)
+	channelSettingJSON := string(channelSettingPayload)
 	channel := Channel{
 		Id: int(projection.ChannelID), Type: projection.Type, Key: apiKey,
 		Status: common.ChannelStatusManuallyDisabled, Name: projection.Name, Weight: &weight,
-		CreatedTime: appliedAtUnixMilli / 1000, BaseURL: &baseURL, Models: strings.Join(projection.Models, ","),
-		Group: strings.Join(projection.Groups, ","), ModelMapping: &modelMapping,
+		CreatedTime: appliedAtUnixMilli / 1000, BaseURL: &baseURL, Models: strings.Join(channelModels, ","),
+		Group: strings.Join(channelGroups, ","), ModelMapping: &modelMappingJSON,
 		StatusCodeMapping: &statusMapping, Priority: &priority, AutoBan: &autoBan,
-		Setting: &channelSetting, OtherInfo: string(projectionPayload), OtherSettings: string(channelOtherSettingsPayload),
+		Setting: &channelSettingJSON, OtherInfo: string(projectionPayload), OtherSettings: string(channelOtherSettingsPayload),
+	}
+	if configured {
+		channel.OpenAIOrganization = localConfig.OpenAIOrganization
+		channel.Other = localConfig.Other
+		channel.ParamOverride, err = marshalEdgeLocalChannelMapPointer(localConfig.ParamOverride)
+		if err != nil {
+			return Channel{}, nil, err
+		}
+		channel.HeaderOverride, err = marshalEdgeLocalChannelMapPointer(localConfig.HeaderOverride)
+		if err != nil {
+			return Channel{}, nil, err
+		}
+		channel.ChannelInfo.MultiKeyMode = localConfig.MultiKeyMode
+		keys := channel.GetKeys()
+		channel.ChannelInfo.IsMultiKey = len(keys) > 1 || localConfig.MultiKeyMode != ""
+		if channel.ChannelInfo.IsMultiKey {
+			channel.ChannelInfo.MultiKeySize = len(keys)
+		}
 	}
 	if channelEnabled {
 		channel.Status = common.ChannelStatusEnabled
 	}
-	abilities := make([]Ability, 0, len(projection.Groups)*len(projection.Models))
-	for _, group := range projection.Groups {
-		for _, modelName := range projection.Models {
+	abilities := make([]Ability, 0, len(channelGroups)*len(channelModels))
+	for _, group := range channelGroups {
+		for _, modelName := range channelModels {
 			policy, exists := models[modelName]
 			enabled := channelEnabled && exists && policy.Enabled && edgeLocalModelAllowsChannel(policy, projection.ChannelID)
 			abilities = append(abilities, Ability{
@@ -853,37 +929,47 @@ func edgeLocalLegacyChannel(projection dto.EdgeChannelProjectionV1, models map[s
 	return channel, abilities, nil
 }
 
-func edgeLocalCPAConfig(service dto.EdgeLocalServiceV1) (string, string, error) {
-	var baseURLEnv string
-	var apiKeyEnv string
-	switch service {
-	case dto.EdgeLocalServiceCPAPro20x4V1:
-		baseURLEnv = "EDGE_CPA_PRO20X4_BASE_URL"
-		apiKeyEnv = "EDGE_CPA_PRO20X4_API_KEY"
-	case dto.EdgeLocalServiceCPAPro20x5V1:
-		baseURLEnv = "EDGE_CPA_PRO20X5_BASE_URL"
-		apiKeyEnv = "EDGE_CPA_PRO20X5_API_KEY"
-	case dto.EdgeLocalServiceCPAPro20x6V1:
-		baseURLEnv = "EDGE_CPA_PRO20X6_BASE_URL"
-		apiKeyEnv = "EDGE_CPA_PRO20X6_API_KEY"
-	default:
-		return "", "", errors.New("edge local CPA service is unsupported")
+func filterEdgeLocalChannelValues(values []string, allowed map[string]struct{}) []string {
+	if allowed == nil {
+		return values
 	}
-	baseURL := strings.TrimSpace(os.Getenv(baseURLEnv))
-	if baseURL == "" {
-		baseURL = "http://" + string(service) + ":8317"
+	filtered := values[:0]
+	for _, value := range values {
+		if _, exists := allowed[value]; exists {
+			filtered = append(filtered, value)
+		}
 	}
-	parsed, err := url.Parse(baseURL)
-	if err != nil || !parsed.IsAbs() || parsed.Host == "" || parsed.User != nil ||
-		(parsed.Scheme != "http" && parsed.Scheme != "https") {
-		return "", "", fmt.Errorf("%s must be an absolute HTTP URL without credentials", baseURLEnv)
+	return filtered
+}
+
+func edgeLocalChannelStructMap(value any) (map[string]any, error) {
+	payload, err := common.Marshal(value)
+	if err != nil {
+		return nil, err
 	}
-	if (parsed.EscapedPath() != "" && parsed.EscapedPath() != "/") || parsed.RawQuery != "" || parsed.Fragment != "" || parsed.Port() == "0" {
-		return "", "", fmt.Errorf("%s must use a root path without query, fragment, or port zero", baseURLEnv)
+	result := make(map[string]any)
+	if err := common.Unmarshal(payload, &result); err != nil {
+		return nil, err
 	}
-	parsed.Path = ""
-	parsed.RawPath = ""
-	return parsed.String(), strings.TrimSpace(os.Getenv(apiKeyEnv)), nil
+	return result, nil
+}
+
+func mergeEdgeLocalChannelMap(target map[string]any, override map[string]any) {
+	for key, value := range override {
+		target[key] = value
+	}
+}
+
+func marshalEdgeLocalChannelMapPointer(value map[string]any) (*string, error) {
+	if len(value) == 0 {
+		return nil, nil
+	}
+	payload, err := common.Marshal(value)
+	if err != nil {
+		return nil, err
+	}
+	encoded := string(payload)
+	return &encoded, nil
 }
 
 func edgeLocalModelAllowsChannel(policy dto.EdgeModelPolicyV1, channelID int64) bool {

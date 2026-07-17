@@ -3,6 +3,7 @@ package model
 import (
 	"errors"
 	"fmt"
+	"math"
 
 	"github.com/QuantumNous/new-api/common"
 
@@ -229,7 +230,7 @@ func AddEdgeLeaseSettlementStatsTx(tx *gorm.DB, userID int, tokenID int, channel
 		return errors.New("invalid edge lease settlement statistics")
 	}
 	userResult := tx.Unscoped().Model(&User{}).
-		Where("id = ? AND used_quota <= ? AND request_count < ?", userID, int64(common.MaxQuota)-quota, common.MaxQuota).
+		Where("id = ? AND used_quota <= ? AND request_count < ?", userID, int64(math.MaxInt64)-quota, int64(math.MaxInt64)).
 		Updates(map[string]any{
 			"used_quota":    gorm.Expr("used_quota + ?", quota),
 			"request_count": gorm.Expr("request_count + 1"),
@@ -242,7 +243,7 @@ func AddEdgeLeaseSettlementStatsTx(tx *gorm.DB, userID int, tokenID int, channel
 	}
 
 	tokenResult := tx.Unscoped().Model(&Token{}).
-		Where("id = ? AND used_quota <= ?", tokenID, int64(common.MaxQuota)-quota).
+		Where("id = ? AND used_quota <= ?", tokenID, int64(math.MaxInt64)-quota).
 		Updates(map[string]any{
 			"used_quota":    gorm.Expr("used_quota + ?", quota),
 			"accessed_time": accessedAt,
@@ -255,7 +256,7 @@ func AddEdgeLeaseSettlementStatsTx(tx *gorm.DB, userID int, tokenID int, channel
 	}
 
 	channelResult := tx.Model(&Channel{}).
-		Where("id = ? AND used_quota <= ?", channelID, int64(common.MaxQuota)-quota).
+		Where("id = ? AND used_quota <= ?", channelID, int64(math.MaxInt64)-quota).
 		Update("used_quota", gorm.Expr("used_quota + ?", quota))
 	if channelResult.Error != nil {
 		return channelResult.Error
@@ -280,7 +281,7 @@ func AddEdgeLeaseForfeitureStatsTx(tx *gorm.DB, userID int, tokenID int, quota i
 		return nil
 	}
 	userResult := tx.Unscoped().Model(&User{}).
-		Where("id = ? AND used_quota <= ?", userID, int64(common.MaxQuota)-quota).
+		Where("id = ? AND used_quota <= ?", userID, int64(math.MaxInt64)-quota).
 		Update("used_quota", gorm.Expr("used_quota + ?", quota))
 	if userResult.Error != nil {
 		return userResult.Error
@@ -289,7 +290,7 @@ func AddEdgeLeaseForfeitureStatsTx(tx *gorm.DB, userID int, tokenID int, quota i
 		return ErrEdgeLeaseQuotaCounterOverflow
 	}
 	tokenResult := tx.Unscoped().Model(&Token{}).
-		Where("id = ? AND used_quota <= ?", tokenID, int64(common.MaxQuota)-quota).
+		Where("id = ? AND used_quota <= ?", tokenID, int64(math.MaxInt64)-quota).
 		Updates(map[string]any{
 			"used_quota":    gorm.Expr("used_quota + ?", quota),
 			"accessed_time": accessedAt,

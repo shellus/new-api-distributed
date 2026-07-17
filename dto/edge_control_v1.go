@@ -29,7 +29,7 @@ const (
 	EdgeControlMaxCapabilitiesV1                = 32
 	EdgeControlMaxSnapshotDatasetsV1            = 7
 	EdgeControlMaxHeartbeatLeasesV1             = 4096
-	EdgeControlMaxHeartbeatCPAStatusesV1        = 3
+	EdgeControlMaxHeartbeatCPAStatusesV1        = 4096
 	EdgeControlMaxAvailableModelsV1             = 4096
 	EdgeControlMaxChannelGroupsV1               = 256
 	EdgeControlMaxChannelModelsV1               = 4096
@@ -70,7 +70,11 @@ const (
 
 type EdgeLocalServiceV1 string
 
+// These names remain as source-compatible conveniences for existing callers;
+// Valid accepts any canonical service identifier and does not use this list as
+// an allowlist.
 const (
+	EdgeLocalServiceCPAVIPV1     EdgeLocalServiceV1 = "cpa-vip"
 	EdgeLocalServiceCPAPro20x4V1 EdgeLocalServiceV1 = "cpa-pro20x4"
 	EdgeLocalServiceCPAPro20x5V1 EdgeLocalServiceV1 = "cpa-pro20x5"
 	EdgeLocalServiceCPAPro20x6V1 EdgeLocalServiceV1 = "cpa-pro20x6"
@@ -370,7 +374,7 @@ type EdgeTextRequestPolicyV1 struct {
 	AllowIncludeObfuscation bool   `json:"allow_include_obfuscation"`
 }
 
-// EdgeChannelProjectionV1 names a logical edge-local CPA service instead of
+// EdgeChannelProjectionV1 names an edge-local upstream service instead of
 // carrying the master channel key or base URL.
 type EdgeChannelProjectionV1 struct {
 	ChannelID         int64                   `json:"channel_id"`
@@ -739,14 +743,21 @@ func (s EdgeSettlementAckStatusV1) Valid() bool {
 }
 
 func (s EdgeLocalServiceV1) Valid() bool {
-	switch s {
-	case EdgeLocalServiceCPAPro20x4V1,
-		EdgeLocalServiceCPAPro20x5V1,
-		EdgeLocalServiceCPAPro20x6V1:
-		return true
-	default:
+	value := string(s)
+	if len(value) == 0 || len(value) > EdgeControlMaxIdentifierLengthV1 {
 		return false
 	}
+	for index := 0; index < len(value); index++ {
+		character := value[index]
+		if character >= 'a' && character <= 'z' || character >= '0' && character <= '9' {
+			continue
+		}
+		if index > 0 && index < len(value)-1 && (character == '-' || character == '_' || character == '.') {
+			continue
+		}
+		return false
+	}
+	return true
 }
 
 func (m EdgeControlRequestMetaV1) Validate() error {

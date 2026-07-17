@@ -455,7 +455,7 @@ type edgeControlTransportFixture struct {
 
 func newEdgeControlTransportFixture(t *testing.T) *edgeControlTransportFixture {
 	t.Helper()
-	now := time.Date(2026, time.July, 16, 12, 0, 0, 0, time.UTC)
+	now := time.Now().UTC().Truncate(time.Second)
 	nodeSeed := sha256.Sum256([]byte("edge-control-client-node-test-key"))
 	snapshotSeed := sha256.Sum256([]byte("edge-control-client-snapshot-test-key"))
 	nodePrivateKey := ed25519.NewKeyFromSeed(nodeSeed[:])

@@ -1058,6 +1058,7 @@ func TestEdgeLeaseRuntimeAndCPAStatusV1Validate(t *testing.T) {
 	require.NoError(t, edgeValidLeaseRuntimeForValidationV1().Validate())
 	require.NoError(t, edgeValidCPAStatusForValidationV1().Validate())
 	for _, service := range []EdgeLocalServiceV1{
+		EdgeLocalServiceCPAVIPV1,
 		EdgeLocalServiceCPAPro20x4V1,
 		EdgeLocalServiceCPAPro20x5V1,
 		EdgeLocalServiceCPAPro20x6V1,
@@ -1091,7 +1092,7 @@ func TestEdgeLeaseRuntimeAndCPAStatusV1Validate(t *testing.T) {
 		name   string
 		mutate func(*EdgeCPAStatusV1)
 	}{
-		{name: "unknown local service", mutate: func(value *EdgeCPAStatusV1) { value.LocalService = "cpa-pro20x3" }},
+		{name: "invalid local service", mutate: func(value *EdgeCPAStatusV1) { value.LocalService = "CPA unknown" }},
 		{name: "negative latency", mutate: func(value *EdgeCPAStatusV1) { value.LatencyMilliseconds = -1 }},
 		{name: "duplicate model", mutate: func(value *EdgeCPAStatusV1) { value.AvailableModels = []string{"gpt-5", "gpt-5"} }},
 		{name: "empty model", mutate: func(value *EdgeCPAStatusV1) { value.AvailableModels = []string{""} }},
@@ -1131,7 +1132,7 @@ func TestEdgeHeartbeatRequestV1Validate(t *testing.T) {
 		{name: "too many cpa statuses", mutate: func(value *EdgeHeartbeatRequestV1) {
 			value.CPA = make([]EdgeCPAStatusV1, EdgeControlMaxHeartbeatCPAStatusesV1+1)
 		}},
-		{name: "invalid cpa", mutate: func(value *EdgeHeartbeatRequestV1) { value.CPA[0].LocalService = "cpa-unknown" }},
+		{name: "invalid cpa", mutate: func(value *EdgeHeartbeatRequestV1) { value.CPA[0].LocalService = "cpa/unknown" }},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1157,7 +1158,7 @@ func TestEdgeChannelAndModelProjectionV1Validate(t *testing.T) {
 	require.NoError(t, channel.Validate())
 
 	invalidChannel := channel
-	invalidChannel.LocalService = "cpa-pro20x3"
+	invalidChannel.LocalService = "cpa/unknown"
 	assert.Error(t, invalidChannel.Validate())
 	invalidChannel = channel
 	invalidChannel.Models = []string{"gpt-5.1", "gpt-5.1"}

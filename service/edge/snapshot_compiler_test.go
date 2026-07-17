@@ -29,17 +29,25 @@ func TestEdgeSnapshotCompilerProjectsCanonicalSafePolicy(t *testing.T) {
 	require.Len(t, projection.Authentication, 2)
 	assert.Less(t, projection.Authentication[0].TokenFingerprint, projection.Authentication[1].TokenFingerprint)
 	assert.Equal(t, []int64{1, 2}, []int64{projection.Users[0].UserID, projection.Users[1].UserID})
-	assert.Equal(t, []int64{10, 20, 30}, []int64{
+	assert.Equal(t, []int64{10, 20, 30, 40}, []int64{
 		projection.Channels[0].ChannelID,
 		projection.Channels[1].ChannelID,
 		projection.Channels[2].ChannelID,
+		projection.Channels[3].ChannelID,
 	})
-	assert.Equal(t, []string{"gpt-5.3-codex", "gpt-5.4"}, projection.modelNames)
-	assert.Equal(t, []dto.EdgeEndpointV1{dto.EdgeEndpointOpenAIResponsesV1}, projection.Models[0].Endpoints)
+	assert.Equal(t, []string{"gpt-5.3-codex", "gpt-5.4", "gpt-5.5", "unsafe-image-model"}, projection.modelNames)
+	assert.Equal(t, []dto.EdgeEndpointV1{
+		dto.EdgeEndpointOpenAIChatCompletionsV1,
+		dto.EdgeEndpointOpenAIResponsesV1,
+	}, projection.Models[0].Endpoints)
 	assert.Equal(t, []dto.EdgeEndpointV1{
 		dto.EdgeEndpointOpenAIChatCompletionsV1,
 		dto.EdgeEndpointOpenAIResponsesV1,
 	}, projection.Models[1].Endpoints)
+	assert.Equal(t, []dto.EdgeEndpointV1{
+		dto.EdgeEndpointOpenAIChatCompletionsV1,
+		dto.EdgeEndpointOpenAIResponsesV1,
+	}, projection.Models[2].Endpoints)
 
 	for _, authentication := range projection.Authentication {
 		if authentication.ModelLimitEnabled {
@@ -49,6 +57,8 @@ func TestEdgeSnapshotCompilerProjectsCanonicalSafePolicy(t *testing.T) {
 	assert.Equal(t, "edge text policy", projection.Channels[0].TextPolicy.SystemPrompt)
 	assert.True(t, projection.Channels[0].TextPolicy.SystemPromptOverride)
 	assert.True(t, projection.Channels[0].TextPolicy.AllowServiceTier)
+	assert.Equal(t, map[string]string{"gpt-5.5": "gpt-5.5"}, projection.Channels[3].ModelMapping)
+	assert.Equal(t, "zh-cn", projection.Users[1].Setting.Language)
 }
 
 func TestEdgeSnapshotCompilerDatabaseLoadDoesNotSelectChannelOrUserSecrets(t *testing.T) {
@@ -62,10 +72,13 @@ func TestEdgeSnapshotCompilerDatabaseLoadDoesNotSelectChannelOrUserSecrets(t *te
 	token := model.Token{Id: 1, UserId: user.Id, Key: "tokenLoaderSecret", Status: common.TokenStatusEnabled, ExpiredTime: -1, UnlimitedQuota: true}
 	require.NoError(t, db.Create(&token).Error)
 	baseURL := "https://private-cpa.invalid"
-	for index, local := range edgeSnapshotLocalServices {
+	for index, channelName := range []string{"cpa-pro20x4", "mistral"} {
 		channel := model.Channel{
 			Id: index + 1, Type: constant.ChannelTypeOpenAI, Key: "channel-key-secret", BaseURL: &baseURL,
-			Status: common.ChannelStatusEnabled, Name: local.name, OtherSettings: `{}`,
+			Status: common.ChannelStatusEnabled, Name: channelName, OtherSettings: `{}`,
+		}
+		if channelName == "mistral" {
+			channel.Type = constant.ChannelTypeMistral
 		}
 		require.NoError(t, db.Create(&channel).Error)
 	}
@@ -74,7 +87,7 @@ func TestEdgeSnapshotCompilerDatabaseLoadDoesNotSelectChannelOrUserSecrets(t *te
 	require.NoError(t, err)
 	require.Len(t, state.Tokens, 1)
 	require.Len(t, state.Users, 1)
-	require.Len(t, state.Channels, 3)
+	require.Len(t, state.Channels, 2)
 	assert.Empty(t, state.Users[0].Password)
 	assert.Empty(t, state.Users[0].Email)
 	for _, channel := range state.Channels {
@@ -222,7 +235,7 @@ func TestEdgeSnapshotCompilerDebouncesUnchangedContentAndCleansObsoleteGraphs(t 
 	assert.Zero(t, orphanPages)
 }
 
-func TestEdgeSnapshotCompilerRejectsUnrepresentableChannelAndAuthenticationSettings(t *testing.T) {
+func TestEdgeSnapshotCompilerRejectsInvalidAuthenticationAndChannelJSON(t *testing.T) {
 	tests := []struct {
 		name   string
 		mutate func(*edgeSnapshotDatabaseState)
@@ -234,37 +247,10 @@ func TestEdgeSnapshotCompilerRejectsUnrepresentableChannelAndAuthenticationSetti
 			},
 		},
 		{
-			name: "channel proxy",
+			name: "invalid channel setting JSON",
 			mutate: func(state *edgeSnapshotDatabaseState) {
-				setting := `{"proxy":"http://proxy.invalid"}`
+				setting := `{`
 				state.Channels[0].Setting = &setting
-			},
-		},
-		{
-			name: "parameter override",
-			mutate: func(state *edgeSnapshotDatabaseState) {
-				override := `{"temperature":1}`
-				state.Channels[0].ParamOverride = &override
-			},
-		},
-		{
-			name: "header override",
-			mutate: func(state *edgeSnapshotDatabaseState) {
-				override := `{"Authorization":"secret"}`
-				state.Channels[0].HeaderOverride = &override
-			},
-		},
-		{
-			name: "organization credential",
-			mutate: func(state *edgeSnapshotDatabaseState) {
-				organization := "org-secret"
-				state.Channels[0].OpenAIOrganization = &organization
-			},
-		},
-		{
-			name: "unknown other setting",
-			mutate: func(state *edgeSnapshotDatabaseState) {
-				state.Channels[0].OtherSettings = `{"azure_responses_version":"preview"}`
 			},
 		},
 	}
@@ -278,6 +264,28 @@ func TestEdgeSnapshotCompilerRejectsUnrepresentableChannelAndAuthenticationSetti
 			assert.ErrorIs(t, err, ErrEdgeSnapshotUnrepresentable)
 		})
 	}
+}
+
+func TestEdgeSnapshotCompilerIgnoresMasterOnlyChannelConfiguration(t *testing.T) {
+	state := edgeSnapshotCompilerTestState()
+	setting := `{"proxy":"http://proxy-secret.invalid","system_prompt":"kept"}`
+	parameterOverride := `{"temperature":1}`
+	headerOverride := `{"Authorization":"header-secret"}`
+	organization := "org-secret"
+	state.Channels[0].Setting = &setting
+	state.Channels[0].ParamOverride = &parameterOverride
+	state.Channels[0].HeaderOverride = &headerOverride
+	state.Channels[0].OpenAIOrganization = &organization
+	state.Channels[0].OtherSettings = `{"azure_responses_version":"preview","allow_service_tier":true}`
+
+	projection, err := projectEdgeSnapshotDatabaseState(state)
+	require.NoError(t, err)
+	payload, err := common.Marshal(projection.Channels)
+	require.NoError(t, err)
+	assert.NotContains(t, string(payload), "proxy-secret")
+	assert.NotContains(t, string(payload), "header-secret")
+	assert.NotContains(t, string(payload), "org-secret")
+	assert.Contains(t, string(payload), "kept")
 }
 
 func TestEdgeSnapshotCompilerRejectsDynamicBillingExpressions(t *testing.T) {
@@ -388,7 +396,9 @@ func edgeSnapshotCompilerTestState() *edgeSnapshotDatabaseState {
 	weight := uint(20)
 	baseURL := "https://private-cpa.invalid"
 	channelSetting := `{"system_prompt":"edge text policy","system_prompt_override":true}`
+	modelMapping := `{"gpt-fix":"gpt-5.5","gpt-5.5":"gpt-5.5"}`
 	channels := []model.Channel{
+		{Id: 40, Type: constant.ChannelTypeOpenAI, Key: "channel-key-secret", BaseURL: &baseURL, Status: common.ChannelStatusEnabled, Name: "cpa-vip", Weight: &weight, Priority: &priority, Setting: &channelSetting, ModelMapping: &modelMapping, OtherSettings: `{"allow_service_tier":true}`},
 		{Id: 30, Type: constant.ChannelTypeOpenAI, Key: "channel-key-secret", BaseURL: &baseURL, Status: common.ChannelStatusEnabled, Name: "cpa-pro20x4", Weight: &weight, Priority: &priority, Setting: &channelSetting, OtherSettings: `{"allow_service_tier":true}`},
 		{Id: 10, Type: constant.ChannelTypeOpenAI, Key: "channel-key-secret", BaseURL: &baseURL, Status: common.ChannelStatusEnabled, Name: "cpa-pro20x5", Weight: &weight, Priority: &priority, Setting: &channelSetting, OtherSettings: `{"allow_service_tier":true}`},
 		{Id: 20, Type: constant.ChannelTypeOpenAI, Key: "channel-key-secret", BaseURL: &baseURL, Status: common.ChannelStatusEnabled, Name: "cpa-pro20x6", Weight: &weight, Priority: &priority, Setting: &channelSetting, OtherSettings: `{"allow_service_tier":true}`},
@@ -400,18 +410,19 @@ func edgeSnapshotCompilerTestState() *edgeSnapshotDatabaseState {
 			{Id: 1, UserId: 1, Key: "tokenSecretOne", Status: common.TokenStatusEnabled, ExpiredTime: 1_900_000_000, UnlimitedQuota: true, ModelLimitsEnabled: true, ModelLimits: "gpt-5.4-openai-compact,gpt-5.4,gpt-5.3-codex,gpt-5.4", AllowIps: &allowIPs},
 		},
 		Users: []model.User{
-			{Id: 2, Username: "second", Password: "user-password-secret", Status: common.UserStatusEnabled, Email: "private-user@example.invalid", Group: "vip", Setting: `{"language":"zh","webhook_url":"https://notify.invalid/secret"}`},
+			{Id: 2, Username: "second", Password: "user-password-secret", Status: common.UserStatusEnabled, Email: "private-user@example.invalid", Group: "vip", Setting: `{"language":"zh-CN","webhook_url":"https://notify.invalid/secret"}`},
 			{Id: 1, Username: "first", Password: "user-password-secret", Status: common.UserStatusEnabled, Email: "private-user@example.invalid", Group: "default", Setting: `{"accept_unset_model_ratio_model":true}`},
 		},
 		Channels: channels,
 		Abilities: []model.Ability{
+			{Group: "vip", Model: "gpt-5.5", ChannelId: 40, Enabled: true, Priority: &priority, Weight: weight},
 			{Group: "vip", Model: "gpt-5.4", ChannelId: 20, Enabled: true, Priority: &priority, Weight: weight},
 			{Group: "default", Model: "gpt-5.3-codex", ChannelId: 10, Enabled: true, Priority: &priority, Weight: weight},
 			{Group: "default", Model: "gpt-5.4", ChannelId: 30, Enabled: true, Priority: &priority, Weight: weight},
 			{Group: "default", Model: "gpt-5.4-openai-compact", ChannelId: 30, Enabled: true, Priority: &priority, Weight: weight},
 			{Group: "default", Model: "unsafe-image-model", ChannelId: 30, Enabled: true, Priority: &priority, Weight: weight},
 		},
-		ModelStatuses: map[string]int{"gpt-5.3-codex": 1, "gpt-5.4": 1},
+		ModelStatuses: map[string]int{"gpt-5.3-codex": 1, "gpt-5.4": 1, "gpt-5.5": 1},
 	}
 }
 

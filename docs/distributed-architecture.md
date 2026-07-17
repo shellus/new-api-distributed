@@ -59,7 +59,7 @@ edge 的 `/healthz` 只表示进程存活；`/readyz` 同时要求：
 - 至少一个本地 CPA 的 `HEAD /healthz` 成功且快照声明了可用模型。
 - 本地 accounting 可写，且没有待恢复的 staged settlement。
 
-应用新快照时，edge 先关闭数据面，在策略写锁内原子替换投影并探测新 CPA，随后才恢复 readiness。请求完成 lease reservation 后固定快照和价格版本，重试不能跨快照采用新的路由或价格。
+应用新快照时，edge 先关闭数据面，在策略写锁内原子替换投影并探测已配置的本地上游，随后才恢复 readiness。请求完成 lease reservation 后固定快照和价格版本，重试不能跨快照采用新的路由或价格。
 
 已完成上游请求但本地结算失败时，accounting readiness 立即关闭。维护循环只从 durable staged payload 恢复；已 staged 的 reservation 不能退款。启动时发现 active 但未 staged 的孤儿 reservation 也会永久关闭 readiness，保留现场等待人工核查，重启不自动退款或解除阻断。正常关闭会先停止 admission、等待在途 handler 完成，再停止后台循环和关闭数据库。
 
