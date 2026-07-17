@@ -29,6 +29,11 @@
 - 请求完成后先持久化 staged settlement，再原子完成 lease、usage event 和 edge outbox；结算失败会关闭 accounting readiness，并由维护循环恢复。
 - master 通过权威结算事务和持久化 outbox，把事件 exactly-once 投影到 consume log；启用统计时，`quota_data` 也使用独立事件标记避免重复累加。
 - 签名免费策略使用零额度 lease，零余额用户仍必须经过 lease、usage event 和结算序列。
+- master 初始快照编译失败不再终止进程：master 降级启动，edge 继续使用最后一份已发布快照，失败原因由启动日志与周期编译日志持续报告。
+- CPA 健康探测机制已拆除：渠道可用性由真实请求结果决定（与 master 共享同一 relay 与可选 auto-ban 代码），`/readyz` 只取决于本地快照有效性；心跳中的 CPA 观测字段保留为空仅作协议兼容。
+- edge 快照编译排除图片生成、embeddings、rerank、视频等非文本模型；文本模型保持 Chat 与 Responses 双端点声明（relay 双向格式转换与 master 运行时行为一致）。
+- `newapi-edge --validate-channels` 在重启前校验本地渠道 YAML，坏配置在 CLI 阶段报错而不是让数据面失去 readiness。
+- 快照编译周期由部署配置 `EDGE_SNAPSHOT_COMPILE_INTERVAL_SECONDS`（当前 60 秒）控制，token 撤销传播上界约为编译周期加心跳/轮询间隔；紧急撤销使用手动发布接口。
 
 真实 CPA 进程、节点凭证和本地凭证加载链路已经验证；测试凭证对应的上游账户在验收时返回用量上限错误，因此成功响应、流式结束和精确 usage 使用同一 CPA HTTP 契约的隔离确定性实例完成。该外部账户状态不影响 master、edge、CPA 边界和账务一致性的验收结论。
 

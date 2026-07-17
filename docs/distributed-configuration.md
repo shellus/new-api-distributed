@@ -24,7 +24,7 @@
 | 节点公开访问地址 | edge | 使用节点凭证声明，master 直接记录 |
 | CPA OAuth 凭证和本地数据目录 | edge | 属于节点本地运行环境，不从 master 下发 |
 | CPA 内部服务地址 | 标准部署约定 | 所有节点使用一致的 Docker 服务别名和内部端口 |
-| 健康度、负载和延迟 | 运行时观测 | 当前由 edge 心跳和本地 CPA 探测形成；master 公网主动探测属于可扩展观测，不作为配置真值 |
+| 健康度、负载和延迟 | 运行时观测 | 当前由 edge 心跳和真实请求结果形成；心跳中的 CPA 字段仅为空值兼容保留，master 公网主动探测属于可扩展观测，不作为配置真值 |
 
 ## Master 管理的全局业务配置
 
@@ -131,7 +131,7 @@ edge 的人工配置只保留部署必需信息：
 | `EDGE_LEASE_MINIMUM_QUOTA` | `1000`，范围 `0..common.MaxQuota` | 非免费请求可接受的最小授予额度；实际请求所需额度会提高该下界 |
 | `EDGE_LEASE_MAINTENANCE_INTERVAL_SECONDS` | `15`，有效范围 `1..300` | staged settlement 恢复、主动续租和旧租约关闭周期 |
 | `EDGE_LEASE_RENEW_BEFORE_SECONDS` | `60`，有效范围 `1..3600` | 租约接近到期时提前续租的窗口 |
-| `EDGE_CPA_HEALTH_TIMEOUT_SECONDS` | `3`，有效范围 `1..30` | 单个本地上游的连通性探测超时；变量名为 v1 兼容保留 |
+| `EDGE_CPA_HEALTH_TIMEOUT_SECONDS` | 兼容保留 | 当前 edge 不执行本地上游合成探测，也不读取此变量 |
 | `SHUTDOWN_TIMEOUT_SECONDS` | `120` | HTTP 优雅关闭时间；超时后强制关闭连接，但仍等待 handler 完成账务收尾 |
 | `EDGE_DRAIN_TIMEOUT_SECONDS` | `30` | 停止后台循环后，最终上传结算并关闭可关闭租约的时间预算 |
 
@@ -185,6 +185,12 @@ base_url: http://cpa-vip:8317
 auth: local-cpa-api-key
 ```
 
+修改 `config/edge/channels/*.yaml` 后、重启前执行渠道配置校验：
+
+```bash
+docker compose -f docker-compose.edge.yml run --rm new-api-edge --validate-channels
+```
+
 支持的本地实现字段包括 `enabled`、`status`、`type`、`base_url`、`auth`、`auth_data`、`auth_files`、`openai_organization`、`other`、`models`、`groups`、`model_mapping`、`channel_setting`、`settings`、`priority`、`weight`、`multi_key_mode`、`param_override` 和 `header_override`。`auth`、`auth_data`、`auth_files` 互斥；多行 `auth` 默认使用随机多 Key 模式。
 
 合并规则如下：
@@ -195,7 +201,7 @@ auth: local-cpa-api-key
 - 本地 YAML 缺失、禁用或没有凭证时，对应渠道在该 edge 保持禁用；请求只匹配到该渠道时返回无可用渠道错误。
 - 没有可复核价格的模型不进入 edge 模型投影，不影响 master 启动和其他渠道。
 
-edge 在快照安装后立即探测已配置的本地上游，并在每次心跳时重新探测。探测使用 `HEAD /healthz`，任意非 5xx 响应都表示网络可达，因此不要求第三方直连渠道实现 CPA 健康接口。至少一个本地上游必须可达且声明了可用模型；否则 `/readyz` 返回 `503`。真实密钥错误和上游业务错误由用户请求直接返回。
+edge 不对本地上游发起合成探测，也不根据瞬时探测结果禁用渠道或关闭整机 readiness。渠道可用性由真实请求结果决定；真实密钥错误、网络错误和上游业务错误沿用 master 共用的 relay 与可选 auto-ban 处理。
 
 ## Edge 自动生成的数据
 
@@ -237,8 +243,8 @@ master 在接收结算区块的权威事务中校验节点代次、连续事件�
 ## 健康检查语义
 
 - `/healthz` 只表示 edge 进程存活，不代表可以接收用户请求。
-- `/readyz` 只有在 admission 开启、签名快照仍有效、至少一个已配置本地上游可达且声明了模型、账务状态可写且没有待恢复 staged settlement 时返回 `200`。
-- 应用新快照时先关闭数据面，在持有策略写锁的情况下原子替换投影并探测本地上游，再恢复 readiness。请求完成本地 lease 预占后会固定快照与价格版本，重试不能跨快照使用新的价格或路由策略。
+- `/readyz` 只有在 admission 开启、签名快照仍有效、账务状态可写且没有待恢复 staged settlement 时返回 `200`；本地上游瞬时可达性不参与整机 readiness。
+- 应用新快照时先关闭数据面，在持有策略写锁的情况下原子替换投影，再恢复 readiness。请求完成本地 lease 预占后会固定快照与价格版本，重试不能跨快照使用新的价格或路由策略。
 
 ## 配置与状态流向
 
@@ -252,7 +258,7 @@ Edge 本地部署配置
   -> Master 节点状态与公开节点列表
 
 运行时观测
-  -> Edge 上报负载和 CPA 状态
+  -> Edge 上报负载；CPA 状态字段为空，仅作协议兼容
   -> Master 记录节点心跳和可用能力
   -> 可选公网探测只补充可达性和延迟
 ```
@@ -265,7 +271,7 @@ Edge 本地部署配置
 2. 通过受 root 权限保护的 edge 管理接口创建节点；立即安全保存只返回一次的凭证 ID 和私钥。
 3. 准备 edge 编排，把节点身份、master 地址、公开访问地址、SQLite 路径和需要启用的本地上游凭证写入私有部署配置。
 4. 启动本地 CPA 或确认直连上游网络可达；随后启动 edge。
-5. edge 使用节点凭证 bootstrap，原子生成 SQLite 投影、验证签名快照、探测本地上游并开始心跳。
+5. edge 使用节点凭证 bootstrap，原子生成 SQLite 投影、验证签名快照并开始心跳。
 
 ### 重装或迁移
 
