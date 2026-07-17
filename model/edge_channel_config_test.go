@@ -79,3 +79,22 @@ auth_data:
 	_, err := loadEdgeLocalChannelConfigs()
 	assert.ErrorContains(t, err, "mutually exclusive")
 }
+
+func TestValidateEdgeLocalChannelConfigsReportsNamesAndErrors(t *testing.T) {
+	directory := t.TempDir()
+	t.Setenv(edgeChannelConfigDirEnv, directory)
+	require.NoError(t, os.WriteFile(filepath.Join(directory, "mistral.yaml"), []byte(`name: mistral
+type: mistral
+base_url: https://api.mistral.ai
+auth: key-one
+`), 0o600))
+
+	names, err := ValidateEdgeLocalChannelConfigs()
+	require.NoError(t, err)
+	assert.Equal(t, []string{"mistral"}, names)
+
+	require.NoError(t, os.WriteFile(filepath.Join(directory, "broken.yaml"), []byte("name: Broken\n"), 0o600))
+	_, err = ValidateEdgeLocalChannelConfigs()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "lowercase canonical form")
+}

@@ -103,6 +103,23 @@ func loadEdgeLocalChannelConfigs() (map[string]edgeLocalChannelConfig, error) {
 	return configs, nil
 }
 
+// ValidateEdgeLocalChannelConfigs parses every channel YAML under the edge
+// channel config directory and returns the canonical channel names sorted
+// ascending. It is the CLI validation entry used before restarting an edge,
+// so a broken file is reported here instead of costing data-plane readiness.
+func ValidateEdgeLocalChannelConfigs() ([]string, error) {
+	configs, err := loadEdgeLocalChannelConfigs()
+	if err != nil {
+		return nil, err
+	}
+	names := make([]string, 0, len(configs))
+	for name := range configs {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names, nil
+}
+
 func loadEdgeLocalChannelConfig(path string, directory string) (edgeLocalChannelConfig, error) {
 	content, err := os.ReadFile(path)
 	if err != nil {
