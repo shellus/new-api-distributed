@@ -153,7 +153,10 @@ func Run(config Config) (runErr error) {
 
 		if strings.EqualFold(strings.TrimSpace(os.Getenv("EDGE_DISTRIBUTED_ENABLED")), "true") {
 			if _, err := edgeservice.CompileAndPublishEdgeSnapshot(); err != nil {
-				return fmt.Errorf("failed to compile initial edge snapshot: %w", err)
+				// Edge-unrepresentable configuration must not take the master
+				// API down; edges keep serving the last published snapshot and
+				// the periodic compile loop keeps reporting the error.
+				common.SysError("initial edge snapshot compilation failed, master starts degraded: " + err.Error())
 			}
 			backgroundWorkers.Add(1)
 			go func() {
