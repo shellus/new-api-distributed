@@ -6,7 +6,6 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/QuantumNous/new-api/dto"
 	"github.com/QuantumNous/new-api/model"
 	"github.com/QuantumNous/new-api/pkg/edgeauth"
 
@@ -57,7 +56,7 @@ func AuthenticateControlRequest(request *http.Request, rawBody []byte, now time.
 	if identity.Node.Status == model.EdgeNodeStatusRevoked {
 		return nil, ErrControlNodeRevoked
 	}
-	if identity.Node.ProtocolVersion != dto.EdgeControlProtocolVersionV1 {
+	if !model.SupportedEdgeControlProtocolVersion(identity.Node.ProtocolVersion) {
 		return nil, ErrControlProtocol
 	}
 	if err := identity.Credential.ValidateAt(now.Unix()); err != nil {

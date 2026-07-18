@@ -59,6 +59,8 @@ func TestEdgeSnapshotCompilerProjectsCanonicalSafePolicy(t *testing.T) {
 	assert.True(t, projection.Channels[0].TextPolicy.AllowServiceTier)
 	assert.Equal(t, map[string]string{"gpt-5.5": "gpt-5.5"}, projection.Channels[3].ModelMapping)
 	assert.Equal(t, "zh-cn", projection.Users[1].Setting.Language)
+	assert.Equal(t, "subscription_first", projection.Users[0].Setting.BillingPreference)
+	assert.Equal(t, "wallet_only", projection.Users[1].Setting.BillingPreference)
 }
 
 func TestEdgeSnapshotCompilerExcludesNonTextModels(t *testing.T) {
@@ -437,7 +439,7 @@ func edgeSnapshotCompilerTestState() *edgeSnapshotDatabaseState {
 			{Id: 1, UserId: 1, Key: "tokenSecretOne", Status: common.TokenStatusEnabled, ExpiredTime: 1_900_000_000, UnlimitedQuota: true, ModelLimitsEnabled: true, ModelLimits: "gpt-5.4-openai-compact,gpt-5.4,gpt-5.3-codex,gpt-5.4", AllowIps: &allowIPs},
 		},
 		Users: []model.User{
-			{Id: 2, Username: "second", Password: "user-password-secret", Status: common.UserStatusEnabled, Email: "private-user@example.invalid", Group: "vip", Setting: `{"language":"zh-CN","webhook_url":"https://notify.invalid/secret"}`},
+			{Id: 2, Username: "second", Password: "user-password-secret", Status: common.UserStatusEnabled, Email: "private-user@example.invalid", Group: "vip", Setting: `{"language":"zh-CN","billing_preference":"wallet_only","webhook_url":"https://notify.invalid/secret"}`},
 			{Id: 1, Username: "first", Password: "user-password-secret", Status: common.UserStatusEnabled, Email: "private-user@example.invalid", Group: "default", Setting: `{"accept_unset_model_ratio_model":true}`},
 		},
 		Channels: channels,

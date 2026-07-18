@@ -56,7 +56,7 @@ func CreateNode(request dto.EdgeNodeCreateRequest) (*dto.EdgeNodeCreateResponse,
 		Region:              request.Region,
 		Status:              model.EdgeNodeStatusActive,
 		Generation:          request.Generation,
-		ProtocolVersion:     dto.EdgeControlProtocolVersionV1,
+		ProtocolVersion:     dto.EdgeControlProtocolVersionV2,
 		MaxOutstandingQuota: request.MaxOutstandingQuota,
 	}
 	credential, privateMaterial, err := provisionNodeCredential(request.Generation, now.Unix(), expiresAt)

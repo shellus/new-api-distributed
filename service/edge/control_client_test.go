@@ -35,8 +35,8 @@ func TestEdgeControlClientSignsExactJSONBody(t *testing.T) {
 	client := newEdgeControlTestClient(t, fixture, server.URL)
 
 	response, err := client.Bootstrap(context.Background(), dto.EdgeBootstrapRequestV1{
-		Meta:                      dto.EdgeControlRequestMetaV1{ProtocolVersion: dto.EdgeControlProtocolVersionV1, RequestID: "bootstrap-exact-body"},
-		SupportedProtocolVersions: []string{dto.EdgeControlProtocolVersionV1},
+		Meta:                      dto.EdgeControlRequestMetaV1{ProtocolVersion: dto.EdgeControlProtocolVersionV2, RequestID: "bootstrap-exact-body"},
+		SupportedProtocolVersions: []string{dto.EdgeControlProtocolVersionV2, dto.EdgeControlProtocolVersionV1},
 		Declaration:               client.Declaration(),
 		Snapshot:                  dto.EdgeSnapshotStateV1{},
 		Settlement:                dto.EdgeSettlementStateV1{NextEventSequence: 1},
@@ -359,8 +359,8 @@ func newEdgeControlTransportFixture(t *testing.T) *edgeControlTransportFixture {
 			TokenFingerprint: strings.Repeat("b", 64), TokenID: 11, UserID: 7, Enabled: true, Group: "default",
 		}}}},
 		dto.EdgeSnapshotDatasetUsersV1: {
-			{Users: []dto.EdgeUserPolicyV1{{UserID: 7, Enabled: true, Username: "edge-user-7", DefaultGroup: "default"}}},
-			{Users: []dto.EdgeUserPolicyV1{{UserID: 8, Enabled: true, Username: "edge-user-8", DefaultGroup: "default"}}},
+			{Users: []dto.EdgeUserPolicyV1{{UserID: 7, Enabled: true, Username: "edge-user-7", DefaultGroup: "default", Setting: dto.EdgeUserSettingV1{BillingPreference: "subscription_first"}}}},
+			{Users: []dto.EdgeUserPolicyV1{{UserID: 8, Enabled: true, Username: "edge-user-8", DefaultGroup: "default", Setting: dto.EdgeUserSettingV1{BillingPreference: "subscription_first"}}}},
 		},
 		dto.EdgeSnapshotDatasetGroupsV1: {{Groups: []dto.EdgeGroupPolicyV1{{
 			UserGroup: "default", UsingGroups: []dto.EdgeUsingGroupPolicyV1{{Group: "default", Enabled: true, Ratio: 1}},
@@ -602,7 +602,7 @@ func (h *edgeControlTestHandler) ServeHTTP(writer http.ResponseWriter, request *
 
 func (h *edgeControlTestHandler) responseMeta(requestID string) dto.EdgeControlResponseMetaV1 {
 	return dto.EdgeControlResponseMetaV1{
-		ProtocolVersion: dto.EdgeControlProtocolVersionV1, RequestID: requestID,
+		ProtocolVersion: dto.EdgeControlProtocolVersionV2, RequestID: requestID,
 		ServerRequestID: "server-" + requestID, ServerTimeUnixMilli: h.fixture.now.UnixMilli(),
 	}
 }

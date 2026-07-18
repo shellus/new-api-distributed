@@ -19,6 +19,7 @@ type EdgeNodeHeartbeat struct {
 	SnapshotUID       string `json:"snapshot_uid" gorm:"type:varchar(64);not null"`
 	SnapshotRevision  int64  `json:"snapshot_revision" gorm:"type:bigint;not null"`
 	LastAckedSequence int64  `json:"last_acked_sequence" gorm:"type:bigint;not null"`
+	BalanceRevision   int64  `json:"balance_revision" gorm:"type:bigint;not null"`
 	PendingEventCount int64  `json:"pending_event_count" gorm:"type:bigint;not null"`
 	PendingBlockCount int64  `json:"pending_block_count" gorm:"type:bigint;not null"`
 	InFlightRequests  int64  `json:"in_flight_requests" gorm:"type:bigint;not null"`
@@ -33,12 +34,13 @@ type EdgeNodeHeartbeat struct {
 }
 
 type EdgeNodeHeartbeatObservation struct {
-	Snapshot   dto.EdgeSnapshotStateV1
-	Settlement dto.EdgeSettlementStateV1
-	Leases     []dto.EdgeLeaseRuntimeStateV1
-	Runtime    dto.EdgeRuntimeStatusV1
-	CPA        []dto.EdgeCPAStatusV1
-	ObservedAt int64
+	Snapshot        dto.EdgeSnapshotStateV1
+	Settlement      dto.EdgeSettlementStateV1
+	BalanceRevision int64
+	Leases          []dto.EdgeLeaseRuntimeStateV1
+	Runtime         dto.EdgeRuntimeStatusV1
+	CPA             []dto.EdgeCPAStatusV1
+	ObservedAt      int64
 }
 
 func UpsertEdgeNodeHeartbeatTx(tx *gorm.DB, nodeID int64, generation int64, observation EdgeNodeHeartbeatObservation) error {
@@ -53,6 +55,9 @@ func UpsertEdgeNodeHeartbeatTx(tx *gorm.DB, nodeID int64, generation int64, obse
 	}
 	if err := observation.Settlement.Validate(); err != nil {
 		return err
+	}
+	if observation.BalanceRevision < 0 {
+		return errors.New("edge heartbeat balance revision must not be negative")
 	}
 	if err := observation.Runtime.Validate(); err != nil {
 		return err
@@ -97,6 +102,7 @@ func UpsertEdgeNodeHeartbeatTx(tx *gorm.DB, nodeID int64, generation int64, obse
 		"snapshot_uid":        observation.Snapshot.SnapshotID,
 		"snapshot_revision":   observation.Snapshot.Revision,
 		"last_acked_sequence": observation.Settlement.LastAckedSequence,
+		"balance_revision":    observation.BalanceRevision,
 		"pending_event_count": observation.Settlement.PendingEventCount,
 		"pending_block_count": observation.Settlement.PendingBlockCount,
 		"in_flight_requests":  observation.Runtime.InFlightRequests,
@@ -120,6 +126,7 @@ func UpsertEdgeNodeHeartbeatTx(tx *gorm.DB, nodeID int64, generation int64, obse
 			SnapshotUID:       observation.Snapshot.SnapshotID,
 			SnapshotRevision:  observation.Snapshot.Revision,
 			LastAckedSequence: observation.Settlement.LastAckedSequence,
+			BalanceRevision:   observation.BalanceRevision,
 			PendingEventCount: observation.Settlement.PendingEventCount,
 			PendingBlockCount: observation.Settlement.PendingBlockCount,
 			InFlightRequests:  observation.Runtime.InFlightRequests,

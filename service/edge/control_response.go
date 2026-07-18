@@ -10,7 +10,7 @@ import (
 
 func NewControlResponseMeta(clientRequestID string, serverRequestID string, now time.Time) dto.EdgeControlResponseMetaV1 {
 	return dto.EdgeControlResponseMetaV1{
-		ProtocolVersion:     dto.EdgeControlProtocolVersionV1,
+		ProtocolVersion:     dto.EdgeControlProtocolVersionV2,
 		RequestID:           clientRequestID,
 		ServerRequestID:     serverRequestID,
 		ServerTimeUnixMilli: now.UnixMilli(),

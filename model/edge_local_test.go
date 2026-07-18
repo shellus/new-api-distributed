@@ -906,7 +906,7 @@ func edgeLocalTestSnapshot(revision int64) EdgeLocalSnapshotProjectionData {
 		}},
 		Users: []dto.EdgeUserPolicyV1{{
 			UserID: 7, Enabled: true, Username: "edge-user-7", DefaultGroup: "default",
-			Setting: dto.EdgeUserSettingV1{Language: "zh"},
+			Setting: dto.EdgeUserSettingV1{Language: "zh", BillingPreference: "subscription_first"},
 		}},
 		Groups: []dto.EdgeGroupPolicyV1{{
 			UserGroup:   "default",

@@ -555,8 +555,8 @@ func validateEdgeCompiledSnapshot(snapshot *EdgeCompiledSnapshot) error {
 	if snapshot.Revision <= 0 {
 		return errors.New("edge compiled snapshot revision must be greater than zero")
 	}
-	if snapshot.ProtocolVersion != dto.EdgeControlProtocolVersionV1 {
-		return fmt.Errorf("edge compiled snapshot protocol_version must be %q", dto.EdgeControlProtocolVersionV1)
+	if !SupportedEdgeControlProtocolVersion(snapshot.ProtocolVersion) {
+		return fmt.Errorf("edge compiled snapshot protocol_version is unsupported")
 	}
 	if !snapshot.Status.Valid() {
 		return ErrInvalidEdgeCompiledSnapshotStatus

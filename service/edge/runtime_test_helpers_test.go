@@ -86,7 +86,7 @@ auth: runtime-test-key
 		Authentication: []dto.EdgeTokenAuthRecordV1{{
 			TokenFingerprint: strings.Repeat("b", 64), TokenID: 11, UserID: 7, Enabled: true, Group: "default",
 		}},
-		Users: []dto.EdgeUserPolicyV1{{UserID: 7, Enabled: true, Username: "edge-user", DefaultGroup: "default"}},
+		Users: []dto.EdgeUserPolicyV1{{UserID: 7, Enabled: true, Username: "edge-user", DefaultGroup: "default", Setting: dto.EdgeUserSettingV1{BillingPreference: "subscription_first"}}},
 		Groups: []dto.EdgeGroupPolicyV1{{
 			UserGroup: "default", UsingGroups: []dto.EdgeUsingGroupPolicyV1{{Group: "default", Enabled: true, Ratio: 1}},
 		}},
@@ -223,7 +223,7 @@ func edgeRuntimeJSONResponse(t *testing.T, status int, value any) *http.Response
 
 func edgeRuntimeResponseMeta(requestID string) dto.EdgeControlResponseMetaV1 {
 	return dto.EdgeControlResponseMetaV1{
-		ProtocolVersion: dto.EdgeControlProtocolVersionV1,
+		ProtocolVersion: dto.EdgeControlProtocolVersionV2,
 		RequestID:       requestID, ServerRequestID: "server-" + requestID,
 		ServerTimeUnixMilli: time.Now().UnixMilli(),
 	}

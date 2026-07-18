@@ -25,7 +25,7 @@ func TestNewControlErrorHTTPResponseUsesRealStatusAndServerCorrelation(t *testin
 	)
 	require.NoError(t, err)
 	assert.Equal(t, 400, response.StatusCode)
-	assert.Equal(t, `{"meta":{"protocol_version":"edge-control.v1","request_id":"request-1","server_request_id":"server-request-1","server_time_unix_milli":1784160000123},"error":{"code":"invalid_request","message":"invalid declaration","retryable":false}}`, string(response.Body))
+	assert.Equal(t, `{"meta":{"protocol_version":"edge-control.v2","request_id":"request-1","server_request_id":"server-request-1","server_time_unix_milli":1784160000123},"error":{"code":"invalid_request","message":"invalid declaration","retryable":false}}`, string(response.Body))
 }
 
 func TestNewControlErrorHTTPResponseDoesNotEchoUntrustedClientRequestID(t *testing.T) {

@@ -7,7 +7,6 @@ import (
 	"time"
 
 	"github.com/QuantumNous/new-api/common"
-	"github.com/QuantumNous/new-api/dto"
 	"github.com/QuantumNous/new-api/model"
 
 	"gorm.io/gorm"
@@ -63,7 +62,7 @@ func ExecuteControlMutation(principal *ControlPrincipal, requestKind string, rec
 		if identity.Node.Status == model.EdgeNodeStatusRevoked {
 			return ErrControlNodeRevoked
 		}
-		if identity.Node.ProtocolVersion != dto.EdgeControlProtocolVersionV1 {
+		if !model.SupportedEdgeControlProtocolVersion(identity.Node.ProtocolVersion) {
 			return ErrControlProtocol
 		}
 		if err := identity.Credential.ValidateAt(now.Unix()); err != nil {

@@ -682,6 +682,7 @@ func createMasterLeaseSnapshotForTest(t *testing.T, db *gorm.DB, now time.Time, 
 		}}},
 		dto.EdgeSnapshotDatasetUsersV1: {Users: []dto.EdgeUserPolicyV1{{
 			UserID: int64(user.Id), Enabled: true, Username: user.Username, DefaultGroup: "default",
+			Setting: dto.EdgeUserSettingV1{BillingPreference: "subscription_first"},
 		}}},
 		dto.EdgeSnapshotDatasetGroupsV1: {Groups: []dto.EdgeGroupPolicyV1{{
 			UserGroup: "default", UsingGroups: []dto.EdgeUsingGroupPolicyV1{{Group: "default", Enabled: true, Ratio: 1}},

@@ -111,9 +111,9 @@ func (n *EdgeNode) BeforeCreate(_ *gorm.DB) error {
 		return errors.New("edge node generation must be greater than zero")
 	}
 	if n.ProtocolVersion == "" {
-		n.ProtocolVersion = dto.EdgeControlProtocolVersionV1
+		n.ProtocolVersion = dto.EdgeControlProtocolVersionV2
 	}
-	if n.ProtocolVersion != dto.EdgeControlProtocolVersionV1 {
+	if !SupportedEdgeControlProtocolVersion(n.ProtocolVersion) {
 		return fmt.Errorf("unsupported edge node protocol version: %s", n.ProtocolVersion)
 	}
 	if n.LastPolicyVersion < 0 || n.LastBlockSeq < 0 || n.LastEventSeq < 0 || n.MaxOutstandingQuota < 0 {
@@ -151,6 +151,32 @@ func (n *EdgeNode) BeforeCreate(_ *gorm.DB) error {
 	}
 	if n.UpdatedAt == 0 {
 		n.UpdatedAt = now
+	}
+	return nil
+}
+
+func SupportedEdgeControlProtocolVersion(version string) bool {
+	return version == dto.EdgeControlProtocolVersionV1 || version == dto.EdgeControlProtocolVersionV2
+}
+
+func UpdateEdgeNodeProtocolVersionTx(tx *gorm.DB, nodeID int64, generation int64, protocolVersion string) error {
+	if tx == nil {
+		return errors.New("database is nil")
+	}
+	if nodeID <= 0 || generation <= 0 || !SupportedEdgeControlProtocolVersion(protocolVersion) {
+		return errors.New("invalid edge node protocol update")
+	}
+	result := tx.Model(&EdgeNode{}).
+		Where("id = ? AND generation = ?", nodeID, generation).
+		Updates(map[string]any{
+			"protocol_version": protocolVersion,
+			"updated_at":       common.GetTimestamp(),
+		})
+	if result.Error != nil {
+		return result.Error
+	}
+	if result.RowsAffected != 1 {
+		return gorm.ErrRecordNotFound
 	}
 	return nil
 }

@@ -446,6 +446,7 @@ func projectEdgeSnapshotDatabaseState(state *edgeSnapshotDatabaseState) (*edgeSn
 			Setting: dto.EdgeUserSettingV1{
 				AcceptUnsetRatioModel: userSetting.AcceptUnsetRatioModel,
 				Language:              strings.ToLower(strings.TrimSpace(userSetting.Language)),
+				BillingPreference:     common.NormalizeBillingPreference(userSetting.BillingPreference),
 			},
 		})
 	}
@@ -1162,7 +1163,7 @@ func persistEdgeSnapshotProjectionWithContents(contents []edgeSnapshotDatasetBui
 		snapshot := model.EdgeCompiledSnapshot{
 			SnapshotUID:               snapshotUID,
 			Revision:                  revision,
-			ProtocolVersion:           dto.EdgeControlProtocolVersionV1,
+			ProtocolVersion:           dto.EdgeControlProtocolVersionV2,
 			Status:                    model.EdgeCompiledSnapshotStatusDraft,
 			HashAlgorithm:             edgesnapshot.HashAlgorithm,
 			Digest:                    topDigest,

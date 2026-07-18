@@ -255,12 +255,12 @@ func (c *EdgeControlClient) NewRequestMeta(kind string) (dto.EdgeControlRequestM
 	if err := edgeauth.ValidateIdempotencyKey(requestID); err != nil {
 		return dto.EdgeControlRequestMetaV1{}, err
 	}
-	return dto.EdgeControlRequestMetaV1{ProtocolVersion: dto.EdgeControlProtocolVersionV1, RequestID: requestID}, nil
+	return dto.EdgeControlRequestMetaV1{ProtocolVersion: dto.EdgeControlProtocolVersionV2, RequestID: requestID}, nil
 }
 
 func (c *EdgeControlClient) prepareMeta(meta dto.EdgeControlRequestMetaV1, kind string) (dto.EdgeControlRequestMetaV1, error) {
 	if meta.ProtocolVersion == "" {
-		meta.ProtocolVersion = dto.EdgeControlProtocolVersionV1
+		meta.ProtocolVersion = dto.EdgeControlProtocolVersionV2
 	}
 	if meta.RequestID == "" {
 		generated, err := c.NewRequestMeta(kind)
@@ -327,6 +327,11 @@ func (c *EdgeControlClient) Heartbeat(ctx context.Context, request dto.EdgeHeart
 	if response.Snapshot != nil {
 		if err := response.Snapshot.Validate(); err != nil {
 			return nil, edgeControlInvalidResponse("heartbeat snapshot", err)
+		}
+	}
+	if response.BalanceDelta != nil {
+		if err := response.BalanceDelta.Validate(); err != nil {
+			return nil, edgeControlInvalidResponse("heartbeat balance delta", err)
 		}
 	}
 	if response.SettlementAck != nil {
@@ -488,6 +493,9 @@ func (c *EdgeControlClient) validateSettlementAck(ack dto.EdgeSettlementAckV1) e
 func (c *EdgeControlClient) validateResponseMeta(meta dto.EdgeControlResponseMetaV1, requestID string) error {
 	if err := meta.Validate(); err != nil {
 		return edgeControlInvalidResponse("response metadata", err)
+	}
+	if meta.ProtocolVersion != dto.EdgeControlProtocolVersionV2 {
+		return fmt.Errorf("%w: response protocol_version must be %s", ErrEdgeControlProtocolViolation, dto.EdgeControlProtocolVersionV2)
 	}
 	if meta.RequestID != requestID {
 		return fmt.Errorf("%w: response request_id does not match request", ErrEdgeControlProtocolViolation)

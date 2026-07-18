@@ -453,6 +453,7 @@ func edgeCompiledSnapshotTestPayload(dataset dto.EdgeSnapshotDatasetV1) dto.Edge
 			Enabled:      true,
 			Username:     "edge-user",
 			DefaultGroup: "default",
+			Setting:      dto.EdgeUserSettingV1{BillingPreference: "subscription_first"},
 		}}
 	case dto.EdgeSnapshotDatasetGroupsV1:
 		payload.Groups = []dto.EdgeGroupPolicyV1{{

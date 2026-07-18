@@ -310,7 +310,7 @@ func (r *edgeControlLoop) bootstrap(ctx context.Context) (dto.EdgeNodeControlCon
 		return dto.EdgeNodeControlConfigV1{}, err
 	}
 	response, err := r.client.Bootstrap(ctx, dto.EdgeBootstrapRequestV1{
-		SupportedProtocolVersions: []string{dto.EdgeControlProtocolVersionV1},
+		SupportedProtocolVersions: []string{dto.EdgeControlProtocolVersionV2, dto.EdgeControlProtocolVersionV1},
 		Declaration:               r.client.Declaration(),
 		Snapshot:                  *snapshot,
 		Settlement:                *settlement,

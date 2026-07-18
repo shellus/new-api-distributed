@@ -135,7 +135,7 @@ func TestEdgeControlModelsRejectInvalidIdentityAndCounters(t *testing.T) {
 		},
 		{
 			name: "unsupported protocol version",
-			node: EdgeNode{NodeUID: "edge-unsupported-protocol", Name: "Edge", Generation: 1, ProtocolVersion: "edge-control.v2"},
+			node: EdgeNode{NodeUID: "edge-unsupported-protocol", Name: "Edge", Generation: 1, ProtocolVersion: "edge-control.v3"},
 		},
 		{
 			name: "negative accounting cursor",

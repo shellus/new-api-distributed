@@ -28,7 +28,7 @@ func TestEdgeTokenAuthUsesOpaqueFingerprintForTokenContext(t *testing.T) {
 	auth := dto.EdgeTokenAuthRecordV1{
 		TokenFingerprint: fingerprint, TokenID: 2, UserID: 1, Enabled: true,
 	}
-	user := dto.EdgeUserPolicyV1{UserID: 1, Enabled: true, Username: "edge-user", DefaultGroup: "default"}
+	user := dto.EdgeUserPolicyV1{UserID: 1, Enabled: true, Username: "edge-user", DefaultGroup: "default", Setting: dto.EdgeUserSettingV1{BillingPreference: "subscription_first"}}
 	group := dto.EdgeGroupPolicyV1{
 		UserGroup:   "default",
 		UsingGroups: []dto.EdgeUsingGroupPolicyV1{{Group: "default", Enabled: true, Ratio: 1}},

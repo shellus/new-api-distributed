@@ -22,6 +22,7 @@ import (
 func TestProcessBootstrapPersistsDeclarationAndReplaysExactResponse(t *testing.T) {
 	db, principal := newControlMutationFixture(t)
 	now := time.Now().Truncate(time.Second)
+	require.NoError(t, db.Model(&model.EdgeNode{}).Where("id = ?", principal.NodeID).Update("protocol_version", dto.EdgeControlProtocolVersionV1).Error)
 	bundle := createPublishedControlSnapshot(t, now)
 	request := controlBootstrapRequest(now, principal.SignedRequest.Metadata.IdempotencyKey)
 
@@ -38,6 +39,7 @@ func TestProcessBootstrapPersistsDeclarationAndReplaysExactResponse(t *testing.T
 	require.NoError(t, db.First(&node, principal.NodeID).Error)
 	assert.Equal(t, request.Declaration.PublicURL, node.DeclaredPublicURL)
 	assert.Equal(t, request.Declaration.SoftwareVersion, node.SoftwareVersion)
+	assert.Equal(t, dto.EdgeControlProtocolVersionV2, node.ProtocolVersion)
 	assert.Equal(t, now.Unix(), node.LastSeenAt)
 
 	retry := cloneControlPrincipalWithNonce(principal, "YWJjZGVmMDEyMzQ1Njc4OQ")
@@ -66,6 +68,23 @@ func TestProcessBootstrapPersistsCorrelationRejection(t *testing.T) {
 	assert.Equal(t, response.Body, replayed.Body)
 }
 
+func TestProcessBootstrapRejectsV1OnlyEdgeWithExpectedV2(t *testing.T) {
+	_, principal := newControlMutationFixture(t)
+	now := time.Now().Truncate(time.Second)
+	request := controlBootstrapRequest(now, principal.SignedRequest.Metadata.IdempotencyKey)
+	request.Meta.ProtocolVersion = dto.EdgeControlProtocolVersionV1
+	request.SupportedProtocolVersions = []string{dto.EdgeControlProtocolVersionV1}
+
+	response, err := ProcessBootstrap(principal, request, "server-bootstrap-v1", now)
+	require.NoError(t, err)
+	assert.Equal(t, 426, response.StatusCode)
+	var body dto.EdgeControlErrorResponseV1
+	require.NoError(t, common.Unmarshal(response.Body, &body))
+	assert.Equal(t, dto.EdgeControlErrorCodeUnsupportedProtocolV1, body.Error.Code)
+	require.NotNil(t, body.Error.Expected)
+	assert.Equal(t, []string{dto.EdgeControlProtocolVersionV2}, body.Error.Expected.ProtocolVersions)
+}
+
 func TestProcessHeartbeatStoresTypedObservationAndOmitsUnchangedSnapshot(t *testing.T) {
 	db, principal := newControlMutationFixture(t)
 	now := time.Now().Truncate(time.Second)
@@ -77,7 +96,7 @@ func TestProcessHeartbeatStoresTypedObservationAndOmitsUnchangedSnapshot(t *test
 		datasetStates = append(datasetStates, dto.EdgeSnapshotDatasetStateV1{Dataset: dataset.Dataset, Revision: dataset.Revision})
 	}
 	request := dto.EdgeHeartbeatRequestV1{
-		Meta:        dto.EdgeControlRequestMetaV1{ProtocolVersion: dto.EdgeControlProtocolVersionV1, RequestID: "heartbeat-1"},
+		Meta:        dto.EdgeControlRequestMetaV1{ProtocolVersion: dto.EdgeControlProtocolVersionV2, RequestID: "heartbeat-1"},
 		Declaration: controlDeclaration(now),
 		Snapshot: dto.EdgeSnapshotStateV1{
 			SnapshotID:         bundle.Manifest.SnapshotID,
@@ -102,12 +121,25 @@ func TestProcessHeartbeatStoresTypedObservationAndOmitsUnchangedSnapshot(t *test
 	var body dto.EdgeHeartbeatResponseV1
 	require.NoError(t, common.Unmarshal(response.Body, &body))
 	assert.Nil(t, body.Snapshot)
+	require.NotNil(t, body.BalanceDelta)
+	assert.True(t, body.BalanceDelta.Full)
+	assert.Equal(t, int64(1), body.BalanceDelta.Revision)
 
 	var heartbeat model.EdgeNodeHeartbeat
 	require.NoError(t, db.Where("node_id = ?", principal.NodeID).First(&heartbeat).Error)
 	assert.Equal(t, bundle.Manifest.SnapshotID, heartbeat.SnapshotUID)
 	assert.Equal(t, int64(2), heartbeat.InFlightRequests)
+	assert.Zero(t, heartbeat.BalanceRevision)
 	assert.NotContains(t, heartbeat.CPAPayload, "http://")
+
+	principal = cloneControlPrincipalForRequest(principal, "heartbeat-2", "YWJjZGVmMDEyMzQ1Njc4Ng")
+	request.Meta.RequestID = "heartbeat-2"
+	request.BalanceRevision = body.BalanceDelta.Revision
+	response, err = ProcessHeartbeat(principal, request, "server-heartbeat-2", now.Add(time.Second))
+	require.NoError(t, err)
+	body = dto.EdgeHeartbeatResponseV1{}
+	require.NoError(t, common.Unmarshal(response.Body, &body))
+	assert.Nil(t, body.BalanceDelta)
 }
 
 func TestProcessSnapshotPageReturnsCanonicalPageAndStableCursor(t *testing.T) {
@@ -227,8 +259,8 @@ func createPublishedControlSnapshot(t *testing.T, now time.Time) *model.EdgeComp
 
 func controlBootstrapRequest(now time.Time, requestID string) dto.EdgeBootstrapRequestV1 {
 	return dto.EdgeBootstrapRequestV1{
-		Meta:                      dto.EdgeControlRequestMetaV1{ProtocolVersion: dto.EdgeControlProtocolVersionV1, RequestID: requestID},
-		SupportedProtocolVersions: []string{dto.EdgeControlProtocolVersionV1},
+		Meta:                      dto.EdgeControlRequestMetaV1{ProtocolVersion: dto.EdgeControlProtocolVersionV2, RequestID: requestID},
+		SupportedProtocolVersions: []string{dto.EdgeControlProtocolVersionV2, dto.EdgeControlProtocolVersionV1},
 		Declaration:               controlDeclaration(now),
 		Settlement:                dto.EdgeSettlementStateV1{NextEventSequence: 1},
 	}
@@ -270,7 +302,7 @@ func controlSnapshotPayload(dataset dto.EdgeSnapshotDatasetV1) dto.EdgeSnapshotP
 	case dto.EdgeSnapshotDatasetAuthenticationV1:
 		payload.Authentication = []dto.EdgeTokenAuthRecordV1{{TokenFingerprint: strings.Repeat("1", 64), TokenID: 1, UserID: 1, Enabled: true}}
 	case dto.EdgeSnapshotDatasetUsersV1:
-		payload.Users = []dto.EdgeUserPolicyV1{{UserID: 1, Enabled: true, Username: "edge-user", DefaultGroup: "default"}}
+		payload.Users = []dto.EdgeUserPolicyV1{{UserID: 1, Enabled: true, Username: "edge-user", DefaultGroup: "default", Setting: dto.EdgeUserSettingV1{BillingPreference: "subscription_first"}}}
 	case dto.EdgeSnapshotDatasetGroupsV1:
 		payload.Groups = []dto.EdgeGroupPolicyV1{{UserGroup: "default", UsingGroups: []dto.EdgeUsingGroupPolicyV1{{Group: "default", Enabled: true, Ratio: 1}}}}
 	case dto.EdgeSnapshotDatasetModelsV1:

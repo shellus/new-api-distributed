@@ -224,6 +224,7 @@ func TestEdgeControlV1ContractsRoundTripWithCommonJSON(t *testing.T) {
 						Setting: EdgeUserSettingV1{
 							AcceptUnsetRatioModel: false,
 							Language:              "en",
+							BillingPreference:     "subscription_first",
 						},
 					},
 				},
@@ -922,7 +923,7 @@ func TestEdgeControlRequestMetaV1Validate(t *testing.T) {
 		name string
 		meta EdgeControlRequestMetaV1
 	}{
-		{name: "wrong protocol", meta: EdgeControlRequestMetaV1{ProtocolVersion: "edge-control.v2", RequestID: "request-1"}},
+		{name: "wrong protocol", meta: EdgeControlRequestMetaV1{ProtocolVersion: "edge-control.v3", RequestID: "request-1"}},
 		{name: "empty request id", meta: edgeTestRequestMetaV1("")},
 		{name: "uppercase request id", meta: edgeTestRequestMetaV1("Request-1")},
 		{name: "non ascii request id", meta: edgeTestRequestMetaV1("请求-1")},
@@ -1252,7 +1253,7 @@ func TestEdgeControlResponseMetaV1Validate(t *testing.T) {
 		name   string
 		mutate func(*EdgeControlResponseMetaV1)
 	}{
-		{name: "wrong protocol", mutate: func(value *EdgeControlResponseMetaV1) { value.ProtocolVersion = "edge-control.v2" }},
+		{name: "wrong protocol", mutate: func(value *EdgeControlResponseMetaV1) { value.ProtocolVersion = "edge-control.v3" }},
 		{name: "uppercase client request id", mutate: func(value *EdgeControlResponseMetaV1) { value.RequestID = "Request-1" }},
 		{name: "missing server request id", mutate: func(value *EdgeControlResponseMetaV1) { value.ServerRequestID = "" }},
 		{name: "uppercase server request id", mutate: func(value *EdgeControlResponseMetaV1) { value.ServerRequestID = "Server-1" }},
@@ -1458,7 +1459,7 @@ func edgeValidSnapshotPageResponseV1(dataset EdgeSnapshotDatasetV1) EdgeSnapshot
 			Username:     "edge user",
 			Email:        "edge-user@example.invalid",
 			DefaultGroup: "default",
-			Setting:      EdgeUserSettingV1{Language: "en"},
+			Setting:      EdgeUserSettingV1{Language: "en", BillingPreference: "subscription_first"},
 		}}
 	case EdgeSnapshotDatasetGroupsV1:
 		response.Payload.Groups = []EdgeGroupPolicyV1{{
@@ -2105,6 +2106,6 @@ func TestEdgeSettlementBlockAndAckV1Validate(t *testing.T) {
 		Ack:  edgeTestSettlementAckV1(),
 	}
 	require.NoError(t, response.Validate())
-	response.Meta.ProtocolVersion = "edge-control.v2"
+	response.Meta.ProtocolVersion = "edge-control.v3"
 	assert.Error(t, response.Validate())
 }

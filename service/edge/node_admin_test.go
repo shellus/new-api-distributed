@@ -30,7 +30,7 @@ func TestCreateNodeStoresOnlyPublicCredentialMaterial(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "edge.pro20x4.sg", response.Node.NodeID)
 	assert.Equal(t, int64(1), response.Node.Generation)
-	assert.Equal(t, dto.EdgeControlProtocolVersionV1, response.Node.ProtocolVersion)
+	assert.Equal(t, dto.EdgeControlProtocolVersionV2, response.Node.ProtocolVersion)
 	assert.Equal(t, string(model.EdgeNodeStatusActive), response.Node.Status)
 	assert.Equal(t, int64(100_000), response.Node.MaxOutstandingQuota)
 	assert.Equal(t, edgeauth.Algorithm, response.Credential.Algorithm)

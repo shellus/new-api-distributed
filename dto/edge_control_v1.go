@@ -19,6 +19,7 @@ import (
 
 const (
 	EdgeControlProtocolVersionV1                = "edge-control.v1"
+	EdgeControlProtocolVersionV2                = "edge-control.v2"
 	EdgeControlMaxIdentifierLengthV1            = 64
 	EdgeControlMaxPublicURLLengthV1             = 2048
 	EdgeControlMaxNodeNameLengthV1              = 128
@@ -56,6 +57,7 @@ const (
 	EdgeControlMaxAffinitySourcePathLengthV1    = 1024
 	EdgeControlMaxAffinityEntriesV1             = 10_000_000
 	EdgeControlMaxAffinityTTLSecondsV1          = int64(31_536_000)
+	EdgeControlMaxBalanceItemsV2                = 100_000
 
 	edgeControlMinUnixMilliV1 = int64(946684800000)    // 2000-01-01T00:00:00Z
 	edgeControlMaxUnixMilliV1 = int64(253402300799999) // 9999-12-31T23:59:59.999Z
@@ -91,6 +93,10 @@ const (
 	EdgeSnapshotDatasetPricingV1        EdgeSnapshotDatasetV1 = "pricing"
 	EdgeSnapshotDatasetRoutingV1        EdgeSnapshotDatasetV1 = "routing"
 )
+
+type EdgeBalanceDatasetV2 string
+
+const EdgeBalanceDatasetBalancesV2 EdgeBalanceDatasetV2 = "balances"
 
 type EdgeChannelAffinityKeySourceTypeV1 string
 
@@ -319,11 +325,12 @@ type EdgeTokenAuthRecordV1 struct {
 }
 
 // EdgeUserSettingV1 is the allowlisted subset of user settings consumed by the
-// text relay. Billing preference, notification endpoints and their secrets are
-// deliberately excluded because lease funding is authoritative on edge.
+// text relay and edge-local funding selection. Notification endpoints and
+// their secrets are deliberately excluded.
 type EdgeUserSettingV1 struct {
 	AcceptUnsetRatioModel bool   `json:"accept_unset_ratio_model"`
 	Language              string `json:"language,omitempty"`
+	BillingPreference     string `json:"billing_preference"`
 }
 
 // EdgeUserPolicyV1 is the non-secret user context required by local token
@@ -629,20 +636,59 @@ type EdgeCPAStatusV1 struct {
 }
 
 type EdgeHeartbeatRequestV1 struct {
-	Meta        EdgeControlRequestMetaV1  `json:"meta"`
-	Declaration EdgeNodeDeclarationV1     `json:"declaration"`
-	Snapshot    EdgeSnapshotStateV1       `json:"snapshot"`
-	Settlement  EdgeSettlementStateV1     `json:"settlement"`
-	Leases      []EdgeLeaseRuntimeStateV1 `json:"leases"`
-	Runtime     EdgeRuntimeStatusV1       `json:"runtime"`
-	CPA         []EdgeCPAStatusV1         `json:"cpa"`
+	Meta            EdgeControlRequestMetaV1  `json:"meta"`
+	Declaration     EdgeNodeDeclarationV1     `json:"declaration"`
+	Snapshot        EdgeSnapshotStateV1       `json:"snapshot"`
+	Settlement      EdgeSettlementStateV1     `json:"settlement"`
+	BalanceRevision int64                     `json:"balance_revision,omitempty"`
+	Leases          []EdgeLeaseRuntimeStateV1 `json:"leases"`
+	Runtime         EdgeRuntimeStatusV1       `json:"runtime"`
+	CPA             []EdgeCPAStatusV1         `json:"cpa"`
 }
 
 type EdgeHeartbeatResponseV1 struct {
 	Meta          EdgeControlResponseMetaV1 `json:"meta"`
 	Control       EdgeNodeControlConfigV1   `json:"control"`
 	Snapshot      *EdgeSnapshotManifestV1   `json:"snapshot,omitempty"`
+	BalanceDelta  *EdgeBalanceDeltaV2       `json:"balance_delta,omitempty"`
 	SettlementAck *EdgeSettlementAckV1      `json:"settlement_ack,omitempty"`
+}
+
+type EdgeWalletBalanceV2 struct {
+	UserID      int64 `json:"user_id"`
+	RemainQuota int64 `json:"remain_quota"`
+	Deleted     bool  `json:"deleted,omitempty"`
+}
+
+type EdgeTokenBalanceV2 struct {
+	TokenID        int64 `json:"token_id"`
+	UserID         int64 `json:"user_id"`
+	RemainQuota    int64 `json:"remain_quota"`
+	UnlimitedQuota bool  `json:"unlimited_quota"`
+	Deleted        bool  `json:"deleted,omitempty"`
+}
+
+type EdgeSubscriptionBalanceV2 struct {
+	SubscriptionID       int64 `json:"subscription_id"`
+	UserID               int64 `json:"user_id"`
+	TotalQuota           int64 `json:"total_quota"`
+	RemainQuota          int64 `json:"remain_quota"`
+	UnlimitedQuota       bool  `json:"unlimited_quota"`
+	NextResetAtUnixMilli int64 `json:"next_reset_at_unix_milli,omitempty"`
+	ExpiresAtUnixMilli   int64 `json:"expires_at_unix_milli"`
+	AllowWalletOverflow  bool  `json:"allow_wallet_overflow"`
+	Deleted              bool  `json:"deleted,omitempty"`
+}
+
+type EdgeBalanceDeltaV2 struct {
+	Dataset                          EdgeBalanceDatasetV2        `json:"dataset"`
+	BaseRevision                     int64                       `json:"base_revision"`
+	Revision                         int64                       `json:"revision"`
+	Full                             bool                        `json:"full"`
+	SettlementAppliedThroughSequence int64                       `json:"settlement_applied_through_sequence"`
+	Wallets                          []EdgeWalletBalanceV2       `json:"wallets,omitempty"`
+	Tokens                           []EdgeTokenBalanceV2        `json:"tokens,omitempty"`
+	Subscriptions                    []EdgeSubscriptionBalanceV2 `json:"subscriptions,omitempty"`
 }
 
 type EdgeControlExpectedStateV1 struct {
@@ -688,6 +734,14 @@ func (d EdgeSnapshotDatasetV1) Valid() bool {
 	default:
 		return false
 	}
+}
+
+func (d EdgeBalanceDatasetV2) Valid() bool {
+	return d == EdgeBalanceDatasetBalancesV2
+}
+
+func validEdgeControlProtocolVersion(version string) bool {
+	return version == EdgeControlProtocolVersionV1 || version == EdgeControlProtocolVersionV2
 }
 
 func (t EdgeChannelAffinityKeySourceTypeV1) Valid() bool {
@@ -764,15 +818,15 @@ func (s EdgeLocalServiceV1) Valid() bool {
 }
 
 func (m EdgeControlRequestMetaV1) Validate() error {
-	if m.ProtocolVersion != EdgeControlProtocolVersionV1 {
-		return fmt.Errorf("protocol_version must be %q", EdgeControlProtocolVersionV1)
+	if !validEdgeControlProtocolVersion(m.ProtocolVersion) {
+		return fmt.Errorf("protocol_version must be %q or %q", EdgeControlProtocolVersionV1, EdgeControlProtocolVersionV2)
 	}
 	return validateEdgeControlIdentifierV1("request_id", m.RequestID)
 }
 
 func (m EdgeControlResponseMetaV1) Validate() error {
-	if m.ProtocolVersion != EdgeControlProtocolVersionV1 {
-		return fmt.Errorf("protocol_version must be %q", EdgeControlProtocolVersionV1)
+	if !validEdgeControlProtocolVersion(m.ProtocolVersion) {
+		return fmt.Errorf("protocol_version must be %q or %q", EdgeControlProtocolVersionV1, EdgeControlProtocolVersionV2)
 	}
 	if m.RequestID != "" {
 		if err := validateEdgeControlIdentifierV1("request_id", m.RequestID); err != nil {
@@ -971,7 +1025,6 @@ func (r EdgeBootstrapRequestV1) Validate() error {
 	if len(r.SupportedProtocolVersions) > EdgeControlMaxSupportedProtocolVersionsV1 {
 		return fmt.Errorf("supported_protocol_versions exceeds %d items", EdgeControlMaxSupportedProtocolVersionsV1)
 	}
-	containsV1 := false
 	seen := make(map[string]struct{}, len(r.SupportedProtocolVersions))
 	for i, version := range r.SupportedProtocolVersions {
 		if err := validateEdgeControlIdentifierV1(fmt.Sprintf("supported_protocol_versions[%d]", i), version); err != nil {
@@ -981,10 +1034,9 @@ func (r EdgeBootstrapRequestV1) Validate() error {
 			return fmt.Errorf("supported_protocol_versions contains duplicate version %q", version)
 		}
 		seen[version] = struct{}{}
-		containsV1 = containsV1 || version == EdgeControlProtocolVersionV1
 	}
-	if !containsV1 {
-		return fmt.Errorf("supported_protocol_versions must contain %q", EdgeControlProtocolVersionV1)
+	if _, exists := seen[r.Meta.ProtocolVersion]; !exists {
+		return fmt.Errorf("meta.protocol_version must be declared in supported_protocol_versions")
 	}
 	if err := r.Declaration.Validate(); err != nil {
 		return err
@@ -1058,6 +1110,9 @@ func (r EdgeHeartbeatRequestV1) Validate() error {
 	}
 	if err := r.Settlement.Validate(); err != nil {
 		return err
+	}
+	if r.BalanceRevision < 0 {
+		return fmt.Errorf("balance_revision must not be negative")
 	}
 	if len(r.Leases) > EdgeControlMaxHeartbeatLeasesV1 {
 		return fmt.Errorf("leases exceeds %d items", EdgeControlMaxHeartbeatLeasesV1)
@@ -2143,6 +2198,113 @@ func validateEdgeUserPolicyV1(user EdgeUserPolicyV1) error {
 			return err
 		}
 	}
+	if user.Setting.BillingPreference != common.NormalizeBillingPreference(user.Setting.BillingPreference) {
+		return fmt.Errorf("setting.billing_preference is invalid")
+	}
+	return nil
+}
+
+func (d EdgeBalanceDeltaV2) Validate() error {
+	if !d.Dataset.Valid() {
+		return fmt.Errorf("balance_delta.dataset must be %q", EdgeBalanceDatasetBalancesV2)
+	}
+	if d.BaseRevision < 0 {
+		return fmt.Errorf("balance_delta.base_revision must not be negative")
+	}
+	if d.Revision <= d.BaseRevision {
+		return fmt.Errorf("balance_delta.revision must be greater than base_revision")
+	}
+	if d.SettlementAppliedThroughSequence < 0 {
+		return fmt.Errorf("balance_delta.settlement_applied_through_sequence must not be negative")
+	}
+	if len(d.Wallets)+len(d.Tokens)+len(d.Subscriptions) > EdgeControlMaxBalanceItemsV2 {
+		return fmt.Errorf("balance_delta exceeds %d items", EdgeControlMaxBalanceItemsV2)
+	}
+	for i := range d.Wallets {
+		wallet := d.Wallets[i]
+		if wallet.UserID <= 0 {
+			return fmt.Errorf("balance_delta.wallets[%d].user_id must be greater than zero", i)
+		}
+		if i > 0 && wallet.UserID <= d.Wallets[i-1].UserID {
+			return fmt.Errorf("balance_delta.wallets must use canonical user_id order")
+		}
+		if d.Full && wallet.Deleted {
+			return fmt.Errorf("balance_delta full wallets must not contain tombstones")
+		}
+		if wallet.Deleted {
+			if wallet.RemainQuota != 0 {
+				return fmt.Errorf("balance_delta wallet tombstone must contain only user_id")
+			}
+			continue
+		}
+		if err := validateEdgeControlSignedQuotaV2("balance_delta.wallet.remain_quota", wallet.RemainQuota); err != nil {
+			return err
+		}
+	}
+	for i := range d.Tokens {
+		token := d.Tokens[i]
+		if token.TokenID <= 0 || token.UserID <= 0 {
+			return fmt.Errorf("balance_delta.tokens[%d] ids must be greater than zero", i)
+		}
+		if i > 0 && token.TokenID <= d.Tokens[i-1].TokenID {
+			return fmt.Errorf("balance_delta.tokens must use canonical token_id order")
+		}
+		if d.Full && token.Deleted {
+			return fmt.Errorf("balance_delta full tokens must not contain tombstones")
+		}
+		if token.Deleted {
+			if token.RemainQuota != 0 || token.UnlimitedQuota {
+				return fmt.Errorf("balance_delta token tombstone must contain only token_id and user_id")
+			}
+			continue
+		}
+		if token.UnlimitedQuota && token.RemainQuota != 0 {
+			return fmt.Errorf("balance_delta unlimited token remain_quota must be zero")
+		}
+		if err := validateEdgeControlSignedQuotaV2("balance_delta.token.remain_quota", token.RemainQuota); err != nil {
+			return err
+		}
+	}
+	for i := range d.Subscriptions {
+		subscription := d.Subscriptions[i]
+		if subscription.SubscriptionID <= 0 || subscription.UserID <= 0 {
+			return fmt.Errorf("balance_delta.subscriptions[%d] ids must be greater than zero", i)
+		}
+		if i > 0 && subscription.SubscriptionID <= d.Subscriptions[i-1].SubscriptionID {
+			return fmt.Errorf("balance_delta.subscriptions must use canonical subscription_id order")
+		}
+		if d.Full && subscription.Deleted {
+			return fmt.Errorf("balance_delta full subscriptions must not contain tombstones")
+		}
+		if subscription.Deleted {
+			if subscription.TotalQuota != 0 || subscription.RemainQuota != 0 || subscription.UnlimitedQuota ||
+				subscription.NextResetAtUnixMilli != 0 || subscription.ExpiresAtUnixMilli != 0 || subscription.AllowWalletOverflow {
+				return fmt.Errorf("balance_delta subscription tombstone must contain only subscription_id and user_id")
+			}
+			continue
+		}
+		if subscription.UnlimitedQuota {
+			if subscription.TotalQuota != 0 || subscription.RemainQuota != 0 {
+				return fmt.Errorf("balance_delta unlimited subscription quotas must be zero")
+			}
+		} else {
+			if subscription.TotalQuota <= 0 || subscription.TotalQuota > int64(common.MaxQuota) {
+				return fmt.Errorf("balance_delta subscription total_quota must be between 1 and %d", common.MaxQuota)
+			}
+			if err := validateEdgeControlSignedQuotaV2("balance_delta.subscription.remain_quota", subscription.RemainQuota); err != nil {
+				return err
+			}
+		}
+		if err := validateEdgeControlUnixMilliV1("balance_delta.subscription.expires_at_unix_milli", subscription.ExpiresAtUnixMilli, false); err != nil {
+			return err
+		}
+		if err := validateEdgeControlUnixMilliV1("balance_delta.subscription.next_reset_at_unix_milli", subscription.NextResetAtUnixMilli, true); err != nil {
+			return err
+		}
+		if subscription.NextResetAtUnixMilli > subscription.ExpiresAtUnixMilli {
+			return fmt.Errorf("balance_delta subscription next reset must not be after expiry")
+		}
+	}
 	return nil
 }
 
@@ -2362,6 +2524,13 @@ func validateEdgeControlFiniteFloatV1(field string, value float64, positive bool
 func validateEdgeControlQuotaV1(field string, value int64) error {
 	if value < 0 || value > int64(common.MaxQuota) {
 		return fmt.Errorf("%s must be between 0 and %d", field, common.MaxQuota)
+	}
+	return nil
+}
+
+func validateEdgeControlSignedQuotaV2(field string, value int64) error {
+	if value < -int64(common.MaxQuota) || value > int64(common.MaxQuota) {
+		return fmt.Errorf("%s must be between %d and %d", field, -common.MaxQuota, common.MaxQuota)
 	}
 	return nil
 }

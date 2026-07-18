@@ -47,6 +47,13 @@ func ProcessBootstrap(principal *ControlPrincipal, request dto.EdgeBootstrapRequ
 		return PersistInvalidControlRequest(principal, controlRequestKindBootstrap, request.Meta.RequestID, serverRequestID, now, err)
 	}
 	return ExecuteControlMutation(principal, controlRequestKindBootstrap, controlReceiptTTL(), func(tx *gorm.DB, identity *model.EdgeControlIdentity) (*ControlMutationResult, error) {
+		if !containsControlProtocol(request.SupportedProtocolVersions, dto.EdgeControlProtocolVersionV2) {
+			return unsupportedControlProtocolResult(request.Meta.RequestID, serverRequestID, now)
+		}
+		if err := model.UpdateEdgeNodeProtocolVersionTx(tx, identity.Node.ID, identity.Node.Generation, dto.EdgeControlProtocolVersionV2); err != nil {
+			return nil, err
+		}
+		identity.Node.ProtocolVersion = dto.EdgeControlProtocolVersionV2
 		updated, err := model.UpdateEdgeNodeDeclarationTx(tx, identity.Node.NodeUID, identity.Node.Generation, declarationUpdate(request.Declaration, request.Snapshot.Revision, now))
 		if err != nil {
 			return nil, err
@@ -88,6 +95,9 @@ func ProcessHeartbeat(principal *ControlPrincipal, request dto.EdgeHeartbeatRequ
 		return PersistInvalidControlRequest(principal, controlRequestKindHeartbeat, request.Meta.RequestID, serverRequestID, now, err)
 	}
 	return ExecuteControlMutation(principal, controlRequestKindHeartbeat, controlReceiptTTL(), func(tx *gorm.DB, identity *model.EdgeControlIdentity) (*ControlMutationResult, error) {
+		if request.Meta.ProtocolVersion != dto.EdgeControlProtocolVersionV2 || identity.Node.ProtocolVersion != dto.EdgeControlProtocolVersionV2 {
+			return unsupportedControlProtocolResult(request.Meta.RequestID, serverRequestID, now)
+		}
 		updated, err := model.UpdateEdgeNodeDeclarationTx(tx, identity.Node.NodeUID, identity.Node.Generation, declarationUpdate(request.Declaration, request.Snapshot.Revision, now))
 		if err != nil {
 			return nil, err
@@ -96,12 +106,13 @@ func ProcessHeartbeat(principal *ControlPrincipal, request dto.EdgeHeartbeatRequ
 			return nil, ErrControlAuthentication
 		}
 		if err := model.UpsertEdgeNodeHeartbeatTx(tx, identity.Node.ID, identity.Node.Generation, model.EdgeNodeHeartbeatObservation{
-			Snapshot:   request.Snapshot,
-			Settlement: request.Settlement,
-			Leases:     request.Leases,
-			Runtime:    request.Runtime,
-			CPA:        request.CPA,
-			ObservedAt: now.Unix(),
+			Snapshot:        request.Snapshot,
+			Settlement:      request.Settlement,
+			BalanceRevision: request.BalanceRevision,
+			Leases:          request.Leases,
+			Runtime:         request.Runtime,
+			CPA:             request.CPA,
+			ObservedAt:      now.Unix(),
 		}); err != nil {
 			return nil, err
 		}
@@ -117,6 +128,18 @@ func ProcessHeartbeat(principal *ControlPrincipal, request dto.EdgeHeartbeatRequ
 			Meta:    NewControlResponseMeta(request.Meta.RequestID, serverRequestID, now),
 			Control: control,
 		}
+		balanceDelta, err := model.PrepareEdgeBalanceDeltaTx(
+			tx,
+			identity.Node.ID,
+			identity.Node.Generation,
+			request.BalanceRevision,
+			identity.Node.LastEventSeq,
+			now,
+		)
+		if err != nil {
+			return nil, err
+		}
+		response.BalanceDelta = balanceDelta
 		if snapshotStateChanged(request.Snapshot, bundle.Manifest) {
 			manifest := bundle.Manifest
 			response.Snapshot = &manifest
@@ -132,8 +155,40 @@ func ProcessHeartbeat(principal *ControlPrincipal, request dto.EdgeHeartbeatRequ
 				return nil, err
 			}
 		}
+		if response.BalanceDelta != nil {
+			if err := response.BalanceDelta.Validate(); err != nil {
+				return nil, err
+			}
+		}
 		return &ControlMutationResult{StatusCode: http.StatusOK, ResultRef: bundle.Manifest.SnapshotID, Response: response}, nil
 	})
+}
+
+func unsupportedControlProtocolResult(clientRequestID string, serverRequestID string, now time.Time) (*ControlMutationResult, error) {
+	response, err := NewControlErrorResponse(
+		http.StatusUpgradeRequired,
+		dto.EdgeControlErrorCodeUnsupportedProtocolV1,
+		"edge-control.v2 is required",
+		false,
+		clientRequestID,
+		serverRequestID,
+		now,
+		nil,
+		&dto.EdgeControlExpectedStateV1{ProtocolVersions: []string{dto.EdgeControlProtocolVersionV2}},
+	)
+	if err != nil {
+		return nil, err
+	}
+	return &ControlMutationResult{StatusCode: http.StatusUpgradeRequired, Response: response}, nil
+}
+
+func containsControlProtocol(versions []string, expected string) bool {
+	for _, version := range versions {
+		if version == expected {
+			return true
+		}
+	}
+	return false
 }
 
 func ProcessSnapshotManifest(principal *ControlPrincipal, request dto.EdgeSnapshotManifestRequestV1, serverRequestID string, now time.Time) (*ControlHTTPResponse, error) {
