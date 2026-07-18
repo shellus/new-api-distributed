@@ -505,6 +505,7 @@ type legacyEdgeHeartbeatBalanceMigration struct {
 func (legacyEdgeHeartbeatBalanceMigration) TableName() string { return "edge_node_heartbeats" }
 
 type legacyEdgeUsageBalanceMigration struct {
+	LeaseID             *int64  `gorm:"column:lease_id;type:bigint"`
 	SnapshotID          *int64  `gorm:"column:snapshot_id;type:bigint"`
 	SnapshotRevision    *int64  `gorm:"column:snapshot_revision;type:bigint"`
 	PricingRevision     *int64  `gorm:"column:pricing_revision;type:bigint"`
@@ -587,6 +588,11 @@ func migrateLegacyEdgeBalanceSchema() error {
 				if err := tx.Table(migration.table).Where(field.column+" IS NULL").Update(field.column, field.value).Error; err != nil {
 					return fmt.Errorf("backfill legacy edge balance column %s.%s: %w", migration.table, field.column, err)
 				}
+			}
+		}
+		if tx.Migrator().HasTable(legacyUsage) && tx.Migrator().HasColumn(legacyUsage, "lease_id") {
+			if err := tx.Migrator().AlterColumn(legacyUsage, "LeaseID"); err != nil {
+				return fmt.Errorf("make legacy edge usage lease_id nullable: %w", err)
 			}
 		}
 		return nil

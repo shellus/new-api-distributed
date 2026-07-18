@@ -119,6 +119,13 @@ type edgeUsageBalanceNotNullMigrationTest struct {
 
 func (edgeUsageBalanceNotNullMigrationTest) TableName() string { return "edge_usage_events" }
 
+type edgeUsageLegacyLeaseMigrationTest struct {
+	ID      int64 `gorm:"primaryKey"`
+	LeaseID int64 `gorm:"type:bigint;not null"`
+}
+
+func (edgeUsageLegacyLeaseMigrationTest) TableName() string { return "edge_usage_events" }
+
 func TestMasterBalanceSchemaMigrationBackfillsLegacyRowsBeforeNotNullMigration(t *testing.T) {
 	previousDB := DB
 	previousMainType := common.MainDatabaseType()
@@ -182,11 +189,11 @@ func exerciseMasterBalanceSchemaMigration(t *testing.T, db *gorm.DB) {
 
 	require.NoError(t, db.Exec("CREATE TABLE edge_nodes (id INTEGER PRIMARY KEY)").Error)
 	require.NoError(t, db.Exec("CREATE TABLE edge_node_heartbeats (id INTEGER PRIMARY KEY)").Error)
-	require.NoError(t, db.Exec("CREATE TABLE edge_usage_events (id INTEGER PRIMARY KEY, lease_id INTEGER NOT NULL)").Error)
+	require.NoError(t, db.AutoMigrate(&edgeUsageLegacyLeaseMigrationTest{}))
 	require.NoError(t, db.Exec("CREATE TABLE edge_consume_log_outboxes (id INTEGER PRIMARY KEY, status TEXT NOT NULL)").Error)
 	require.NoError(t, db.Exec("INSERT INTO edge_nodes (id) VALUES (1)").Error)
 	require.NoError(t, db.Exec("INSERT INTO edge_node_heartbeats (id) VALUES (1)").Error)
-	require.NoError(t, db.Exec("INSERT INTO edge_usage_events (id, lease_id) VALUES (1, 9)").Error)
+	require.NoError(t, db.Create(&edgeUsageLegacyLeaseMigrationTest{ID: 1, LeaseID: 9}).Error)
 	require.NoError(t, db.Exec("INSERT INTO edge_consume_log_outboxes (id, status) VALUES (1, ?)", EdgeConsumeLogOutboxStatusPublished).Error)
 
 	require.NoError(t, migrateLegacyEdgeBalanceSchema())
@@ -218,6 +225,10 @@ func exerciseMasterBalanceSchemaMigration(t *testing.T, db *gorm.DB) {
 	assert.Zero(t, usage.UserSubscriptionID)
 	assert.False(t, usage.TokenUnlimitedQuota)
 	assert.True(t, db.Migrator().HasColumn(&legacyEdgeUsageBalanceMigration{}, "lease_id"))
+	require.NoError(t, db.Create(&edgeUsageBalanceNotNullMigrationTest{ID: 2, FundingSource: legacyEdgeUsageFundingSource}).Error)
+	var nullLeaseIDs int64
+	require.NoError(t, db.Table("edge_usage_events").Where("id = ? AND lease_id IS NULL", 2).Count(&nullLeaseIDs).Error)
+	assert.Equal(t, int64(1), nullLeaseIDs)
 }
 
 func TestMasterBalanceSchemaMigrationRejectsUnpublishedLegacyOutbox(t *testing.T) {
@@ -235,9 +246,9 @@ func TestMasterBalanceSchemaMigrationRejectsUnpublishedLegacyOutbox(t *testing.T
 		}
 	})
 
-	require.NoError(t, db.Exec("CREATE TABLE edge_usage_events (id INTEGER PRIMARY KEY, lease_id INTEGER NOT NULL)").Error)
+	require.NoError(t, db.AutoMigrate(&edgeUsageLegacyLeaseMigrationTest{}))
 	require.NoError(t, db.Exec("CREATE TABLE edge_consume_log_outboxes (id INTEGER PRIMARY KEY, status TEXT NOT NULL)").Error)
-	require.NoError(t, db.Exec("INSERT INTO edge_usage_events (id, lease_id) VALUES (1, 9)").Error)
+	require.NoError(t, db.Create(&edgeUsageLegacyLeaseMigrationTest{ID: 1, LeaseID: 9}).Error)
 	require.NoError(t, db.Exec("INSERT INTO edge_consume_log_outboxes (id, status) VALUES (1, ?)", EdgeConsumeLogOutboxStatusPending).Error)
 
 	err = migrateLegacyEdgeBalanceSchema()
