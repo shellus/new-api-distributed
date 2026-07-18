@@ -214,6 +214,56 @@ go build ./cmd/newapi-edge
 
 当前状态：五个阶段均已完成。真实链路、故障边界、重放幂等、重启恢复和账务数据库核对结果已形成上述验收记录；后续变更仍须重新执行本节合并门和与变更相关的故障注入测试。
 
+## 余额复制替代配额租约（待实施）
+
+本节替代现有租约方向的后续演进，设计依据见 [ADR 0004](./adr/0004-replicated-balances-and-bounded-oversell.md) 与 [分布式余额复制设计](./distributed-balance-replication.md)。第一至第五阶段保留为当前 v1 实现和历史验收基线，不代表租约继续作为 v2 回退路径。
+
+### Phase A：设计与审阅门禁（已审阅通过）
+
+1. 新增 ADR 0004，显式替代 ADR 0002。
+2. 固定余额向量、每节点 revision、心跳 diff、本地 overlay、结算回冲、负下限和节点熔断语义。
+3. 技术负责人已裁决 batch update 双花窗口、settlement block 保留范围和受限 committed rejection 语义，允许进入 Phase B。
+
+### Phase B：Master 余额数据集与协议 v2
+
+1. heartbeat 读取已落库权威向量，不关闭 batch update；测试和文档按“实际双花上界 = batch 延迟 + heartbeat 周期”固定口径。
+2. 在 `dto/edge_control_v1.go` 增加 `edge-control.v2` 协商、余额 DTO、heartbeat revision/delta 和严格校验；只支持 v1 的 edge 返回明确的 unsupported protocol。
+3. 新增每节点 confirmed/pending 余额复制状态，一行保存完整规范向量与 settlement 水位；不增加余额 binlog、outbox 或上游写路径插桩。
+4. heartbeat 事务读取完整钱包、token、订阅向量，执行新增/删除/修改 diff；实现 pending 原样重发、ack 后推进、断档 full 和无变化零条目。
+5. 把规范化 `billing_preference` 加入现有低频用户策略快照；余额不进入签名策略快照。
+6. TDD 覆盖三种数据库上的向量读取、diff、revision 断档、并发 heartbeat 和协议拒绝；实现完成后执行项目后端合并门，测试通过并经用户确认后才提交。
+
+### Phase C：Edge 本地账本、overlay 与租约拆除
+
+1. 新增本地 balance account 表及 control revision 字段，第一次 v2 heartbeat 必须 full 初始化；余额与鉴权索引未同时就绪时 admission 关闭。
+2. 把 `EdgeLeaseFunding` 替换为 `EdgeBalanceFunding`，在同一 SQLite 事务预占资金账户和有限 token 账户；实现钱包/订阅优先级、unlimited 表示和 `EDGE_BALANCE_NEGATIVE_FLOOR_QUOTA`。
+3. reservation 固定 funding source、订阅 ID、token 维度、策略 revision 和 balance revision；staged settlement、usage event、outbox 和连续序号保持 durable。
+4. 应用 balance delta 时使用 `settlement_applied_through_sequence` 清除已回冲的 unsettled overlay，保留较新消费与 active reservation，避免绝对余额覆盖本地新消费。
+5. 删除 lease acquire/renew/close 的 DTO、路由、client、service、model、后台循环、环境变量和本地表；把仍需保留的 settlement/usage/outbox 代码迁到无 lease 命名的文件。
+6. readiness 不再检查策略快照 TTL；最后一份已验证策略过期后只冻结变化。显式 token 到期、节点禁用、accounting 故障和未初始化余额仍 fail closed。
+7. 提供旧 `edge.db` 清洁迁移检查；存在 active/staged/pending 账务时拒绝升级。
+8. TDD 覆盖断网持续扣减、负下限、退款、实际 charge 超预占、overlay 收敛、重启恢复和策略 TTL 过期继续服务；测试通过并经用户确认后才提交。
+
+### Phase D：Master 权威扣账与安全熔断
+
+1. settlement 保留 block 链、digest、receipt、事件唯一性和 consume-log outbox；v2 event 用余额来源与固定策略版本替换 lease ID。
+2. master 对区块先完整复核价格和节点事件时间窗口，再 exactly-once 扣减钱包或订阅及有限 token，允许权威余额为负，同时继续写统计、usage 和消费日志 outbox。
+3. 增加 `EDGE_NODE_SETTLEMENT_WINDOW_SECONDS`、`EDGE_NODE_SETTLEMENT_WINDOW_QUOTA` 和节点 circuit 状态；按事件完成时间计算滑动窗口，恢复期批量上传不按网络突发计量。
+4. 增加受限的 committed rejection 状态机，使超限区块不落账但能原子标记 circuit；edge 在 circuit 打开时停止 admission、继续 heartbeat 和保留 outbox。
+5. 实现人工恢复 epoch：管理员核账后清除 circuit，edge 为同一 durable block 轮换 HTTP request ID 后重试，block 内容和 digest 不变。
+6. TDD 覆盖熔断边界、并发区块、拒绝无部分扣账、旧拒绝 receipt、不同时序回放和人工恢复；测试通过并经用户确认后才提交。
+
+### Phase E：全量验收与部署
+
+1. 执行本计划“验证”中的全量后端、race、vet、build 和两套前端构建门；额外验证 SQLite、MySQL、PostgreSQL 的余额 diff 与 master 扣账事务。
+2. 升级前停止旧 edge admission，恢复 staged settlement，上传全部 outbox，关闭全部 v1 lease 并确认 master 没有非终态租约；未满足时禁止切换。
+3. 验证单次预扣超过 500,000 quota 的请求不再受租约上限阻断。
+4. 停止 master 不超过 5 分钟，验证 edge 在最后策略快照过期后仍可继续服务，本地钱包/订阅和有限 token 持续递减，直至余额负下限。
+5. 恢复 master，验证 settlement 回放只扣一次权威账，后续 heartbeat diff 清除 unsettled overlay，edge 与 master 收敛。
+6. 双节点同时消费同一低余额账户，验证允许超卖、权威余额可为负、master 普通鉴权阻止继续消费，并验证负下限与节点滑动窗口熔断。
+7. 验证旧 v1 edge 无余额 full dataset 时明确失败，不静默回退租约。
+8. Phase E 前不操作生产容器或远程节点；部署和真实链路验收仍需用户单独授权。
+
 ## 回滚
 
-默认 master 入口必须始终能够在关闭分布式功能后按上游方式运行。edge 停止接收新请求后先发送剩余 outbox 并关闭 lease；master 未确认前不删除 edge 本地状态或释放未结算额度。
+默认 master 入口必须始终能够在关闭分布式功能后按上游方式运行。当前 v1 回滚仍要求 edge 停止接收新请求、发送剩余 outbox 并关闭 lease。进入 v2 后，回滚必须先停止 admission、完成 staged recovery、上传并确认全部 settlement，再保存或迁移余额账本；master 未确认前不得删除 edge 本地状态。含 v2 余额消费的节点不能直接降级到已删除租约代码的 v1 edge。
