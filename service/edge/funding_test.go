@@ -53,6 +53,32 @@ func TestEdgeBalanceFundingSettlementCanExceedPreConsumeWithinFloor(t *testing.T
 	assert.Equal(t, int64(150), account.UnsettledQuota)
 }
 
+func TestEdgeBalanceFundingRefundsZeroChargeWithoutSettlementUsage(t *testing.T) {
+	db, now := newEdgeRuntimeTestDB(t, "")
+	funding := newEdgeBalanceFundingForTest(db, now, "reservation-zero-usage", "request-zero-usage")
+	funding.relayInfo.SettlementUsage = nil
+
+	require.NoError(t, funding.PreConsume(100))
+	require.NoError(t, funding.Settle(-100))
+	assert.False(t, funding.HasReservation())
+
+	reservation, err := model.GetEdgeLocalReservation(db, funding.reservationID)
+	require.NoError(t, err)
+	assert.Equal(t, model.EdgeLocalReservationStatusRefunded, reservation.Status)
+	assert.Zero(t, reservation.ChargedQuota)
+	assert.Empty(t, reservation.EventID)
+	assert.Empty(t, reservation.StagedEventID)
+
+	account := model.EdgeLocalBalanceAccount{}
+	require.NoError(t, db.Where("account_type = ? AND account_id = ?", model.EdgeBalanceAccountTypeSubscription, 21).First(&account).Error)
+	assert.Zero(t, account.ReservedQuota)
+	assert.Zero(t, account.UnsettledQuota)
+
+	var usageEvents int64
+	require.NoError(t, db.Model(&model.EdgeLocalUsageEvent{}).Count(&usageEvents).Error)
+	assert.Zero(t, usageEvents)
+}
+
 func TestEdgeUsageRequestIDCanonicalizesProcessRequestIDForDurableProtocol(t *testing.T) {
 	requestID := edgeUsageRequestID("202607152104520537832988268d9d6tytKhT2g", "reservation-request-id")
 	assert.Len(t, requestID, 64)

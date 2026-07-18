@@ -163,6 +163,13 @@ func (f *EdgeBalanceFunding) Settle(delta int) (settlementErr error) {
 	if actualQuota < 0 || actualQuota > int64(common.MaxQuota) {
 		return errors.New("edge balance settlement quota exceeds the supported range")
 	}
+	// A request that produced neither billable quota nor metered usage has no
+	// settlement payload to persist. Release the hold with the ledger's refund
+	// transition instead of turning an expected upstream/client-abort path into
+	// an unrecoverable active reservation.
+	if actualQuota == 0 && f.relayInfo.SettlementUsage == nil {
+		return f.Refund()
+	}
 	if f.settledEvent == nil {
 		event, err := f.buildUsageEvent(actualQuota)
 		if err != nil {
