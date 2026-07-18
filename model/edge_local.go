@@ -445,7 +445,12 @@ func migrateEdgeLocalLeaseSchema(db *gorm.DB) error {
 		label string
 	}{
 		{table: "edge_local_quota_reservations", where: "status = ?", args: []any{EdgeLocalReservationStatusActive}, label: "active reservation"},
-		{table: "edge_local_quota_reservations", where: "staged_event_id <> '' OR staged_event_payload <> '' OR staged_at_unix_milli <> 0", label: "staged usage"},
+		{
+			table: "edge_local_quota_reservations",
+			where: "status <> ? AND (staged_event_id <> '' OR staged_event_payload <> '' OR staged_at_unix_milli <> 0)",
+			args:  []any{EdgeLocalReservationStatusSettled},
+			label: "non-settled staged usage",
+		},
 		{table: "edge_local_outbox", where: "status IN ?", args: []any{[]EdgeLocalOutboxStatus{EdgeLocalOutboxStatusPending, EdgeLocalOutboxStatusInBlock}}, label: "pending outbox"},
 		{table: "edge_local_settlement_blocks", where: "status = ?", args: []any{EdgeLocalSettlementBlockStatusPending}, label: "pending settlement block"},
 	}
