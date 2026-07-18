@@ -484,34 +484,36 @@ type EdgeUsageBillingV1 struct {
 	ChargedQuota          int64              `json:"charged_quota"`
 }
 
-// EdgeUsageEventV1 contains accounting facts only. It carries no request body,
-// plaintext user token, upstream credential or response content.
+// EdgeUsageEventV1 contains accounting facts plus optional observability
+// passenger fields. It carries no request body, plaintext user token, upstream
+// credential or response content.
 type EdgeUsageEventV1 struct {
-	EventID             string             `json:"event_id"`
-	Sequence            int64              `json:"sequence"`
-	ReservationID       string             `json:"reservation_id"`
-	RequestID           string             `json:"request_id"`
-	UserID              int64              `json:"user_id"`
-	TokenID             int64              `json:"token_id"`
-	SnapshotID          string             `json:"snapshot_id,omitempty"`
-	SnapshotRevision    int64              `json:"snapshot_revision,omitempty"`
-	PricingRevision     int64              `json:"pricing_revision,omitempty"`
-	BalanceRevision     int64              `json:"balance_revision,omitempty"`
-	FundingSource       string             `json:"funding_source,omitempty"`
-	UserSubscriptionID  int64              `json:"user_subscription_id,omitempty"`
-	TokenUnlimitedQuota bool               `json:"token_unlimited_quota,omitempty"`
-	ChannelID           int64              `json:"channel_id"`
-	Endpoint            EdgeEndpointV1     `json:"endpoint"`
-	Streaming           bool               `json:"streaming"`
-	Model               string             `json:"model"`
-	Group               string             `json:"group"`
-	StartedAtUnixMilli  int64              `json:"started_at_unix_milli"`
-	FinishedAtUnixMilli int64              `json:"finished_at_unix_milli"`
-	Outcome             EdgeUsageOutcomeV1 `json:"outcome"`
-	HTTPStatus          *int               `json:"http_status,omitempty"`
-	ErrorCode           string             `json:"error_code,omitempty"`
-	Usage               *BillingUsage      `json:"usage,omitempty"`
-	Billing             EdgeUsageBillingV1 `json:"billing"`
+	EventID                  string             `json:"event_id"`
+	Sequence                 int64              `json:"sequence"`
+	ReservationID            string             `json:"reservation_id"`
+	RequestID                string             `json:"request_id"`
+	UserID                   int64              `json:"user_id"`
+	TokenID                  int64              `json:"token_id"`
+	SnapshotID               string             `json:"snapshot_id,omitempty"`
+	SnapshotRevision         int64              `json:"snapshot_revision,omitempty"`
+	PricingRevision          int64              `json:"pricing_revision,omitempty"`
+	BalanceRevision          int64              `json:"balance_revision,omitempty"`
+	FundingSource            string             `json:"funding_source,omitempty"`
+	UserSubscriptionID       int64              `json:"user_subscription_id,omitempty"`
+	TokenUnlimitedQuota      bool               `json:"token_unlimited_quota,omitempty"`
+	ChannelID                int64              `json:"channel_id"`
+	Endpoint                 EdgeEndpointV1     `json:"endpoint"`
+	Streaming                bool               `json:"streaming"`
+	Model                    string             `json:"model"`
+	Group                    string             `json:"group"`
+	StartedAtUnixMilli       int64              `json:"started_at_unix_milli"`
+	FirstResponseAtUnixMilli *int64             `json:"first_response_at_unix_milli,omitempty"`
+	FinishedAtUnixMilli      int64              `json:"finished_at_unix_milli"`
+	Outcome                  EdgeUsageOutcomeV1 `json:"outcome"`
+	HTTPStatus               *int               `json:"http_status,omitempty"`
+	ErrorCode                string             `json:"error_code,omitempty"`
+	Usage                    *BillingUsage      `json:"usage,omitempty"`
+	Billing                  EdgeUsageBillingV1 `json:"billing"`
 }
 
 type EdgeSettlementBlockRequestV1 struct {
@@ -1731,6 +1733,10 @@ func (e EdgeUsageEventV1) Validate() error {
 	}
 	if e.FinishedAtUnixMilli < e.StartedAtUnixMilli {
 		return fmt.Errorf("usage.finished_at_unix_milli must not be before started_at_unix_milli")
+	}
+	if e.FirstResponseAtUnixMilli != nil &&
+		(*e.FirstResponseAtUnixMilli <= e.StartedAtUnixMilli || *e.FirstResponseAtUnixMilli > e.FinishedAtUnixMilli) {
+		return fmt.Errorf("usage.first_response_at_unix_milli must be after started_at_unix_milli and not after finished_at_unix_milli")
 	}
 	if !e.Outcome.Valid() {
 		return fmt.Errorf("usage.outcome is invalid")

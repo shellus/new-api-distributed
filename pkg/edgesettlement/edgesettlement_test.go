@@ -49,6 +49,20 @@ func TestDigestBlockV1CanonicalizesAppliedRatioMapOrder(t *testing.T) {
 	assert.Equal(t, leftDigest, rightDigest)
 }
 
+func TestDigestBlockV1ExcludesFirstResponseTime(t *testing.T) {
+	withoutFirstResponse := settlementDigestRequestForTest()
+	withoutDigest, err := DigestBlockV1("edge.digest", 1, withoutFirstResponse)
+	require.NoError(t, err)
+
+	withFirstResponse := settlementDigestRequestForTest()
+	firstResponseAt := withFirstResponse.Events[0].StartedAtUnixMilli + 500
+	withFirstResponse.Events[0].FirstResponseAtUnixMilli = &firstResponseAt
+	withDigest, err := DigestBlockV1("edge.digest", 1, withFirstResponse)
+	require.NoError(t, err)
+
+	assert.Equal(t, withoutDigest, withDigest)
+}
+
 func settlementDigestRequestForTest() dto.EdgeSettlementBlockRequestV1 {
 	status := 200
 	return dto.EdgeSettlementBlockRequestV1{

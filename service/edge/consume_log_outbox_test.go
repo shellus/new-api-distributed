@@ -8,6 +8,7 @@ import (
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/model"
+	"github.com/QuantumNous/new-api/pkg/edgesettlement"
 
 	"github.com/glebarez/sqlite"
 	"github.com/stretchr/testify/assert"
@@ -43,6 +44,9 @@ func TestPublishMasterConsumeLogOutboxSupportsSharedAndSeparateLogDB(t *testing.
 			assert.Equal(t, fixture.channel.Id, storedLog.ChannelId)
 			assert.Equal(t, 120, storedLog.Quota)
 			assert.Equal(t, "request-1", storedLog.RequestId)
+			var other map[string]interface{}
+			require.NoError(t, common.UnmarshalJsonStr(storedLog.Other, &other))
+			assert.NotContains(t, other, "frt")
 
 			require.NoError(t, fixture.db.First(&outbox, outbox.ID).Error)
 			assert.Equal(t, model.EdgeConsumeLogOutboxStatusPublished, outbox.Status)
@@ -59,6 +63,26 @@ func TestPublishMasterConsumeLogOutboxSupportsSharedAndSeparateLogDB(t *testing.
 			assert.Zero(t, processed)
 		})
 	}
+}
+
+func TestPublishMasterConsumeLogOutboxProjectsFirstResponseTime(t *testing.T) {
+	fixture := newMasterSettlementTestFixture(t, "consume-log-frt", 5_000, 5_000)
+	logDB := configureConsumeLogFixture(t, fixture, false)
+	request := masterSettlementBlockForTest(t, fixture, 1, "wallet", 0, false)
+	firstResponseAt := request.Events[0].StartedAtUnixMilli + 750
+	request.Events[0].FirstResponseAtUnixMilli = &firstResponseAt
+	require.NoError(t, edgesettlement.SetBlockDigestV1(fixture.node.NodeUID, fixture.node.Generation, &request))
+	settleMasterBlockForTest(t, fixture, request, "consume-log-frt-settlement")
+
+	processed, err := PublishMasterConsumeLogOutboxBatch(context.Background(), fixture.now.Add(2*time.Minute), 10)
+	require.NoError(t, err)
+	assert.Equal(t, 1, processed)
+
+	var storedLog model.Log
+	require.NoError(t, logDB.Where("request_id = ?", "request-1").First(&storedLog).Error)
+	var other map[string]interface{}
+	require.NoError(t, common.UnmarshalJsonStr(storedLog.Other, &other))
+	assert.Equal(t, float64(750), other["frt"])
 }
 
 func TestPublishMasterConsumeLogOutboxCrashRecoveryDoesNotDuplicateLog(t *testing.T) {

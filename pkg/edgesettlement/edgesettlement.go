@@ -24,10 +24,11 @@ const (
 var ErrInvalidInput = errors.New("edgesettlement: invalid input")
 
 // canonicalBlockV1 deliberately excludes request_id, transport idempotency,
-// nonce, timestamp, signature and block_digest. Those values may change on an
-// HTTP retry or are the output being computed. Node identity and generation
-// are included to prevent transplanting an otherwise valid chain to another
-// edge or a replacement generation.
+// nonce, timestamp, signature, block_digest and optional observability passenger
+// fields. Those values may change on an HTTP retry or do not participate in
+// accounting identity. Node identity and generation are included to prevent
+// transplanting an otherwise valid chain to another edge or replacement
+// generation.
 type canonicalBlockV1 struct {
 	ProtocolVersion     string                 `json:"protocol_version"`
 	NodeID              string                 `json:"node_id"`
@@ -59,6 +60,12 @@ func CanonicalBlockV1(nodeID string, generation int64, request dto.EdgeSettlemen
 	if err := validated.Validate(); err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrInvalidInput, err)
 	}
+	events := append([]dto.EdgeUsageEventV1(nil), request.Events...)
+	for i := range events {
+		// First-response timing is an observability passenger field. It must not
+		// change the accounting identity or exactly-once settlement digest.
+		events[i].FirstResponseAtUnixMilli = nil
+	}
 	canonicalJSON, err := common.Marshal(canonicalBlockV1{
 		ProtocolVersion:     request.Meta.ProtocolVersion,
 		NodeID:              nodeID,
@@ -69,7 +76,7 @@ func CanonicalBlockV1(nodeID string, generation int64, request dto.EdgeSettlemen
 		FirstSequence:       request.FirstSequence,
 		LastSequence:        request.LastSequence,
 		CreatedAtUnixMilli:  request.CreatedAtUnixMilli,
-		Events:              request.Events,
+		Events:              events,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("%w: marshal canonical block: %v", ErrInvalidInput, err)

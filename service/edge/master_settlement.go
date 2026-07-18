@@ -69,25 +69,26 @@ type masterSnapshotPolicies struct {
 }
 
 type edgeConsumeLogOutboxPayload struct {
-	EventID             string                 `json:"event_id"`
-	NodeID              string                 `json:"node_id"`
-	NodeGeneration      int64                  `json:"node_generation"`
-	RequestID           string                 `json:"request_id"`
-	UserID              int                    `json:"user_id"`
-	TokenID             int                    `json:"token_id"`
-	ChannelID           int                    `json:"channel_id"`
-	Endpoint            dto.EdgeEndpointV1     `json:"endpoint"`
-	Streaming           bool                   `json:"streaming"`
-	Model               string                 `json:"model"`
-	Group               string                 `json:"group"`
-	Outcome             dto.EdgeUsageOutcomeV1 `json:"outcome"`
-	HTTPStatus          int                    `json:"http_status,omitempty"`
-	ErrorCode           string                 `json:"error_code,omitempty"`
-	PromptTokens        int                    `json:"prompt_tokens"`
-	CompletionTokens    int                    `json:"completion_tokens"`
-	Quota               int64                  `json:"quota"`
-	StartedAtUnixMilli  int64                  `json:"started_at_unix_milli"`
-	FinishedAtUnixMilli int64                  `json:"finished_at_unix_milli"`
+	EventID                  string                 `json:"event_id"`
+	NodeID                   string                 `json:"node_id"`
+	NodeGeneration           int64                  `json:"node_generation"`
+	RequestID                string                 `json:"request_id"`
+	UserID                   int                    `json:"user_id"`
+	TokenID                  int                    `json:"token_id"`
+	ChannelID                int                    `json:"channel_id"`
+	Endpoint                 dto.EdgeEndpointV1     `json:"endpoint"`
+	Streaming                bool                   `json:"streaming"`
+	Model                    string                 `json:"model"`
+	Group                    string                 `json:"group"`
+	Outcome                  dto.EdgeUsageOutcomeV1 `json:"outcome"`
+	HTTPStatus               int                    `json:"http_status,omitempty"`
+	ErrorCode                string                 `json:"error_code,omitempty"`
+	PromptTokens             int                    `json:"prompt_tokens"`
+	CompletionTokens         int                    `json:"completion_tokens"`
+	Quota                    int64                  `json:"quota"`
+	StartedAtUnixMilli       int64                  `json:"started_at_unix_milli"`
+	FirstResponseAtUnixMilli *int64                 `json:"first_response_at_unix_milli,omitempty"`
+	FinishedAtUnixMilli      int64                  `json:"finished_at_unix_milli"`
 }
 
 type masterSettlementCharge struct {
@@ -270,7 +271,8 @@ func SettleMasterUsageBlockTx(tx *gorm.DB, identity *model.EdgeControlIdentity, 
 			ChannelID:           int(event.ChannelID), Endpoint: string(event.Endpoint), Streaming: event.Streaming,
 			Model: event.Model, Group: event.Group, Outcome: string(event.Outcome), HTTPStatus: httpStatus,
 			ErrorCode: event.ErrorCode, StartedAtUnixMilli: event.StartedAtUnixMilli,
-			FinishedAtUnixMilli: event.FinishedAtUnixMilli, PromptTokens: promptTokens,
+			FirstResponseAtUnixMilli: event.FirstResponseAtUnixMilli,
+			FinishedAtUnixMilli:      event.FinishedAtUnixMilli, PromptTokens: promptTokens,
 			CompletionTokens: completionTokens, ReservedQuota: event.Billing.ReservedQuota,
 			ChargedQuota: charge.chargedQuota, PricingPolicyID: event.Billing.PricingPolicyID,
 			PricingPolicyVersion: event.Billing.PricingPolicyVersion,
@@ -289,7 +291,8 @@ func SettleMasterUsageBlockTx(tx *gorm.DB, identity *model.EdgeControlIdentity, 
 			Model: event.Model, Group: event.Group, Outcome: event.Outcome, HTTPStatus: httpStatus,
 			ErrorCode: event.ErrorCode, PromptTokens: promptTokens, CompletionTokens: completionTokens,
 			Quota: charge.chargedQuota, StartedAtUnixMilli: event.StartedAtUnixMilli,
-			FinishedAtUnixMilli: event.FinishedAtUnixMilli,
+			FirstResponseAtUnixMilli: event.FirstResponseAtUnixMilli,
+			FinishedAtUnixMilli:      event.FinishedAtUnixMilli,
 		})
 		if err != nil {
 			return nil, err

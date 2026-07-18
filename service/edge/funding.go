@@ -236,10 +236,18 @@ func (f *EdgeBalanceFunding) buildUsageEvent(actualQuota int64) (*dto.EdgeUsageE
 	if finishedAt < startedAt {
 		finishedAt = startedAt
 	}
+	var firstResponseAtUnixMilli *int64
+	if f.relayInfo.HasSendResponse() && f.relayInfo.FirstResponseTime.After(f.relayInfo.StartTime) {
+		firstResponseAt := f.relayInfo.FirstResponseTime.UnixMilli()
+		if firstResponseAt > startedAt && firstResponseAt <= finishedAt {
+			firstResponseAtUnixMilli = &firstResponseAt
+		}
+	}
 	return &dto.EdgeUsageEventV1{
 		EventID: "event-" + uuid.NewString(), ChannelID: int64(f.relayInfo.ChannelId),
 		Endpoint: endpoint, Streaming: f.relayInfo.IsStream, Model: f.relayInfo.OriginModelName,
-		Group: f.relayInfo.UsingGroup, StartedAtUnixMilli: startedAt, FinishedAtUnixMilli: finishedAt,
+		Group: f.relayInfo.UsingGroup, StartedAtUnixMilli: startedAt,
+		FirstResponseAtUnixMilli: firstResponseAtUnixMilli, FinishedAtUnixMilli: finishedAt,
 		Outcome: dto.EdgeUsageOutcomeSuccessV1, HTTPStatus: &status,
 		Usage: dto.CloneBillingUsage(f.relayInfo.SettlementUsage),
 		Billing: dto.EdgeUsageBillingV1{

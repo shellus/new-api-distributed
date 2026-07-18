@@ -165,7 +165,8 @@ func publishMasterConsumeLogClaim(ctx context.Context, claim *model.EdgeConsumeL
 		TokenUnlimitedQuota: stored.TokenUnlimitedQuota, ChannelID: int64(stored.ChannelID),
 		Endpoint: dto.EdgeEndpointV1(stored.Endpoint), Streaming: stored.Streaming,
 		Model: stored.Model, Group: stored.Group, StartedAtUnixMilli: stored.StartedAtUnixMilli,
-		FinishedAtUnixMilli: stored.FinishedAtUnixMilli, Outcome: dto.EdgeUsageOutcomeV1(stored.Outcome),
+		FirstResponseAtUnixMilli: stored.FirstResponseAtUnixMilli,
+		FinishedAtUnixMilli:      stored.FinishedAtUnixMilli, Outcome: dto.EdgeUsageOutcomeV1(stored.Outcome),
 		HTTPStatus: httpStatus, ErrorCode: stored.ErrorCode, Usage: usage, Billing: billing,
 	}
 	if err := event.Validate(); err != nil {
@@ -214,6 +215,9 @@ func publishMasterConsumeLogClaim(ctx context.Context, claim *model.EdgeConsumeL
 		"applied_ratios":         billing.AppliedRatios,
 		"admin_info":             adminInfo,
 	}
+	if event.FirstResponseAtUnixMilli != nil {
+		other["frt"] = float64(*event.FirstResponseAtUnixMilli - event.StartedAtUnixMilli)
+	}
 	durationSeconds := (event.FinishedAtUnixMilli - event.StartedAtUnixMilli) / 1000
 	if durationSeconds > math.MaxInt32 {
 		durationSeconds = math.MaxInt32
@@ -260,6 +264,8 @@ func validateConsumeLogOutboxProjection(claim *model.EdgeConsumeLogOutbox, paylo
 		payload.HTTPStatus != stored.HTTPStatus || payload.ErrorCode != stored.ErrorCode ||
 		payload.PromptTokens != stored.PromptTokens || payload.CompletionTokens != stored.CompletionTokens ||
 		payload.Quota != stored.ChargedQuota || payload.StartedAtUnixMilli != stored.StartedAtUnixMilli ||
+		(payload.FirstResponseAtUnixMilli == nil) != (stored.FirstResponseAtUnixMilli == nil) ||
+		(payload.FirstResponseAtUnixMilli != nil && *payload.FirstResponseAtUnixMilli != *stored.FirstResponseAtUnixMilli) ||
 		payload.FinishedAtUnixMilli != stored.FinishedAtUnixMilli {
 		return "", errors.New("edge consume-log outbox payload does not match the authoritative usage event")
 	}

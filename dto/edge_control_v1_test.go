@@ -1740,6 +1740,9 @@ func TestEdgePricingPolicyV1ValidateAndDetectDynamicDependencies(t *testing.T) {
 func TestEdgeUsageBillingAndEventV1Validate(t *testing.T) {
 	event := edgeValidUsageEventV1()
 	require.NoError(t, event.Validate())
+	firstResponseAt := event.StartedAtUnixMilli + 100
+	event.FirstResponseAtUnixMilli = &firstResponseAt
+	require.NoError(t, event.Validate())
 	zeroGroupRatio := event.Billing
 	zeroGroupRatio.GroupRatio = 0
 	require.NoError(t, zeroGroupRatio.Validate())
@@ -1778,6 +1781,18 @@ func TestEdgeUsageBillingAndEventV1Validate(t *testing.T) {
 		{name: "wallet with subscription", mutate: func(value *EdgeUsageEventV1) { value.UserSubscriptionID = 9 }},
 		{name: "invalid endpoint", mutate: func(value *EdgeUsageEventV1) { value.Endpoint = "images" }},
 		{name: "finish before start", mutate: func(value *EdgeUsageEventV1) { value.FinishedAtUnixMilli = value.StartedAtUnixMilli - 1 }},
+		{name: "first response at start", mutate: func(value *EdgeUsageEventV1) {
+			firstResponseAt := value.StartedAtUnixMilli
+			value.FirstResponseAtUnixMilli = &firstResponseAt
+		}},
+		{name: "first response before start", mutate: func(value *EdgeUsageEventV1) {
+			firstResponseAt := value.StartedAtUnixMilli - 1
+			value.FirstResponseAtUnixMilli = &firstResponseAt
+		}},
+		{name: "first response after finish", mutate: func(value *EdgeUsageEventV1) {
+			firstResponseAt := value.FinishedAtUnixMilli + 1
+			value.FirstResponseAtUnixMilli = &firstResponseAt
+		}},
 		{name: "invalid outcome", mutate: func(value *EdgeUsageEventV1) { value.Outcome = "timeout" }},
 		{name: "invalid http status", mutate: func(value *EdgeUsageEventV1) { status := 99; value.HTTPStatus = &status }},
 		{name: "non 2xx success", mutate: func(value *EdgeUsageEventV1) { status := 500; value.HTTPStatus = &status }},

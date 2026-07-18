@@ -79,6 +79,48 @@ func TestEdgeBalanceFundingRefundsZeroChargeWithoutSettlementUsage(t *testing.T)
 	assert.Zero(t, usageEvents)
 }
 
+func TestEdgeBalanceFundingBuildUsageEventIncludesFirstResponseTime(t *testing.T) {
+	db, now := newEdgeRuntimeTestDB(t, "")
+	funding := newEdgeBalanceFundingForTest(db, now, "reservation-frt", "request-frt")
+	firstResponseAt := funding.relayInfo.StartTime.Add(250 * time.Millisecond)
+	funding.relayInfo.FirstResponseTime = firstResponseAt
+
+	event, err := funding.buildUsageEvent(100)
+	require.NoError(t, err)
+	require.NotNil(t, event.FirstResponseAtUnixMilli)
+	assert.Equal(t, firstResponseAt.UnixMilli(), *event.FirstResponseAtUnixMilli)
+}
+
+func TestEdgeBalanceFundingBuildUsageEventOmitsMissingFirstResponseTime(t *testing.T) {
+	db, now := newEdgeRuntimeTestDB(t, "")
+	funding := newEdgeBalanceFundingForTest(db, now, "reservation-no-frt", "request-no-frt")
+
+	event, err := funding.buildUsageEvent(100)
+	require.NoError(t, err)
+	assert.Nil(t, event.FirstResponseAtUnixMilli)
+}
+
+func TestEdgeBalanceFundingBuildUsageEventOmitsInvalidFirstResponseTime(t *testing.T) {
+	for _, tc := range []struct {
+		name              string
+		firstResponseTime func(*relaycommon.RelayInfo) time.Time
+	}{
+		{name: "at start", firstResponseTime: func(info *relaycommon.RelayInfo) time.Time { return info.StartTime }},
+		{name: "before start", firstResponseTime: func(info *relaycommon.RelayInfo) time.Time { return info.StartTime.Add(-time.Millisecond) }},
+		{name: "after finish", firstResponseTime: func(*relaycommon.RelayInfo) time.Time { return time.Now().Add(time.Hour) }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			db, now := newEdgeRuntimeTestDB(t, "")
+			funding := newEdgeBalanceFundingForTest(db, now, "reservation-invalid-frt", "request-invalid-frt")
+			funding.relayInfo.FirstResponseTime = tc.firstResponseTime(funding.relayInfo)
+
+			event, err := funding.buildUsageEvent(100)
+			require.NoError(t, err)
+			assert.Nil(t, event.FirstResponseAtUnixMilli)
+		})
+	}
+}
+
 func TestEdgeUsageRequestIDCanonicalizesProcessRequestIDForDurableProtocol(t *testing.T) {
 	requestID := edgeUsageRequestID("202607152104520537832988268d9d6tytKhT2g", "reservation-request-id")
 	assert.Len(t, requestID, 64)

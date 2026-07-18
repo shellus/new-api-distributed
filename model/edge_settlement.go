@@ -59,42 +59,43 @@ type EdgeSettlementBlock struct {
 // payloads; request bodies, plaintext tokens and upstream credentials never
 // enter this table.
 type EdgeUsageEvent struct {
-	ID                   int64  `json:"id" gorm:"primaryKey"`
-	NodeID               int64  `json:"node_id" gorm:"not null;uniqueIndex:ux_edge_usage_seq,priority:1;uniqueIndex:ux_edge_usage_event,priority:1;uniqueIndex:ux_edge_usage_res,priority:1"`
-	NodeGeneration       int64  `json:"node_generation" gorm:"type:bigint;not null;uniqueIndex:ux_edge_usage_seq,priority:2;uniqueIndex:ux_edge_usage_event,priority:2;uniqueIndex:ux_edge_usage_res,priority:2"`
-	BlockID              int64  `json:"block_id" gorm:"not null;index"`
-	EventUID             string `json:"event_uid" gorm:"type:varchar(64);not null;uniqueIndex:ux_edge_usage_event,priority:3"`
-	ReservationUID       string `json:"reservation_uid" gorm:"type:varchar(64);not null;uniqueIndex:ux_edge_usage_res,priority:3"`
-	RequestUID           string `json:"request_uid" gorm:"type:varchar(64);not null;index"`
-	Sequence             int64  `json:"sequence" gorm:"type:bigint;not null;uniqueIndex:ux_edge_usage_seq,priority:3"`
-	UserID               int    `json:"user_id" gorm:"not null;index"`
-	TokenID              int    `json:"token_id" gorm:"not null;index"`
-	SnapshotID           int64  `json:"snapshot_id" gorm:"not null;index"`
-	SnapshotRevision     int64  `json:"snapshot_revision" gorm:"type:bigint;not null"`
-	PricingRevision      int64  `json:"pricing_revision" gorm:"type:bigint;not null"`
-	BalanceRevision      int64  `json:"balance_revision" gorm:"type:bigint;not null"`
-	FundingSource        string `json:"funding_source" gorm:"type:varchar(32);not null;index"`
-	UserSubscriptionID   int    `json:"user_subscription_id" gorm:"not null;index"`
-	TokenUnlimitedQuota  bool   `json:"token_unlimited_quota" gorm:"not null"`
-	ChannelID            int    `json:"channel_id" gorm:"not null;index"`
-	Endpoint             string `json:"endpoint" gorm:"type:varchar(64);not null"`
-	Streaming            bool   `json:"streaming" gorm:"not null"`
-	Model                string `json:"model" gorm:"type:varchar(256);not null;index"`
-	Group                string `json:"group" gorm:"type:varchar(64);not null;index"`
-	Outcome              string `json:"outcome" gorm:"type:varchar(32);not null;index"`
-	HTTPStatus           int    `json:"http_status" gorm:"not null"`
-	ErrorCode            string `json:"error_code" gorm:"type:varchar(128);not null"`
-	StartedAtUnixMilli   int64  `json:"started_at_unix_milli" gorm:"type:bigint;not null"`
-	FinishedAtUnixMilli  int64  `json:"finished_at_unix_milli" gorm:"type:bigint;not null;index"`
-	PromptTokens         int    `json:"prompt_tokens" gorm:"not null"`
-	CompletionTokens     int    `json:"completion_tokens" gorm:"not null"`
-	ReservedQuota        int64  `json:"reserved_quota" gorm:"type:bigint;not null"`
-	ChargedQuota         int64  `json:"charged_quota" gorm:"type:bigint;not null"`
-	PricingPolicyID      string `json:"pricing_policy_id" gorm:"type:varchar(64);not null"`
-	PricingPolicyVersion string `json:"pricing_policy_version" gorm:"type:varchar(64);not null"`
-	UsagePayload         string `json:"usage_payload" gorm:"type:text;not null"`
-	BillingPayload       string `json:"billing_payload" gorm:"type:text;not null"`
-	CreatedAt            int64  `json:"created_at" gorm:"type:bigint;not null;index"`
+	ID                       int64  `json:"id" gorm:"primaryKey"`
+	NodeID                   int64  `json:"node_id" gorm:"not null;uniqueIndex:ux_edge_usage_seq,priority:1;uniqueIndex:ux_edge_usage_event,priority:1;uniqueIndex:ux_edge_usage_res,priority:1"`
+	NodeGeneration           int64  `json:"node_generation" gorm:"type:bigint;not null;uniqueIndex:ux_edge_usage_seq,priority:2;uniqueIndex:ux_edge_usage_event,priority:2;uniqueIndex:ux_edge_usage_res,priority:2"`
+	BlockID                  int64  `json:"block_id" gorm:"not null;index"`
+	EventUID                 string `json:"event_uid" gorm:"type:varchar(64);not null;uniqueIndex:ux_edge_usage_event,priority:3"`
+	ReservationUID           string `json:"reservation_uid" gorm:"type:varchar(64);not null;uniqueIndex:ux_edge_usage_res,priority:3"`
+	RequestUID               string `json:"request_uid" gorm:"type:varchar(64);not null;index"`
+	Sequence                 int64  `json:"sequence" gorm:"type:bigint;not null;uniqueIndex:ux_edge_usage_seq,priority:3"`
+	UserID                   int    `json:"user_id" gorm:"not null;index"`
+	TokenID                  int    `json:"token_id" gorm:"not null;index"`
+	SnapshotID               int64  `json:"snapshot_id" gorm:"not null;index"`
+	SnapshotRevision         int64  `json:"snapshot_revision" gorm:"type:bigint;not null"`
+	PricingRevision          int64  `json:"pricing_revision" gorm:"type:bigint;not null"`
+	BalanceRevision          int64  `json:"balance_revision" gorm:"type:bigint;not null"`
+	FundingSource            string `json:"funding_source" gorm:"type:varchar(32);not null;index"`
+	UserSubscriptionID       int    `json:"user_subscription_id" gorm:"not null;index"`
+	TokenUnlimitedQuota      bool   `json:"token_unlimited_quota" gorm:"not null"`
+	ChannelID                int    `json:"channel_id" gorm:"not null;index"`
+	Endpoint                 string `json:"endpoint" gorm:"type:varchar(64);not null"`
+	Streaming                bool   `json:"streaming" gorm:"not null"`
+	Model                    string `json:"model" gorm:"type:varchar(256);not null;index"`
+	Group                    string `json:"group" gorm:"type:varchar(64);not null;index"`
+	Outcome                  string `json:"outcome" gorm:"type:varchar(32);not null;index"`
+	HTTPStatus               int    `json:"http_status" gorm:"not null"`
+	ErrorCode                string `json:"error_code" gorm:"type:varchar(128);not null"`
+	StartedAtUnixMilli       int64  `json:"started_at_unix_milli" gorm:"type:bigint;not null"`
+	FirstResponseAtUnixMilli *int64 `json:"first_response_at_unix_milli,omitempty" gorm:"type:bigint"`
+	FinishedAtUnixMilli      int64  `json:"finished_at_unix_milli" gorm:"type:bigint;not null;index"`
+	PromptTokens             int    `json:"prompt_tokens" gorm:"not null"`
+	CompletionTokens         int    `json:"completion_tokens" gorm:"not null"`
+	ReservedQuota            int64  `json:"reserved_quota" gorm:"type:bigint;not null"`
+	ChargedQuota             int64  `json:"charged_quota" gorm:"type:bigint;not null"`
+	PricingPolicyID          string `json:"pricing_policy_id" gorm:"type:varchar(64);not null"`
+	PricingPolicyVersion     string `json:"pricing_policy_version" gorm:"type:varchar(64);not null"`
+	UsagePayload             string `json:"usage_payload" gorm:"type:text;not null"`
+	BillingPayload           string `json:"billing_payload" gorm:"type:text;not null"`
+	CreatedAt                int64  `json:"created_at" gorm:"type:bigint;not null;index"`
 }
 
 // EdgeConsumeLogOutbox bridges the main accounting database transaction to
@@ -225,6 +226,10 @@ func validateEdgeUsageEvent(e *EdgeUsageEvent) error {
 	}
 	if e.StartedAtUnixMilli <= 0 || e.FinishedAtUnixMilli < e.StartedAtUnixMilli {
 		return errors.New("invalid edge usage event timestamps")
+	}
+	if e.FirstResponseAtUnixMilli != nil &&
+		(*e.FirstResponseAtUnixMilli <= e.StartedAtUnixMilli || *e.FirstResponseAtUnixMilli > e.FinishedAtUnixMilli) {
+		return errors.New("invalid edge usage event first response timestamp")
 	}
 	if e.PromptTokens < 0 || e.CompletionTokens < 0 || e.ReservedQuota < 0 || e.ChargedQuota < 0 ||
 		e.ReservedQuota > int64(common.MaxQuota) || e.ChargedQuota > int64(common.MaxQuota) {
