@@ -163,10 +163,12 @@ func enableEdgeRuntimeServing(t *testing.T) {
 	previousAccountingReady := edgeAccountingReady.Load()
 	previousAccountingBlock := edgeAccountingBlock.Load()
 	previousBalanceReady := edgeBalanceReady.Load()
+	previousCircuitOpen := edgeSettlementCircuitOpen.Load()
 	edgeControlReady.Store(true)
 	edgeAccountingReady.Store(true)
 	edgeAccountingBlock.Store(false)
 	edgeBalanceReady.Store(true)
+	edgeSettlementCircuitOpen.Store(false)
 	t.Cleanup(func() {
 		edgeAdmission.mu.Lock()
 		edgeAdmission.accepting = previousAdmission
@@ -175,6 +177,7 @@ func enableEdgeRuntimeServing(t *testing.T) {
 		edgeAccountingReady.Store(previousAccountingReady)
 		edgeAccountingBlock.Store(previousAccountingBlock)
 		edgeBalanceReady.Store(previousBalanceReady)
+		edgeSettlementCircuitOpen.Store(previousCircuitOpen)
 	})
 }
 

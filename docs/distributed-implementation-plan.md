@@ -2,7 +2,7 @@
 
 ## 目标
 
-基于官方 New API 主分支维护一个派生仓库，在同一 Go module 中构建 master 和 edge。master 保持 New API 默认行为并增加控制面；edge 复用相同的 relay、鉴权、渠道、计费和数据访问代码，只增加边缘运行模式、同步、租约、可靠 outbox 和心跳业务。
+基于官方 New API 主分支维护一个派生仓库，在同一 Go module 中构建 master 和 edge。master 保持 New API 默认行为并增加控制面；edge 复用相同的 relay、鉴权、渠道、计费和数据访问代码，只增加边缘运行模式、同步、余额投影、可靠 outbox 和心跳业务。
 
 实施前必须先阅读 [distributed-design-context.md](./distributed-design-context.md) 和已接受的 [架构决策记录](./adr/)，避免为局部实现便利重新引入已否定方案。
 
@@ -18,7 +18,9 @@
 - 通信概览以 [distributed-architecture.md](./distributed-architecture.md) 为准。
 - 主从配置事实来源与节点地址语义以 [distributed-configuration.md](./distributed-configuration.md) 为准。
 
-## 当前实现状态
+## v1 历史实现状态（已由 ADR 0004 替代）
+
+本节起至“余额复制替代配额租约”之前保留原 v1 租约实现与隔离验收记录，仅用于解释迁移来源，不描述当前 v2 运行语义。
 
 第一至第五阶段已经落地并完成隔离链路验收：
 
@@ -214,9 +216,9 @@ go build ./cmd/newapi-edge
 
 当前状态：五个阶段均已完成。真实链路、故障边界、重放幂等、重启恢复和账务数据库核对结果已形成上述验收记录；后续变更仍须重新执行本节合并门和与变更相关的故障注入测试。
 
-## 余额复制替代配额租约（待实施）
+## 余额复制替代配额租约（Phase A-D 已实现）
 
-本节替代现有租约方向的后续演进，设计依据见 [ADR 0004](./adr/0004-replicated-balances-and-bounded-oversell.md) 与 [分布式余额复制设计](./distributed-balance-replication.md)。第一至第五阶段保留为当前 v1 实现和历史验收基线，不代表租约继续作为 v2 回退路径。
+本节替代现有租约方向，设计依据见 [ADR 0004](./adr/0004-replicated-balances-and-bounded-oversell.md) 与 [分布式余额复制设计](./distributed-balance-replication.md)。第一至第五阶段保留为 v1 历史验收基线，不代表租约继续作为 v2 回退路径。Phase A-D 已完成代码与后端合并门；Phase E 的部署、真实链路和线上验收尚未执行。
 
 ### Phase A：设计与审阅门禁（已审阅通过）
 
@@ -224,7 +226,7 @@ go build ./cmd/newapi-edge
 2. 固定余额向量、每节点 revision、心跳 diff、本地 overlay、结算回冲、负下限和节点熔断语义。
 3. 技术负责人已裁决 batch update 双花窗口、settlement block 保留范围和受限 committed rejection 语义，允许进入 Phase B。
 
-### Phase B：Master 余额数据集与协议 v2
+### Phase B：Master 余额数据集与协议 v2（已实现）
 
 1. heartbeat 读取已落库权威向量，不关闭 batch update；测试和文档按“实际双花上界 = batch 延迟 + heartbeat 周期”固定口径。
 2. 在 `dto/edge_control_v1.go` 增加 `edge-control.v2` 协商、余额 DTO、heartbeat revision/delta 和严格校验；只支持 v1 的 edge 返回明确的 unsupported protocol。
@@ -233,7 +235,7 @@ go build ./cmd/newapi-edge
 5. 把规范化 `billing_preference` 加入现有低频用户策略快照；余额不进入签名策略快照。
 6. TDD 覆盖三种数据库上的向量读取、diff、revision 断档、并发 heartbeat 和协议拒绝；实现完成后执行项目后端合并门，测试通过并经用户确认后才提交。
 
-### Phase C：Edge 本地账本、overlay 与租约拆除
+### Phase C：Edge 本地账本、overlay 与租约拆除（已实现）
 
 1. 新增本地 balance account 表及 control revision 字段，第一次 v2 heartbeat 必须 full 初始化；余额与鉴权索引未同时就绪时 admission 关闭。
 2. 把 `EdgeLeaseFunding` 替换为 `EdgeBalanceFunding`，在同一 SQLite 事务预占资金账户和有限 token 账户；实现钱包/订阅优先级、unlimited 表示和 `EDGE_BALANCE_NEGATIVE_FLOOR_QUOTA`。
@@ -244,7 +246,7 @@ go build ./cmd/newapi-edge
 7. 提供旧 `edge.db` 清洁迁移检查；存在 active/staged/pending 账务时拒绝升级。
 8. TDD 覆盖断网持续扣减、负下限、退款、实际 charge 超预占、overlay 收敛、重启恢复和策略 TTL 过期继续服务；测试通过并经用户确认后才提交。
 
-### Phase D：Master 权威扣账与安全熔断
+### Phase D：Master 权威扣账与安全熔断（已实现）
 
 1. settlement 保留 block 链、digest、receipt、事件唯一性和 consume-log outbox；v2 event 用余额来源与固定策略版本替换 lease ID。
 2. master 对区块先完整复核价格和节点事件时间窗口，再 exactly-once 扣减钱包或订阅及有限 token，允许权威余额为负，同时继续写统计、usage 和消费日志 outbox。

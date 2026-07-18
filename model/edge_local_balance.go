@@ -12,9 +12,11 @@ import (
 )
 
 type EdgeLocalBalanceState struct {
-	Revision           int64
-	Initialized        bool
-	SettlementSequence int64
+	Revision               int64
+	Initialized            bool
+	SettlementSequence     int64
+	SettlementCircuitOpen  bool
+	SettlementCircuitEpoch int64
 }
 
 type EdgeLocalBalanceReservationRequest struct {
@@ -37,8 +39,35 @@ func GetEdgeLocalBalanceState(db *gorm.DB) (*EdgeLocalBalanceState, error) {
 	}
 	return &EdgeLocalBalanceState{
 		Revision: control.BalanceRevision, Initialized: control.BalanceInitialized,
-		SettlementSequence: control.BalanceSettlementSequence,
+		SettlementSequence:     control.BalanceSettlementSequence,
+		SettlementCircuitOpen:  control.SettlementCircuitOpen,
+		SettlementCircuitEpoch: control.SettlementCircuitEpoch,
 	}, nil
+}
+
+func ApplyEdgeLocalControlConfig(db *gorm.DB, control dto.EdgeNodeControlConfigV1, nowUnixMilli int64) error {
+	if db == nil || db.Dialector.Name() != "sqlite" {
+		return errors.New("edge local control application requires SQLite")
+	}
+	if err := control.Validate(); err != nil {
+		return err
+	}
+	if nowUnixMilli <= 0 {
+		return errors.New("edge local control application time must be positive")
+	}
+	result := db.Model(&EdgeLocalControlState{}).Where("id = ?", edgeLocalControlStateID).Updates(map[string]any{
+		"node_id": control.NodeID, "node_generation": control.NodeGeneration,
+		"settlement_circuit_open":  control.SettlementCircuitOpen,
+		"settlement_circuit_epoch": control.SettlementCircuitEpoch,
+		"updated_at_unix_milli":    nowUnixMilli,
+	})
+	if result.Error != nil {
+		return result.Error
+	}
+	if result.RowsAffected != 1 {
+		return ErrEdgeLocalAccountingCorruption
+	}
+	return nil
 }
 
 func ApplyEdgeLocalBalanceDelta(db *gorm.DB, node dto.EdgeNodeControlConfigV1, delta dto.EdgeBalanceDeltaV2, nowUnixMilli int64) error {

@@ -267,7 +267,7 @@ func migrateDB() error {
 	if err := prepareQuotaDataModelNameMigration(); err != nil {
 		return err
 	}
-	if err := migrateRemovedEdgeLeaseTables(); err != nil {
+	if err := migrateRemovedEdgeLeaseSchema(); err != nil {
 		return err
 	}
 	// Migrate price_amount column from float/double to decimal for existing tables
@@ -343,7 +343,7 @@ func migrateDBFast() error {
 	if err := prepareQuotaDataModelNameMigration(); err != nil {
 		return err
 	}
-	if err := migrateRemovedEdgeLeaseTables(); err != nil {
+	if err := migrateRemovedEdgeLeaseSchema(); err != nil {
 		return err
 	}
 
@@ -433,18 +433,32 @@ func migrateDBFast() error {
 	return nil
 }
 
-func migrateRemovedEdgeLeaseTables() error {
-	if DB == nil || !DB.Migrator().HasTable("edge_quota_leases") {
+type legacyEdgeNodeQuotaLimitMigration struct {
+	ID                  int64 `gorm:"primaryKey"`
+	NodeUID             string
+	MaxOutstandingQuota int64
+	UpdatedAt           int64
+}
+
+func (legacyEdgeNodeQuotaLimitMigration) TableName() string {
+	return "edge_nodes"
+}
+
+func migrateRemovedEdgeLeaseSchema() error {
+	if DB == nil {
 		return nil
 	}
-	var live int64
-	if err := DB.Table("edge_quota_leases").
-		Where("status IN ?", []string{"active", "closing", "revoked"}).
-		Count(&live).Error; err != nil {
-		return fmt.Errorf("inspect active edge quota leases before balance migration: %w", err)
-	}
-	if live != 0 {
-		return errors.New("balance replication migration requires all master quota leases to be closed")
+	hasLeaseTable := DB.Migrator().HasTable("edge_quota_leases")
+	if hasLeaseTable {
+		var live int64
+		if err := DB.Table("edge_quota_leases").
+			Where("status IN ?", []string{"active", "closing", "revoked"}).
+			Count(&live).Error; err != nil {
+			return fmt.Errorf("inspect active edge quota leases before balance migration: %w", err)
+		}
+		if live != 0 {
+			return errors.New("balance replication migration requires all master quota leases to be closed")
+		}
 	}
 	return DB.Transaction(func(tx *gorm.DB) error {
 		if tx.Migrator().HasTable("edge_lease_fundings") {
@@ -452,8 +466,16 @@ func migrateRemovedEdgeLeaseTables() error {
 				return fmt.Errorf("drop edge lease fundings: %w", err)
 			}
 		}
-		if err := tx.Migrator().DropTable("edge_quota_leases"); err != nil {
-			return fmt.Errorf("drop edge quota leases: %w", err)
+		if hasLeaseTable {
+			if err := tx.Migrator().DropTable("edge_quota_leases"); err != nil {
+				return fmt.Errorf("drop edge quota leases: %w", err)
+			}
+		}
+		legacyNode := &legacyEdgeNodeQuotaLimitMigration{}
+		if tx.Migrator().HasTable(legacyNode) && tx.Migrator().HasColumn(legacyNode, "MaxOutstandingQuota") {
+			if err := tx.Migrator().DropColumn(legacyNode, "MaxOutstandingQuota"); err != nil {
+				return fmt.Errorf("drop edge node max outstanding quota: %w", err)
+			}
 		}
 		return nil
 	})

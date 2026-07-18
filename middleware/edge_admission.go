@@ -9,8 +9,8 @@ import (
 )
 
 // EdgeRequestAdmission rejects before authentication, channel selection,
-// lease reservation or CPA access unless the verified snapshot is currently
-// valid and the application is accepting new data-plane work.
+// balance reservation or CPA access unless local policy, balances and
+// accounting are ready and the application is accepting new data-plane work.
 func EdgeRequestAdmission() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		if !edgeservice.BeginEdgeRequest(c) {

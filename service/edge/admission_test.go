@@ -73,17 +73,30 @@ func TestEdgeAccountingBlockOverridesStaleReadyFlag(t *testing.T) {
 	edgeDataPlanePolicy.Unlock()
 }
 
+func TestEdgeSettlementCircuitBlocksAdmissionWithoutStoppingControlReadiness(t *testing.T) {
+	resetEdgeAdmissionTestState(t)
+	edgeSettlementCircuitOpen.Store(true)
+	assert.True(t, EdgeControlReady())
+	assert.False(t, EdgeServingReady())
+
+	gin.SetMode(gin.TestMode)
+	context, _ := gin.CreateTestContext(httptest.NewRecorder())
+	assert.False(t, BeginEdgeRequest(context))
+}
+
 func resetEdgeAdmissionTestState(t *testing.T) {
 	edgeAdmission = newEdgeAdmissionGate()
 	SetEdgeRequestAdmission(true)
 	edgeControlReady.Store(true)
 	edgeBalanceReady.Store(true)
+	edgeSettlementCircuitOpen.Store(false)
 	edgeAccountingReady.Store(true)
 	edgeAccountingBlock.Store(false)
 	t.Cleanup(func() {
 		SetEdgeRequestAdmission(false)
 		edgeControlReady.Store(false)
 		edgeBalanceReady.Store(false)
+		edgeSettlementCircuitOpen.Store(false)
 		edgeAccountingReady.Store(true)
 		edgeAccountingBlock.Store(false)
 		edgeAdmission = newEdgeAdmissionGate()

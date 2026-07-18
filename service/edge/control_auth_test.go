@@ -139,12 +139,11 @@ func createControlAuthIdentity(t *testing.T, db *gorm.DB, now time.Time) (*model
 	verifyMaterial, err := edgeauth.EncodePublicKey(publicKey)
 	require.NoError(t, err)
 	node := &model.EdgeNode{
-		NodeUID:             "edge.control-auth",
-		Name:                "Control Auth",
-		Status:              model.EdgeNodeStatusActive,
-		Generation:          1,
-		ProtocolVersion:     dto.EdgeControlProtocolVersionV1,
-		MaxOutstandingQuota: 1,
+		NodeUID:         "edge.control-auth",
+		Name:            "Control Auth",
+		Status:          model.EdgeNodeStatusActive,
+		Generation:      1,
+		ProtocolVersion: dto.EdgeControlProtocolVersionV1,
 	}
 	require.NoError(t, db.Create(node).Error)
 	credential := &model.EdgeNodeCredential{

@@ -345,6 +345,8 @@ func buildNodeControlConfig(node *model.EdgeNode, bundle *model.EdgeCompiledSnap
 		SnapshotPageLimit:           common.GetEnvOrDefault("EDGE_SNAPSHOT_PAGE_LIMIT", 500),
 		SettlementMaxEvents:         common.GetEnvOrDefault("EDGE_SETTLEMENT_MAX_EVENTS", 500),
 		SettlementMaxDelaySeconds:   int64(common.GetEnvOrDefault("EDGE_SETTLEMENT_MAX_DELAY_SECONDS", 10)),
+		SettlementCircuitOpen:       node.SettlementCircuitOpen,
+		SettlementCircuitEpoch:      node.SettlementCircuitEpoch,
 		ClockSkewToleranceSeconds:   int64(common.GetEnvOrDefault("EDGE_CONTROL_CLOCK_SKEW_TOLERANCE_SECONDS", 120)),
 		SnapshotVerificationKeys:    []dto.EdgeSnapshotVerificationKeyV1{bundle.VerificationKey},
 	}

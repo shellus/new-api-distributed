@@ -38,13 +38,28 @@ func ApplyEdgeSettlementChargeTx(
 	if token.UnlimitedQuota != tokenUnlimitedQuota {
 		return errors.New("edge settlement token quota mode conflicts with authoritative state")
 	}
+	var subscription *UserSubscription
+	switch fundingSource {
+	case "wallet":
+		if userSubscriptionID != 0 {
+			return errors.New("wallet edge settlement contains a subscription ID")
+		}
+	case "subscription":
+		if userSubscriptionID <= 0 {
+			return errors.New("subscription edge settlement is missing its subscription ID")
+		}
+		stored := &UserSubscription{}
+		if err := lockForUpdate(tx).Where("id = ? AND user_id = ?", userSubscriptionID, userID).First(stored).Error; err != nil {
+			return err
+		}
+		subscription = stored
+	default:
+		return errors.New("invalid edge settlement funding source")
+	}
 
 	if quota > 0 {
 		switch fundingSource {
 		case "wallet":
-			if userSubscriptionID != 0 {
-				return errors.New("wallet edge settlement contains a subscription ID")
-			}
 			updated, clamp := common.QuotaFromDecimalChecked(decimal.NewFromInt(int64(user.Quota)).Sub(decimal.NewFromInt(quota)))
 			if clamp != nil {
 				return clamp
@@ -54,24 +69,15 @@ func ApplyEdgeSettlementChargeTx(
 				return err
 			}
 		case "subscription":
-			if userSubscriptionID <= 0 {
-				return errors.New("subscription edge settlement is missing its subscription ID")
-			}
-			var subscription UserSubscription
-			if err := lockForUpdate(tx).Where("id = ? AND user_id = ?", userSubscriptionID, userID).First(&subscription).Error; err != nil {
-				return err
-			}
 			updated, clamp := common.QuotaFromDecimalChecked(decimal.NewFromInt(subscription.AmountUsed).Add(decimal.NewFromInt(quota)))
 			if clamp != nil {
 				return clamp
 			}
 			subscription.AmountUsed = int64(updated)
 			subscription.UpdatedAt = common.GetTimestamp()
-			if err := tx.Save(&subscription).Error; err != nil {
+			if err := tx.Save(subscription).Error; err != nil {
 				return err
 			}
-		default:
-			return errors.New("invalid edge settlement funding source")
 		}
 		if !tokenUnlimitedQuota {
 			updated, clamp := common.QuotaFromDecimalChecked(decimal.NewFromInt(int64(token.RemainQuota)).Sub(decimal.NewFromInt(quota)))

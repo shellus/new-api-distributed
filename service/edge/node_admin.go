@@ -37,10 +37,6 @@ func CreateNode(request dto.EdgeNodeCreateRequest) (*dto.EdgeNodeCreateResponse,
 	if request.Generation < 1 {
 		return nil, errors.New("edge node generation must be greater than zero")
 	}
-	if request.MaxOutstandingQuota <= 0 {
-		return nil, errors.New("edge node max outstanding quota must be greater than zero")
-	}
-
 	now := time.Now()
 	expiresAt := now.Add(defaultEdgeCredentialLifetime).Unix()
 	if request.CredentialExpiresAtUnixMilli > 0 {
@@ -51,13 +47,12 @@ func CreateNode(request dto.EdgeNodeCreateRequest) (*dto.EdgeNodeCreateResponse,
 	}
 
 	node := &model.EdgeNode{
-		NodeUID:             request.NodeID,
-		Name:                request.Name,
-		Region:              request.Region,
-		Status:              model.EdgeNodeStatusActive,
-		Generation:          request.Generation,
-		ProtocolVersion:     dto.EdgeControlProtocolVersionV2,
-		MaxOutstandingQuota: request.MaxOutstandingQuota,
+		NodeUID:         request.NodeID,
+		Name:            request.Name,
+		Region:          request.Region,
+		Status:          model.EdgeNodeStatusActive,
+		Generation:      request.Generation,
+		ProtocolVersion: dto.EdgeControlProtocolVersionV2,
 	}
 	credential, privateMaterial, err := provisionNodeCredential(request.Generation, now.Unix(), expiresAt)
 	if err != nil {
@@ -127,6 +122,36 @@ func UpdateNodeStatus(nodeID int64, status model.EdgeNodeStatus) (*dto.EdgeNodeA
 			}
 			node.Status = status
 			node.UpdatedAt = now
+		}
+		updated = node
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	view := edgeNodeAdminView(updated)
+	return &view, nil
+}
+
+func ClearNodeSettlementCircuit(nodeID int64) (*dto.EdgeNodeAdminView, error) {
+	var updated *model.EdgeNode
+	err := model.DB.Transaction(func(tx *gorm.DB) error {
+		node, err := model.LockEdgeNodeByIDTx(tx, nodeID)
+		if err != nil {
+			return err
+		}
+		if !node.SettlementCircuitOpen {
+			updated = node
+			return nil
+		}
+		now := time.Now().Unix()
+		node.SettlementCircuitOpen = false
+		node.SettlementCircuitOpenedAt = 0
+		node.SettlementCircuitReason = ""
+		node.SettlementCircuitEpoch++
+		node.UpdatedAt = now
+		if err := tx.Save(node).Error; err != nil {
+			return err
 		}
 		updated = node
 		return nil
@@ -227,19 +252,25 @@ func edgeNodeAdminView(node *model.EdgeNode) dto.EdgeNodeAdminView {
 	if node == nil {
 		return dto.EdgeNodeAdminView{}
 	}
-	return dto.EdgeNodeAdminView{
-		ID:                  node.ID,
-		NodeID:              node.NodeUID,
-		Name:                node.Name,
-		Region:              node.Region,
-		Status:              string(node.Status),
-		Generation:          node.Generation,
-		ProtocolVersion:     node.ProtocolVersion,
-		DeclaredPublicURL:   node.DeclaredPublicURL,
-		SoftwareVersion:     node.SoftwareVersion,
-		MaxOutstandingQuota: node.MaxOutstandingQuota,
-		LastSeenAtUnixMilli: time.Unix(node.LastSeenAt, 0).UnixMilli(),
-		CreatedAtUnixMilli:  time.Unix(node.CreatedAt, 0).UnixMilli(),
-		UpdatedAtUnixMilli:  time.Unix(node.UpdatedAt, 0).UnixMilli(),
+	view := dto.EdgeNodeAdminView{
+		ID:                      node.ID,
+		NodeID:                  node.NodeUID,
+		Name:                    node.Name,
+		Region:                  node.Region,
+		Status:                  string(node.Status),
+		Generation:              node.Generation,
+		ProtocolVersion:         node.ProtocolVersion,
+		DeclaredPublicURL:       node.DeclaredPublicURL,
+		SoftwareVersion:         node.SoftwareVersion,
+		SettlementCircuitOpen:   node.SettlementCircuitOpen,
+		SettlementCircuitReason: node.SettlementCircuitReason,
+		SettlementCircuitEpoch:  node.SettlementCircuitEpoch,
+		LastSeenAtUnixMilli:     time.Unix(node.LastSeenAt, 0).UnixMilli(),
+		CreatedAtUnixMilli:      time.Unix(node.CreatedAt, 0).UnixMilli(),
+		UpdatedAtUnixMilli:      time.Unix(node.UpdatedAt, 0).UnixMilli(),
 	}
+	if node.SettlementCircuitOpenedAt > 0 {
+		view.SettlementCircuitOpenedAtUnixMilli = time.Unix(node.SettlementCircuitOpenedAt, 0).UnixMilli()
+	}
+	return view
 }

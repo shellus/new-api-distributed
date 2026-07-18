@@ -5,24 +5,26 @@ type EdgeNodeCreateRequest struct {
 	Name                         string `json:"name"`
 	Region                       string `json:"region,omitempty"`
 	Generation                   int64  `json:"generation,omitempty"`
-	MaxOutstandingQuota          int64  `json:"max_outstanding_quota"`
 	CredentialExpiresAtUnixMilli int64  `json:"credential_expires_at_unix_milli,omitempty"`
 }
 
 type EdgeNodeAdminView struct {
-	ID                  int64  `json:"id"`
-	NodeID              string `json:"node_id"`
-	Name                string `json:"name"`
-	Region              string `json:"region,omitempty"`
-	Status              string `json:"status"`
-	Generation          int64  `json:"generation"`
-	ProtocolVersion     string `json:"protocol_version"`
-	DeclaredPublicURL   string `json:"declared_public_url,omitempty"`
-	SoftwareVersion     string `json:"software_version,omitempty"`
-	MaxOutstandingQuota int64  `json:"max_outstanding_quota"`
-	LastSeenAtUnixMilli int64  `json:"last_seen_at_unix_milli,omitempty"`
-	CreatedAtUnixMilli  int64  `json:"created_at_unix_milli"`
-	UpdatedAtUnixMilli  int64  `json:"updated_at_unix_milli"`
+	ID                                 int64  `json:"id"`
+	NodeID                             string `json:"node_id"`
+	Name                               string `json:"name"`
+	Region                             string `json:"region,omitempty"`
+	Status                             string `json:"status"`
+	Generation                         int64  `json:"generation"`
+	ProtocolVersion                    string `json:"protocol_version"`
+	DeclaredPublicURL                  string `json:"declared_public_url,omitempty"`
+	SoftwareVersion                    string `json:"software_version,omitempty"`
+	SettlementCircuitOpen              bool   `json:"settlement_circuit_open"`
+	SettlementCircuitOpenedAtUnixMilli int64  `json:"settlement_circuit_opened_at_unix_milli,omitempty"`
+	SettlementCircuitReason            string `json:"settlement_circuit_reason,omitempty"`
+	SettlementCircuitEpoch             int64  `json:"settlement_circuit_epoch"`
+	LastSeenAtUnixMilli                int64  `json:"last_seen_at_unix_milli,omitempty"`
+	CreatedAtUnixMilli                 int64  `json:"created_at_unix_milli"`
+	UpdatedAtUnixMilli                 int64  `json:"updated_at_unix_milli"`
 }
 
 // EdgeNodeProvisionedCredential contains the edge-side private key exactly

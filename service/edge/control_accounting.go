@@ -29,7 +29,21 @@ func ProcessSettlementBlock(principal *ControlPrincipal, request dto.EdgeSettlem
 		})
 		if err != nil {
 			var sequenceError *SettlementSequenceError
+			var circuitError *SettlementCircuitError
 			switch {
+			case errors.As(err, &circuitError):
+				common.SysError(fmt.Sprintf(
+					"edge settlement circuit opened node=%s generation=%d block=%s epoch=%d: %s",
+					principal.NodeUID, principal.Generation, request.BlockID, circuitError.Epoch, circuitError.Reason,
+				))
+				result, resultErr := controlDomainErrorResult(
+					http.StatusTooManyRequests, dto.EdgeControlErrorCodeRateLimitedV1,
+					"edge settlement circuit is open", false, request.Meta.RequestID, serverRequestID, now, nil, nil,
+				)
+				if result != nil {
+					result.commitSettlementRejection = true
+				}
+				return result, resultErr
 			case errors.As(err, &sequenceError):
 				expected := sequenceError.Expected
 				return controlDomainErrorResult(

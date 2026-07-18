@@ -219,6 +219,8 @@ type EdgeNodeControlConfigV1 struct {
 	SnapshotPageLimit           int                             `json:"snapshot_page_limit"`
 	SettlementMaxEvents         int                             `json:"settlement_max_events"`
 	SettlementMaxDelaySeconds   int64                           `json:"settlement_max_delay_seconds"`
+	SettlementCircuitOpen       bool                            `json:"settlement_circuit_open"`
+	SettlementCircuitEpoch      int64                           `json:"settlement_circuit_epoch"`
 	ClockSkewToleranceSeconds   int64                           `json:"clock_skew_tolerance_seconds"`
 	SnapshotVerificationKeys    []EdgeSnapshotVerificationKeyV1 `json:"snapshot_verification_keys"`
 }
@@ -807,6 +809,9 @@ func (c EdgeNodeControlConfigV1) Validate() error {
 	}
 	if err := validateEdgeControlPositiveLimitV1("control.settlement_max_delay_seconds", c.SettlementMaxDelaySeconds, EdgeControlMaxSettlementDelaySecondsV1); err != nil {
 		return err
+	}
+	if c.SettlementCircuitEpoch < 0 || c.SettlementCircuitOpen && c.SettlementCircuitEpoch <= 0 {
+		return fmt.Errorf("control.settlement circuit state is invalid")
 	}
 	if err := validateEdgeControlPositiveLimitV1("control.clock_skew_tolerance_seconds", c.ClockSkewToleranceSeconds, EdgeControlMaxClockSkewToleranceSecondsV1); err != nil {
 		return err

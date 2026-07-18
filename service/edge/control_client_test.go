@@ -232,6 +232,32 @@ func TestEdgeHeartbeatOmitsDeprecatedCPAObservations(t *testing.T) {
 	assert.Empty(t, handler.heartbeatCPA[0])
 }
 
+func TestEdgeHeartbeatPersistsSettlementCircuitAndClosesAdmission(t *testing.T) {
+	fixture := newEdgeControlTransportFixture(t)
+	fixture.control.SettlementCircuitOpen = true
+	fixture.control.SettlementCircuitEpoch = 3
+	handler := &edgeControlTestHandler{t: t, fixture: fixture}
+	server := httptest.NewServer(handler)
+	defer server.Close()
+	client := newEdgeControlTestClient(t, fixture, server.URL)
+	store := newEdgeControlTestStore()
+	previousCircuit := edgeSettlementCircuitOpen.Load()
+	edgeSettlementCircuitOpen.Store(false)
+	t.Cleanup(func() { edgeSettlementCircuitOpen.Store(previousCircuit) })
+	runner := edgeControlLoop{
+		client: client, store: store, now: func() time.Time { return fixture.now },
+		runtimeStatus: func() dto.EdgeRuntimeStatusV1 { return dto.EdgeRuntimeStatusV1{} },
+	}
+
+	_, err := runner.heartbeat(context.Background(), fixture.control)
+	require.NoError(t, err)
+	assert.True(t, edgeSettlementCircuitOpen.Load())
+	state, err := store.BalanceState(context.Background())
+	require.NoError(t, err)
+	assert.True(t, state.SettlementCircuitOpen)
+	assert.Equal(t, int64(3), state.SettlementCircuitEpoch)
+}
+
 func TestEdgeSnapshotApplyFailsClosedWhenRoutingInstallFails(t *testing.T) {
 	fixture := newEdgeControlTransportFixture(t)
 	handler := &edgeControlTestHandler{t: t, fixture: fixture}
@@ -686,12 +712,22 @@ func (s *edgeControlTestStore) ApplySnapshot(_ context.Context, snapshot model.E
 	return nil
 }
 
+func (s *edgeControlTestStore) ApplyControl(_ context.Context, control dto.EdgeNodeControlConfigV1, _ int64) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.balance.SettlementCircuitOpen = control.SettlementCircuitOpen
+	s.balance.SettlementCircuitEpoch = control.SettlementCircuitEpoch
+	return nil
+}
+
 func (s *edgeControlTestStore) ApplyBalance(_ context.Context, _ dto.EdgeNodeControlConfigV1, delta dto.EdgeBalanceDeltaV2, _ int64) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.balance = model.EdgeLocalBalanceState{
 		Revision: delta.Revision, Initialized: true,
-		SettlementSequence: delta.SettlementAppliedThroughSequence,
+		SettlementSequence:     delta.SettlementAppliedThroughSequence,
+		SettlementCircuitOpen:  s.balance.SettlementCircuitOpen,
+		SettlementCircuitEpoch: s.balance.SettlementCircuitEpoch,
 	}
 	return nil
 }
@@ -714,7 +750,11 @@ func (s *edgeControlTestStore) PendingSettlementBlock(context.Context) (*dto.Edg
 	return nil, model.ErrEdgeLocalNoPendingUsageEvents
 }
 
-func (s *edgeControlTestStore) BuildSettlementBlock(context.Context, dto.EdgeControlRequestMetaV1, string, int, int64) (*dto.EdgeSettlementBlockRequestV1, error) {
+func (s *edgeControlTestStore) BuildSettlementBlock(context.Context, dto.EdgeControlRequestMetaV1, string, int, int64, int64) (*dto.EdgeSettlementBlockRequestV1, error) {
+	return nil, model.ErrEdgeLocalNoPendingUsageEvents
+}
+
+func (s *edgeControlTestStore) RefreshSettlementRequest(context.Context, string, dto.EdgeControlRequestMetaV1, int64) (*dto.EdgeSettlementBlockRequestV1, error) {
 	return nil, model.ErrEdgeLocalNoPendingUsageEvents
 }
 

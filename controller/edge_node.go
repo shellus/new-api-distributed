@@ -71,6 +71,20 @@ func UpdateEdgeNodeStatus(c *gin.Context) {
 	common.ApiSuccess(c, response)
 }
 
+func ClearEdgeNodeSettlementCircuit(c *gin.Context) {
+	nodeID, err := strconv.ParseInt(c.Param("id"), 10, 64)
+	if err != nil || nodeID <= 0 {
+		common.ApiErrorMsg(c, "invalid edge node ID")
+		return
+	}
+	response, err := edgeservice.ClearNodeSettlementCircuit(nodeID)
+	if err != nil {
+		common.ApiError(c, err)
+		return
+	}
+	common.ApiSuccess(c, response)
+}
+
 func RotateEdgeNodeCredential(c *gin.Context) {
 	nodeID, err := strconv.ParseInt(c.Param("id"), 10, 64)
 	if err != nil || nodeID <= 0 {

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"sort"
 	"strings"
 	"time"
 
@@ -14,6 +15,11 @@ import (
 
 	"github.com/shopspring/decimal"
 	"gorm.io/gorm"
+)
+
+const (
+	defaultMasterSettlementWindowSeconds = int64(300)
+	defaultMasterSettlementWindowQuota   = int64(50_000_000)
 )
 
 func validateMasterRequestHash(value string) error {
@@ -185,6 +191,85 @@ func validateMasterSettlementChainTx(tx *gorm.DB, node *model.EdgeNode, request 
 		return ErrMasterSettlementConflict
 	}
 	return nil
+}
+
+func masterSettlementWindowConfig() (int64, int64, error) {
+	windowSeconds := int64(common.GetEnvOrDefault("EDGE_NODE_SETTLEMENT_WINDOW_SECONDS", int(defaultMasterSettlementWindowSeconds)))
+	if windowSeconds < 10 || windowSeconds > 86_400 {
+		return 0, 0, errors.New("EDGE_NODE_SETTLEMENT_WINDOW_SECONDS must be between 10 and 86400")
+	}
+	windowQuota := int64(common.GetEnvOrDefault("EDGE_NODE_SETTLEMENT_WINDOW_QUOTA", int(defaultMasterSettlementWindowQuota)))
+	if windowQuota < 1 || windowQuota > int64(common.MaxQuota) {
+		return 0, 0, errors.New("EDGE_NODE_SETTLEMENT_WINDOW_QUOTA must be between 1 and common.MaxQuota")
+	}
+	return windowSeconds, windowQuota, nil
+}
+
+func masterSettlementWindowExceededTx(
+	tx *gorm.DB,
+	node *model.EdgeNode,
+	charges []masterSettlementCharge,
+	windowSeconds int64,
+	windowQuota int64,
+) (bool, string, error) {
+	if tx == nil || node == nil || len(charges) == 0 || windowSeconds <= 0 || windowQuota <= 0 {
+		return false, "", errors.New("invalid edge settlement window check")
+	}
+	if charges[0].event == nil {
+		return false, "", ErrMasterSettlementConflict
+	}
+	minFinished := charges[0].event.FinishedAtUnixMilli
+	maxFinished := minFinished
+	for _, charge := range charges {
+		if charge.event == nil || charge.chargedQuota < 0 || charge.chargedQuota > int64(common.MaxQuota) {
+			return false, "", ErrMasterSettlementConflict
+		}
+		if charge.event.FinishedAtUnixMilli < minFinished {
+			minFinished = charge.event.FinishedAtUnixMilli
+		}
+		if charge.event.FinishedAtUnixMilli > maxFinished {
+			maxFinished = charge.event.FinishedAtUnixMilli
+		}
+	}
+	windowMillis := windowSeconds * int64(time.Second/time.Millisecond)
+	type usagePoint struct {
+		FinishedAtUnixMilli int64
+		ChargedQuota        int64
+	}
+	points := make([]usagePoint, 0, len(charges))
+	var historical []usagePoint
+	if err := tx.Model(&model.EdgeUsageEvent{}).
+		Select("finished_at_unix_milli", "charged_quota").
+		Where("node_id = ? AND node_generation = ? AND finished_at_unix_milli > ? AND finished_at_unix_milli <= ?",
+			node.ID, node.Generation, minFinished-windowMillis, maxFinished).
+		Find(&historical).Error; err != nil {
+		return false, "", err
+	}
+	for _, point := range historical {
+		if point.ChargedQuota < 0 || point.ChargedQuota > int64(common.MaxQuota) {
+			return false, "", ErrMasterSettlementConflict
+		}
+	}
+	points = append(points, historical...)
+	for _, charge := range charges {
+		points = append(points, usagePoint{FinishedAtUnixMilli: charge.event.FinishedAtUnixMilli, ChargedQuota: charge.chargedQuota})
+	}
+	sort.Slice(points, func(i, j int) bool {
+		return points[i].FinishedAtUnixMilli < points[j].FinishedAtUnixMilli
+	})
+	left := 0
+	current := int64(0)
+	for right := range points {
+		for left < right && points[left].FinishedAtUnixMilli <= points[right].FinishedAtUnixMilli-windowMillis {
+			current -= points[left].ChargedQuota
+			left++
+		}
+		if points[right].ChargedQuota > windowQuota-current {
+			return true, fmt.Sprintf("event-time settlement window exceeded quota=%d window_seconds=%d", windowQuota, windowSeconds), nil
+		}
+		current += points[right].ChargedQuota
+	}
+	return false, "", nil
 }
 
 func validateMasterSettlementSubject(policies *masterSnapshotPolicies, event *dto.EdgeUsageEventV1) error {

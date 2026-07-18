@@ -69,7 +69,6 @@ func TestEdgeNodePermissionsAndConditionalDeclaration(t *testing.T) {
 	now := common.GetTimestamp()
 	node := createTestEdgeNode(t, "edge-node-a", 7)
 
-	assert.True(t, node.CanIssueLease())
 	assert.True(t, node.CanAcceptSettlement())
 
 	declaration := EdgeNodeDeclarationUpdate{
@@ -101,7 +100,6 @@ func TestEdgeNodePermissionsAndConditionalDeclaration(t *testing.T) {
 
 	require.NoError(t, DB.Model(node).Update("status", EdgeNodeStatusDisabled).Error)
 	require.NoError(t, DB.First(node, node.ID).Error)
-	assert.False(t, node.CanIssueLease())
 	assert.True(t, node.CanAcceptSettlement())
 	declaration.PublicURL = "https://edge-a-disabled.example"
 	declaration.LastPolicyVersion = 4
@@ -112,7 +110,6 @@ func TestEdgeNodePermissionsAndConditionalDeclaration(t *testing.T) {
 
 	require.NoError(t, DB.Model(node).Update("status", EdgeNodeStatusRevoked).Error)
 	require.NoError(t, DB.First(node, node.ID).Error)
-	assert.False(t, node.CanIssueLease())
 	assert.False(t, node.CanAcceptSettlement())
 	declaration.PublicURL = "https://revoked.example"
 	declaration.LastPolicyVersion = 5
@@ -142,8 +139,8 @@ func TestEdgeControlModelsRejectInvalidIdentityAndCounters(t *testing.T) {
 			node: EdgeNode{NodeUID: "edge-negative-cursor", Name: "Edge", Generation: 1, LastEventSeq: -1},
 		},
 		{
-			name: "negative risk limit",
-			node: EdgeNode{NodeUID: "edge-negative-limit", Name: "Edge", Generation: 1, MaxOutstandingQuota: -1},
+			name: "negative circuit epoch",
+			node: EdgeNode{NodeUID: "edge-negative-epoch", Name: "Edge", Generation: 1, SettlementCircuitEpoch: -1},
 		},
 	}
 	for _, test := range tests {

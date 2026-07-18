@@ -138,11 +138,10 @@ func newEdgeControlMiddlewareFixture(t *testing.T) (ed25519.PrivateKey, *model.E
 	require.NoError(t, err)
 	now := time.Now().Unix()
 	node := &model.EdgeNode{
-		NodeUID:             "edge.middleware",
-		Name:                "Middleware",
-		Status:              model.EdgeNodeStatusActive,
-		Generation:          1,
-		MaxOutstandingQuota: 1,
+		NodeUID:    "edge.middleware",
+		Name:       "Middleware",
+		Status:     model.EdgeNodeStatusActive,
+		Generation: 1,
 	}
 	require.NoError(t, db.Create(node).Error)
 	credential := &model.EdgeNodeCredential{

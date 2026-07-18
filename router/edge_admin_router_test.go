@@ -19,12 +19,13 @@ func TestEdgeAdminRoutesRegisterWithoutConflict(t *testing.T) {
 	})
 
 	wanted := map[string]bool{
-		http.MethodGet + " /api/edge/nodes":                         false,
-		http.MethodGet + " /api/edge/snapshots/latest":              false,
-		http.MethodPost + " /api/edge/nodes":                        false,
-		http.MethodPost + " /api/edge/snapshots/publish":            false,
-		http.MethodPost + " /api/edge/nodes/:id/status":             false,
-		http.MethodPost + " /api/edge/nodes/:id/credentials/rotate": false,
+		http.MethodGet + " /api/edge/nodes":                               false,
+		http.MethodGet + " /api/edge/snapshots/latest":                    false,
+		http.MethodPost + " /api/edge/nodes":                              false,
+		http.MethodPost + " /api/edge/snapshots/publish":                  false,
+		http.MethodPost + " /api/edge/nodes/:id/status":                   false,
+		http.MethodPost + " /api/edge/nodes/:id/settlement-circuit/clear": false,
+		http.MethodPost + " /api/edge/nodes/:id/credentials/rotate":       false,
 	}
 	for _, route := range engine.Routes() {
 		key := route.Method + " " + route.Path

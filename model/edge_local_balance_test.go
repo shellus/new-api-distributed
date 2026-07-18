@@ -116,6 +116,44 @@ func TestEdgeLocalBalanceWorksOfflineUntilNegativeFloor(t *testing.T) {
 	assert.ErrorIs(t, err, ErrEdgeLocalQuotaInsufficient)
 }
 
+func TestEdgeLocalSettlementRequestIDRefreshesAfterCircuitEpochAdvance(t *testing.T) {
+	db := openEdgeLocalTestDB(t, "balance-circuit-retry.db")
+	require.NoError(t, ApplyEdgeLocalSnapshot(db, edgeLocalTestSnapshot(1)))
+	now := time.UnixMilli(edgeLocalTestNow + 30_000)
+	control := dto.EdgeNodeControlConfigV1{NodeID: "edge.balance-retry", NodeGeneration: 1}
+	require.NoError(t, ApplyEdgeLocalBalanceDelta(db, control, dto.EdgeBalanceDeltaV2{
+		Dataset: dto.EdgeBalanceDatasetBalancesV2, BaseRevision: 0, Revision: 1, Full: true,
+		Wallets: []dto.EdgeWalletBalanceV2{{UserID: 7, RemainQuota: 100}},
+		Tokens:  []dto.EdgeTokenBalanceV2{{TokenID: 11, UserID: 7, RemainQuota: 100}},
+	}, now.UnixMilli()))
+	reservation, err := ReserveEdgeLocalBalance(db, EdgeLocalBalanceReservationRequest{
+		ReservationID: "reservation-circuit-retry", RequestID: "request-circuit-retry",
+		UserID: 7, TokenID: 11, Quota: 10, NegativeFloorQuota: -20, NowUnixMilli: now.UnixMilli(),
+	})
+	require.NoError(t, err)
+	_, err = SettleEdgeLocalReservation(db, reservation.ReservationID, edgeLocalBalanceUsageEvent("event-circuit-retry", 10, now))
+	require.NoError(t, err)
+	built, err := BuildEdgeLocalSettlementBlock(db, dto.EdgeControlRequestMetaV1{
+		ProtocolVersion: dto.EdgeControlProtocolVersionV2, RequestID: "settlement-at-epoch-0",
+	}, "block-circuit-retry", 100, now.Add(time.Second).UnixMilli(), 0)
+	require.NoError(t, err)
+	originalDigest := built.BlockDigest
+
+	unchanged, err := RefreshEdgeLocalSettlementRequest(db, built.BlockID, dto.EdgeControlRequestMetaV1{
+		ProtocolVersion: dto.EdgeControlProtocolVersionV2, RequestID: "settlement-still-epoch-0",
+	}, 0)
+	require.NoError(t, err)
+	assert.Equal(t, "settlement-at-epoch-0", unchanged.Meta.RequestID)
+
+	refreshed, err := RefreshEdgeLocalSettlementRequest(db, built.BlockID, dto.EdgeControlRequestMetaV1{
+		ProtocolVersion: dto.EdgeControlProtocolVersionV2, RequestID: "settlement-at-epoch-2",
+	}, 2)
+	require.NoError(t, err)
+	assert.Equal(t, "settlement-at-epoch-2", refreshed.Meta.RequestID)
+	assert.Equal(t, originalDigest, refreshed.BlockDigest)
+	assert.Equal(t, built.Events, refreshed.Events)
+}
+
 func edgeLocalBalanceUsageEvent(eventID string, charged int64, now time.Time) dto.EdgeUsageEventV1 {
 	status := 200
 	return dto.EdgeUsageEventV1{

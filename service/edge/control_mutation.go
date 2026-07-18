@@ -23,9 +23,10 @@ type ControlHTTPResponse struct {
 }
 
 type ControlMutationResult struct {
-	StatusCode int
-	ResultRef  string
-	Response   any
+	StatusCode                int
+	ResultRef                 string
+	Response                  any
+	commitSettlementRejection bool
 }
 
 type ControlMutation func(tx *gorm.DB, identity *model.EdgeControlIdentity) (*ControlMutationResult, error)
@@ -124,6 +125,12 @@ func ExecuteControlMutation(principal *ControlPrincipal, requestKind string, rec
 				return errors.New("edge control mutation cannot persist a 3xx response")
 			}
 			if result.StatusCode >= 400 {
+				if result.commitSettlementRejection {
+					if requestKind != controlRequestKindSettlementBlock {
+						return errors.New("committed control rejection is restricted to settlement circuit handling")
+					}
+					return nil
+				}
 				// A trusted domain rejection must keep its durable receipt, but no
 				// authoritative state touched while deriving that rejection may
 				// escape the savepoint. This is especially important for accounting

@@ -17,6 +17,7 @@ func registerEdgeAdminRoutes(apiRouter *gin.RouterGroup) {
 		edgeRoute.POST("/nodes", middleware.CriticalRateLimit(), controller.CreateEdgeNode)
 		edgeRoute.POST("/snapshots/publish", middleware.CriticalRateLimit(), controller.PublishEdgeSnapshot)
 		edgeRoute.POST("/nodes/:id/status", middleware.CriticalRateLimit(), controller.UpdateEdgeNodeStatus)
+		edgeRoute.POST("/nodes/:id/settlement-circuit/clear", middleware.CriticalRateLimit(), controller.ClearEdgeNodeSettlementCircuit)
 		edgeRoute.POST("/nodes/:id/credentials/rotate", middleware.CriticalRateLimit(), controller.RotateEdgeNodeCredential)
 	}
 }

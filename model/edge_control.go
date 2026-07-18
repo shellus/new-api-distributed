@@ -69,24 +69,27 @@ var (
 // Generation changes only when the edge's durable local accounting state is
 // explicitly replaced; ordinary process restarts keep the same generation.
 type EdgeNode struct {
-	ID                  int64          `json:"id" gorm:"primaryKey"`
-	NodeUID             string         `json:"node_uid" gorm:"type:varchar(64);not null;uniqueIndex"`
-	Name                string         `json:"name" gorm:"type:varchar(128);not null"`
-	Region              string         `json:"region" gorm:"type:varchar(64);not null"`
-	Status              EdgeNodeStatus `json:"status" gorm:"type:varchar(32);not null;index:idx_edge_nodes_status_seen,priority:1"`
-	Generation          int64          `json:"generation" gorm:"type:bigint;not null;index:idx_edge_nodes_generation_block,priority:1"`
-	ProtocolVersion     string         `json:"protocol_version" gorm:"type:varchar(32);not null"`
-	DeclaredPublicURL   string         `json:"declared_public_url" gorm:"type:text"`
-	SoftwareVersion     string         `json:"software_version" gorm:"type:varchar(64);not null"`
-	StartedAt           int64          `json:"started_at" gorm:"type:bigint;not null"`
-	Capabilities        string         `json:"capabilities" gorm:"type:text;not null"`
-	LastPolicyVersion   int64          `json:"last_policy_version" gorm:"type:bigint;not null"`
-	LastBlockSeq        int64          `json:"last_block_seq" gorm:"type:bigint;not null;index:idx_edge_nodes_generation_block,priority:2"`
-	LastEventSeq        int64          `json:"last_event_seq" gorm:"type:bigint;not null"`
-	MaxOutstandingQuota int64          `json:"max_outstanding_quota" gorm:"type:bigint;not null"`
-	LastSeenAt          int64          `json:"last_seen_at" gorm:"type:bigint;not null;index:idx_edge_nodes_status_seen,priority:2"`
-	CreatedAt           int64          `json:"created_at" gorm:"type:bigint;not null;index"`
-	UpdatedAt           int64          `json:"updated_at" gorm:"type:bigint;not null;index"`
+	ID                        int64          `json:"id" gorm:"primaryKey"`
+	NodeUID                   string         `json:"node_uid" gorm:"type:varchar(64);not null;uniqueIndex"`
+	Name                      string         `json:"name" gorm:"type:varchar(128);not null"`
+	Region                    string         `json:"region" gorm:"type:varchar(64);not null"`
+	Status                    EdgeNodeStatus `json:"status" gorm:"type:varchar(32);not null;index:idx_edge_nodes_status_seen,priority:1"`
+	Generation                int64          `json:"generation" gorm:"type:bigint;not null;index:idx_edge_nodes_generation_block,priority:1"`
+	ProtocolVersion           string         `json:"protocol_version" gorm:"type:varchar(32);not null"`
+	DeclaredPublicURL         string         `json:"declared_public_url" gorm:"type:text"`
+	SoftwareVersion           string         `json:"software_version" gorm:"type:varchar(64);not null"`
+	StartedAt                 int64          `json:"started_at" gorm:"type:bigint;not null"`
+	Capabilities              string         `json:"capabilities" gorm:"type:text;not null"`
+	LastPolicyVersion         int64          `json:"last_policy_version" gorm:"type:bigint;not null"`
+	LastBlockSeq              int64          `json:"last_block_seq" gorm:"type:bigint;not null;index:idx_edge_nodes_generation_block,priority:2"`
+	LastEventSeq              int64          `json:"last_event_seq" gorm:"type:bigint;not null"`
+	SettlementCircuitOpen     bool           `json:"settlement_circuit_open" gorm:"not null"`
+	SettlementCircuitOpenedAt int64          `json:"settlement_circuit_opened_at" gorm:"type:bigint;not null"`
+	SettlementCircuitReason   string         `json:"settlement_circuit_reason" gorm:"type:text;not null"`
+	SettlementCircuitEpoch    int64          `json:"settlement_circuit_epoch" gorm:"type:bigint;not null"`
+	LastSeenAt                int64          `json:"last_seen_at" gorm:"type:bigint;not null;index:idx_edge_nodes_status_seen,priority:2"`
+	CreatedAt                 int64          `json:"created_at" gorm:"type:bigint;not null;index"`
+	UpdatedAt                 int64          `json:"updated_at" gorm:"type:bigint;not null;index"`
 }
 
 func (n *EdgeNode) BeforeCreate(_ *gorm.DB) error {
@@ -116,8 +119,11 @@ func (n *EdgeNode) BeforeCreate(_ *gorm.DB) error {
 	if !SupportedEdgeControlProtocolVersion(n.ProtocolVersion) {
 		return fmt.Errorf("unsupported edge node protocol version: %s", n.ProtocolVersion)
 	}
-	if n.LastPolicyVersion < 0 || n.LastBlockSeq < 0 || n.LastEventSeq < 0 || n.MaxOutstandingQuota < 0 {
+	if n.LastPolicyVersion < 0 || n.LastBlockSeq < 0 || n.LastEventSeq < 0 || n.SettlementCircuitEpoch < 0 {
 		return errors.New("edge node cursors and limits cannot be negative")
+	}
+	if n.SettlementCircuitOpen && (n.SettlementCircuitOpenedAt <= 0 || strings.TrimSpace(n.SettlementCircuitReason) == "" || n.SettlementCircuitEpoch <= 0) {
+		return errors.New("open edge settlement circuit is missing audit state")
 	}
 	if n.Status == "" {
 		n.Status = EdgeNodeStatusActive
@@ -188,10 +194,6 @@ func (s EdgeNodeStatus) Valid() bool {
 	default:
 		return false
 	}
-}
-
-func (n *EdgeNode) CanIssueLease() bool {
-	return n != nil && n.Status == EdgeNodeStatusActive
 }
 
 func (n *EdgeNode) CanAcceptSettlement() bool {

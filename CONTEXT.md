@@ -5,11 +5,11 @@ This context describes the trusted master/edge system that distributes New API r
 ## Nodes and execution
 
 **Master**:
-The authoritative node for users, tokens, business policy, quota allocation, settlement, and statistics. It is not a proxy for normal edge user requests.
+The authoritative node for users, tokens, business policy, balances, settlement, and statistics. It is not a proxy for normal edge user requests.
 _Avoid_: Primary request gateway, shared database server
 
 **Edge**:
-A trusted data-plane node that authenticates and serves user requests from local snapshots and quota leases, then reports usage asynchronously.
+A trusted data-plane node that authenticates and serves user requests from local policy and balance projections, then reports usage asynchronously.
 _Avoid_: Slave database replica, New API cluster worker
 
 **CPA**:
@@ -36,13 +36,17 @@ _Avoid_: Manually maintained edge channel
 
 ## Accounting
 
-**Quota Lease**:
-Quota reserved by the master for one trusted edge so that the edge can serve requests without consulting the master each time.
-_Avoid_: Copied balance, local wallet
+**Balance Projection**:
+A revisioned local projection of authoritative wallet, subscription, and token balances, reconciled with edge reservations and unsettled usage.
+_Avoid_: Database replica, quota lease
 
 **Reservation**:
-A temporary local hold against a quota lease created before an edge sends one request to CPA.
-_Avoid_: Final charge, master lease
+A temporary local hold against one funding account and, when finite, one token account before an edge sends a request to CPA.
+_Avoid_: Final charge, master reservation
+
+**Settlement Circuit**:
+A per-node audited safety state for excessive settlement exposure. While open, the edge cannot admit new data-plane requests, but its durable accounting remains recoverable.
+_Avoid_: Node revocation, automatic retry backoff
 
 **Usage Event**:
 The durable local accounting fact produced when one edge request finishes or fails.

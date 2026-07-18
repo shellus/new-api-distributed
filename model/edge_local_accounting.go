@@ -340,6 +340,7 @@ func BuildEdgeLocalSettlementBlock(
 	blockID string,
 	maxEvents int,
 	createdAtUnixMilli int64,
+	settlementCircuitEpoch int64,
 ) (*dto.EdgeSettlementBlockRequestV1, error) {
 	if db == nil || db.Dialector.Name() != "sqlite" {
 		return nil, errors.New("edge local settlement block requires SQLite")
@@ -355,6 +356,9 @@ func BuildEdgeLocalSettlementBlock(
 	}
 	if createdAtUnixMilli <= 0 {
 		return nil, errors.New("settlement block creation time must be positive")
+	}
+	if settlementCircuitEpoch < 0 {
+		return nil, errors.New("settlement circuit epoch must not be negative")
 	}
 
 	var request *dto.EdgeSettlementBlockRequestV1
@@ -433,7 +437,8 @@ func BuildEdgeLocalSettlementBlock(
 			PreviousBlockID: built.PreviousBlockID, PreviousBlockDigest: built.PreviousBlockDigest,
 			FirstSequence: built.FirstSequence, LastSequence: built.LastSequence, EventCount: len(events),
 			BlockDigest: built.BlockDigest, Status: EdgeLocalSettlementBlockStatusPending,
-			Payload: string(payload), CreatedAtUnixMilli: createdAtUnixMilli,
+			RequestCircuitEpoch: settlementCircuitEpoch,
+			Payload:             string(payload), CreatedAtUnixMilli: createdAtUnixMilli,
 		}
 		if err := tx.Create(&block).Error; err != nil {
 			return err
@@ -466,6 +471,74 @@ func BuildEdgeLocalSettlementBlock(
 		return nil, err
 	}
 	return request, nil
+}
+
+func RefreshEdgeLocalSettlementRequest(
+	db *gorm.DB,
+	blockID string,
+	meta dto.EdgeControlRequestMetaV1,
+	settlementCircuitEpoch int64,
+) (*dto.EdgeSettlementBlockRequestV1, error) {
+	if db == nil || db.Dialector.Name() != "sqlite" {
+		return nil, errors.New("edge local settlement request refresh requires SQLite")
+	}
+	if err := validateEdgeLocalIdentifier(blockID); err != nil {
+		return nil, err
+	}
+	if err := meta.Validate(); err != nil {
+		return nil, err
+	}
+	if settlementCircuitEpoch < 0 {
+		return nil, errors.New("settlement circuit epoch must not be negative")
+	}
+	var refreshed *dto.EdgeSettlementBlockRequestV1
+	err := db.Transaction(func(tx *gorm.DB) error {
+		var block EdgeLocalSettlementBlock
+		if err := tx.Where("block_id = ?", blockID).First(&block).Error; err != nil {
+			return err
+		}
+		if block.Status != EdgeLocalSettlementBlockStatusPending {
+			return ErrEdgeLocalSettlementConflict
+		}
+		var request dto.EdgeSettlementBlockRequestV1
+		if err := common.UnmarshalJsonStr(block.Payload, &request); err != nil {
+			return ErrEdgeLocalAccountingCorruption
+		}
+		if settlementCircuitEpoch <= block.RequestCircuitEpoch {
+			refreshed = &request
+			return nil
+		}
+		request.Meta = meta
+		if err := request.Validate(); err != nil {
+			return err
+		}
+		digest, err := edgesettlement.DigestBlockV1(block.NodeID, block.NodeGeneration, request)
+		if err != nil {
+			return err
+		}
+		if digest != block.BlockDigest || digest != request.BlockDigest {
+			return ErrEdgeLocalAccountingCorruption
+		}
+		payload, err := common.Marshal(request)
+		if err != nil {
+			return err
+		}
+		result := tx.Model(&EdgeLocalSettlementBlock{}).
+			Where("block_id = ? AND status = ? AND request_circuit_epoch < ?", blockID, EdgeLocalSettlementBlockStatusPending, settlementCircuitEpoch).
+			Updates(map[string]any{"payload": string(payload), "request_circuit_epoch": settlementCircuitEpoch})
+		if result.Error != nil {
+			return result.Error
+		}
+		if result.RowsAffected != 1 {
+			return ErrEdgeLocalSettlementConflict
+		}
+		refreshed = &request
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return refreshed, nil
 }
 
 func AcknowledgeEdgeLocalSettlementBlock(db *gorm.DB, ack dto.EdgeSettlementAckV1) error {

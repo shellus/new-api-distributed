@@ -118,6 +118,22 @@ func TestExecuteControlMutationRollsBackReceiptAndDomainMutationOnError(t *testi
 	assert.Zero(t, nonceCount)
 }
 
+func TestExecuteControlMutationRejectsCommittedRejectionOutsideSettlement(t *testing.T) {
+	db, principal := newControlMutationFixture(t)
+	_, err := ExecuteControlMutation(principal, controlRequestKindHeartbeat, time.Hour, func(tx *gorm.DB, identity *model.EdgeControlIdentity) (*ControlMutationResult, error) {
+		require.NoError(t, tx.Model(&model.EdgeNode{}).Where("id = ?", identity.Node.ID).Update("last_seen_at", int64(99)).Error)
+		return &ControlMutationResult{StatusCode: 429, Response: map[string]any{"error": "blocked"}, commitSettlementRejection: true}, nil
+	})
+	require.ErrorContains(t, err, "restricted to settlement circuit")
+
+	var node model.EdgeNode
+	require.NoError(t, db.First(&node, principal.NodeID).Error)
+	assert.Zero(t, node.LastSeenAt)
+	var receiptCount int64
+	require.NoError(t, db.Model(&model.EdgeRequestReceipt{}).Count(&receiptCount).Error)
+	assert.Zero(t, receiptCount)
+}
+
 func newControlMutationFixture(t *testing.T) (*gorm.DB, *ControlPrincipal) {
 	t.Helper()
 	previousDB := model.DB
@@ -149,11 +165,10 @@ func newControlMutationFixture(t *testing.T) (*gorm.DB, *ControlPrincipal) {
 
 	now := common.GetTimestamp()
 	node := &model.EdgeNode{
-		NodeUID:             "edge.control-mutation",
-		Name:                "Control Mutation",
-		Status:              model.EdgeNodeStatusActive,
-		Generation:          1,
-		MaxOutstandingQuota: 1,
+		NodeUID:    "edge.control-mutation",
+		Name:       "Control Mutation",
+		Status:     model.EdgeNodeStatusActive,
+		Generation: 1,
 	}
 	require.NoError(t, db.Create(node).Error)
 	verifyMaterial, err := edgeauth.EncodePublicKey(make([]byte, 32))

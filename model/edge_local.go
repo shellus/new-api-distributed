@@ -66,6 +66,8 @@ type EdgeLocalControlState struct {
 	BalanceRevision            int64  `gorm:"not null;default:0"`
 	BalanceInitialized         bool   `gorm:"not null;default:false"`
 	BalanceSettlementSequence  int64  `gorm:"not null;default:0"`
+	SettlementCircuitOpen      bool   `gorm:"not null;default:false"`
+	SettlementCircuitEpoch     int64  `gorm:"not null;default:0"`
 	CreatedAtUnixMilli         int64  `gorm:"not null"`
 	UpdatedAtUnixMilli         int64  `gorm:"not null"`
 }
@@ -256,6 +258,7 @@ type EdgeLocalSettlementBlock struct {
 	EventCount              int                            `gorm:"not null"`
 	BlockDigest             string                         `gorm:"type:char(64);not null"`
 	Status                  EdgeLocalSettlementBlockStatus `gorm:"type:varchar(32);not null;index"`
+	RequestCircuitEpoch     int64                          `gorm:"not null;default:0"`
 	Payload                 string                         `gorm:"type:text;not null"`
 	AckPayload              string                         `gorm:"type:text;not null"`
 	CreatedAtUnixMilli      int64                          `gorm:"not null"`

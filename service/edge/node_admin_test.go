@@ -24,7 +24,6 @@ func TestCreateNodeStoresOnlyPublicCredentialMaterial(t *testing.T) {
 		NodeID:                       "edge.pro20x4.sg",
 		Name:                         "Singapore Pro20x4",
 		Region:                       "ap-southeast-1",
-		MaxOutstandingQuota:          100_000,
 		CredentialExpiresAtUnixMilli: expiresAt.UnixMilli(),
 	})
 	require.NoError(t, err)
@@ -32,7 +31,6 @@ func TestCreateNodeStoresOnlyPublicCredentialMaterial(t *testing.T) {
 	assert.Equal(t, int64(1), response.Node.Generation)
 	assert.Equal(t, dto.EdgeControlProtocolVersionV2, response.Node.ProtocolVersion)
 	assert.Equal(t, string(model.EdgeNodeStatusActive), response.Node.Status)
-	assert.Equal(t, int64(100_000), response.Node.MaxOutstandingQuota)
 	assert.Equal(t, edgeauth.Algorithm, response.Credential.Algorithm)
 	assert.True(t, response.Credential.ReturnedOnce)
 	assert.Equal(t, expiresAt.UnixMilli(), response.Credential.ExpiresAtUnixMilli)
@@ -60,9 +58,8 @@ func TestCreateNodeStoresOnlyPublicCredentialMaterial(t *testing.T) {
 func TestCreateNodeIsTransactionalOnDuplicateNodeID(t *testing.T) {
 	db := newNodeAdminTestDB(t)
 	request := dto.EdgeNodeCreateRequest{
-		NodeID:              "edge.duplicate",
-		Name:                "Duplicate",
-		MaxOutstandingQuota: 10_000,
+		NodeID: "edge.duplicate",
+		Name:   "Duplicate",
 	}
 
 	_, err := CreateNode(request)
@@ -78,20 +75,11 @@ func TestCreateNodeIsTransactionalOnDuplicateNodeID(t *testing.T) {
 	assert.Equal(t, int64(1), credentialCount)
 }
 
-func TestCreateNodeRejectsUnsafeRiskAndExpirySettings(t *testing.T) {
+func TestCreateNodeRejectsExpiredCredential(t *testing.T) {
 	newNodeAdminTestDB(t)
-
 	_, err := CreateNode(dto.EdgeNodeCreateRequest{
-		NodeID:              "edge.no-quota",
-		Name:                "No quota",
-		MaxOutstandingQuota: 0,
-	})
-	require.Error(t, err)
-
-	_, err = CreateNode(dto.EdgeNodeCreateRequest{
 		NodeID:                       "edge.expired",
 		Name:                         "Expired",
-		MaxOutstandingQuota:          1,
 		CredentialExpiresAtUnixMilli: time.Now().Add(-time.Minute).UnixMilli(),
 	})
 	require.Error(t, err)
@@ -100,9 +88,8 @@ func TestCreateNodeRejectsUnsafeRiskAndExpirySettings(t *testing.T) {
 func TestNodeStatusAndCredentialRotationLifecycle(t *testing.T) {
 	db := newNodeAdminTestDB(t)
 	created, err := CreateNode(dto.EdgeNodeCreateRequest{
-		NodeID:              "edge.lifecycle",
-		Name:                "Lifecycle",
-		MaxOutstandingQuota: 10_000,
+		NodeID: "edge.lifecycle",
+		Name:   "Lifecycle",
 	})
 	require.NoError(t, err)
 

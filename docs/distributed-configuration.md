@@ -13,7 +13,7 @@
 - 默认根入口继续构建 master。`EDGE_DISTRIBUTED_ENABLED` 默认为 `false`；关闭时不注册 edge 控制面和管理接口，也不启动快照编译与消费日志 outbox。
 - `cmd/newapi-edge` 构建独立 edge 入口。edge 只暴露 `/healthz`、`/readyz`、`/v1/chat/completions` 和 `/v1/responses`，不承载管理后台。
 - master 与 edge 使用同一 Go module、relay、协议适配、计费换算和 `BillingSession`；edge 不复制这些实现。
-- CPA 是 edge 的本地上游执行引擎。CPA 不得作为绕过 edge 鉴权、租约和计费的公网入口。
+- CPA 是 edge 的本地上游执行引擎。CPA 不得作为绕过 edge 鉴权、本地余额 admission 和计费的公网入口。
 
 ## 配置事实来源
 
@@ -35,7 +35,7 @@ master 继续使用现有 New API 后台管理：
 - 渠道、模型映射、参数覆盖和系统提示词。
 - 计费规则和价格版本。
 - token 撤销和渠道启停。
-- 配额租约的上限和补充策略。
+- 用户计费偏好、余额复制和节点结算风险参数。
 
 这些配置由 master 编译为 edge 所需的最小快照。edge 不复制中心数据库，也不提供本地编辑入口。
 
@@ -46,7 +46,7 @@ master 负责维护：
 - 节点身份和凭证状态。
 - 节点启用、禁用和吊销状态。
 - 节点允许承载的业务范围。
-- 节点租约和风险限制。
+- 节点结算滑动窗口、熔断状态和人工恢复代次。
 - edge 最近一次声明的公开访问地址。
 - edge 上报和 master 探测得到的运行状态。
 
@@ -82,15 +82,14 @@ master 负责维护：
 | `EDGE_CONTROL_CLOCK_SKEW_TOLERANCE_SECONDS` | `120`，范围 `1..900` | 控制请求和结算事件允许的时钟偏差 |
 | `EDGE_MAX_INFLIGHT_REQUEST_SECONDS` | `3600`，范围 `1..86400` | master 接受单个 usage event 的最大持续时间 |
 | `EDGE_CONTROL_RECEIPT_TTL_SECONDS` | `86400`，范围 `1..604800` | 控制请求 receipt 与重放保护的保留时间 |
-| `EDGE_LEASE_TTL_SECONDS` | `900`，有效范围 `60..86400` | master 签发租约的有效期 |
-| `EDGE_LEASE_MAX_QUOTA` | `500000`，上限为 `common.MaxQuota` | 单次租约最多授予的额度 |
-| `EDGE_LEASE_RENEW_DIVISOR` | `4`，范围 `2..1000` | 以 `granted_quota / divisor` 计算续租阈值 |
+| `EDGE_NODE_SETTLEMENT_WINDOW_SECONDS` | `300`，范围 `10..86400` | 每节点按 usage event 完成时间计算的结算滑动窗口长度 |
+| `EDGE_NODE_SETTLEMENT_WINDOW_QUOTA` | `50000000`，范围 `1..common.MaxQuota` | 同一节点代次在任一事件时间窗口内允许受理的最大 charge |
 | `EDGE_CONSUME_LOG_OUTBOX_INTERVAL_SECONDS` | `2`，最小 `1` | master 投影消费日志 outbox 的轮询周期 |
 | `EDGE_CONSUME_LOG_OUTBOX_BATCH_SIZE` | `100`，范围 `1..1000` | 每轮消费日志 outbox 的最大处理量 |
 
-`EDGE_SNAPSHOT_COMPILE_INTERVAL_SECONDS` 必须明显短于 `EDGE_SNAPSHOT_TTL_SECONDS`，建议不超过 TTL 的一半，为编译失败重试和 edge 拉取预留时间。默认值 `900/3600` 满足该约束；缩短 TTL 时必须同步缩短编译间隔，否则旧快照会按设计过期并使 edge fail closed。
+`EDGE_SNAPSHOT_COMPILE_INTERVAL_SECONDS` 应明显短于 `EDGE_SNAPSHOT_TTL_SECONDS`，建议不超过 TTL 的一半，为编译失败重试和 edge 拉取预留时间。快照 TTL 仍限制新快照的发布和应用，但最后一份已经验证并应用的策略过期后只冻结策略变化，不再关闭数据面。
 
-控制面下发的心跳、轮询、分页、结算和时钟参数会通过 v1 DTO 再次校验。超出协议范围的配置不会被 edge 静默接受。
+控制面下发的心跳、轮询、分页、结算、circuit 和时钟参数会通过版本化 DTO 再次校验。超出协议范围的配置不会被 edge 静默接受。
 
 ## Edge 本地部署配置
 
@@ -127,13 +126,10 @@ edge 的人工配置只保留部署必需信息：
 |------|------|------|
 | `EDGE_SQLITE_PATH` | 必填 | 独立 edge SQLite 文件；不能复用 master 的 `SQL_DSN` 或日志库 |
 | `EDGE_CHANNEL_CONFIG_DIR` | `/config/channels` | edge 本地渠道 YAML 目录；只读取顶层 `.yaml`/`.yml` 文件 |
-| `EDGE_LEASE_REQUEST_QUOTA` | `100000`，范围 `1..common.MaxQuota` | 非免费请求首次申请或续租的目标额度 |
-| `EDGE_LEASE_MINIMUM_QUOTA` | `1000`，范围 `0..common.MaxQuota` | 非免费请求可接受的最小授予额度；实际请求所需额度会提高该下界 |
-| `EDGE_LEASE_MAINTENANCE_INTERVAL_SECONDS` | `15`，有效范围 `1..300` | staged settlement 恢复、主动续租和旧租约关闭周期 |
-| `EDGE_LEASE_RENEW_BEFORE_SECONDS` | `60`，有效范围 `1..3600` | 租约接近到期时提前续租的窗口 |
+| `EDGE_BALANCE_NEGATIVE_FLOOR_QUOTA` | `-10000000`，范围 `-common.MaxQuota..0` | 每个有限资金账户和有限 token 账户在断网期间允许到达的本地负余额下限 |
 | `EDGE_CPA_HEALTH_TIMEOUT_SECONDS` | 兼容保留 | 当前 edge 不执行本地上游合成探测，也不读取此变量 |
 | `SHUTDOWN_TIMEOUT_SECONDS` | `120` | HTTP 优雅关闭时间；超时后强制关闭连接，但仍等待 handler 完成账务收尾 |
-| `EDGE_DRAIN_TIMEOUT_SECONDS` | `30` | 停止后台循环后，最终上传结算并关闭可关闭租约的时间预算 |
+| `EDGE_DRAIN_TIMEOUT_SECONDS` | `30` | 停止后台循环后，最终上传 durable settlement 的时间预算 |
 
 `PORT` 仍控制进程监听端口。部署值属于环境信息，只写入私有 `.env` 或编排配置，不写入项目文档。
 
@@ -151,7 +147,7 @@ https://<edge-public-host>
 1. edge 从本地部署配置读取公开访问地址。
 2. edge 在注册、重连和地址变化时使用节点身份签名声明该地址。
 3. master 完成协议格式和节点凭证校验后直接保存，不进入人工审批流程。
-4. 当前 v1 控制面持久化该声明和 edge 心跳，不使用 master 公网探测决定 edge readiness。
+4. 当前控制面持久化该声明和 edge 心跳，不使用 master 公网探测决定 edge readiness。
 5. 后续增加公网主动探测时，只能记录可达性和延迟；探测失败不能否定地址声明。
 6. 地址变化后由 edge 自动覆盖旧声明，不要求管理员同步修改 master。
 
@@ -208,43 +204,45 @@ edge 不对本地上游发起合成探测，也不根据瞬时探测结果禁用
 edge SQLite 保存：
 
 - master 下发的令牌鉴权索引和业务快照。
-- 本地 lease、reservation 和结算状态。
+- 本地余额账户、reservation、overlay 和结算状态。
 - staged settlement、usage event、outbox 和同步游标。
 - 渠道的本地运行投影。
 
 这些数据只由同步和运行逻辑修改。edge 后台不提供用户、渠道、分组、计费或余额编辑入口，运维过程也不直接修改 SQLite。
 
-在没有未上报账务数据时，SQLite 可以删除并通过 master 重新生成；存在未确认 outbox 或 lease 时必须先完成恢复或结算。
+在没有未上报账务数据时，SQLite 可以删除并通过 master 重新生成；存在 active/staged reservation、未确认 usage/outbox 或 pending settlement block 时必须先完成恢复或结算。
 
-## 租约与免费模型
+## 余额副本、负下限与免费模型
 
-所有请求都必须先获得与当前签名快照、用户和 token 绑定的本地 lease，随后才能访问 CPA。非免费请求使用正额度 lease；master 在签发时从钱包或订阅中事务型预留额度，并受节点最大未结额度限制。
+`edge-control.v2` 通过 heartbeat 下发钱包、订阅和 token 的版本化余额向量。edge 把 master confirmed balance 与本地 active reservation、unsettled usage overlay 合并后完成 admission；普通用户请求不为了余额访问 master。第一次 v2 heartbeat 必须 full 初始化，鉴权索引和余额副本未同时就绪时不访问 CPA。
 
-签名计费策略明确为免费时，edge 申请 `requested_quota=0`、`minimum_acceptable_quota=0` 的零额度 lease。master 不预留钱包或订阅额度，但仍签发可审计、可结算、与快照版本绑定的 lease。零额度 lease 不参与正额度自动续租；免费请求仍不能绕过本地鉴权、lease 校验、usage event 和结算序列。
+每次 reservation 在同一 SQLite 事务中固定资金来源、订阅 ID、token quota 模式、策略 revision 和 balance revision。钱包或订阅与有限 token 分别检查；任一有限账户预占后低于 `EDGE_BALANCE_NEGATIVE_FLOOR_QUOTA` 时，请求在访问 CPA 前返回额度不足。免费请求 charge 为零，但仍保留本地鉴权、reservation、usage event、连续结算序列和审计语义。
 
-当前 v1 数据面只执行倍率计费和固定价格计费。tiered expression 可以存在于与当前请求无关的快照策略中，但使用 tiered 计费的模型不会在 edge v1 上执行，master 也不会接受伪造为 v1 可结算事件的动态计费结果。
+当前 v2 数据面只执行倍率计费和固定价格计费。tiered expression 可以存在于与当前请求无关的快照策略中，但使用 tiered 计费的模型不会在 edge v2 上执行，master 也不会接受伪造为 v2 可结算事件的动态计费结果。
 
 ## Durable settlement 与账务 fail closed
 
 请求完成后，edge 按以下顺序落盘：
 
 1. 先把精确 usage event 写入 active reservation 的 staged settlement 字段。
-2. 再在同一 SQLite 事务中调整 lease、完成 reservation、写入不可变 usage event 和本地 outbox。
+2. 再在同一 SQLite 事务中调整余额 overlay、完成 reservation、写入不可变 usage event 和本地 outbox。
 3. 后台按连续序列组成持久化结算区块；同一区块重试和进程重启复用完全相同的请求内容。
 
-一旦上游请求已经完成而本地结算失败，edge 会关闭账务 readiness。已有 staged settlement 由租约维护循环确定性重试；在 staged 事件全部完成前，`/readyz` 保持 `503` 且不接受新请求。若失败发生在精确事件成功 staged 之前，或启动扫描发现 active 但未 staged 的孤儿 reservation，账务门会保持锁定并要求人工核查和处置，不能猜测请求结果后自动退款；重启不会自动清除该阻断。正常关闭会先停止 admission、等待在途 handler 完成账务收尾，再停止后台循环并执行最终 drain。
+一旦上游请求已经完成而本地结算失败，edge 会关闭账务 readiness。已有 staged settlement 由账务维护循环确定性重试；在 staged 事件全部完成前，`/readyz` 保持 `503` 且不接受新请求。若失败发生在精确事件成功 staged 之前，或启动扫描发现 active 但未 staged 的孤儿 reservation，账务门会保持锁定并要求人工核查和处置，不能猜测请求结果后自动退款；重启不会自动清除该阻断。正常关闭会先停止 admission、等待在途 handler 完成账务收尾，再停止后台循环并执行最终 drain。
 
 ## Master exact-once 投影
 
-master 在接收结算区块的权威事务中校验节点代次、连续事件序列、lease、快照和价格，并写入 usage event 与消费日志 outbox。重复区块、重复事件和重放请求返回幂等结果，不重复扣费。
+master 在接收结算区块的权威事务中校验节点代次、连续事件序列、资金来源、快照、价格和事件时间窗口，随后 exactly-once 扣减钱包或订阅及有限 token，并写入 usage event 与消费日志 outbox。重复区块、重复事件和重放请求返回幂等结果，不重复扣费。
+
+当任一节点事件时间窗口的 charge 超过阈值时，master 使用受限的 committed rejection：只提交节点 circuit 标记和拒绝 receipt，不提交区块、usage、余额扣减、事件水位或日志 outbox。edge 在后续 heartbeat 收到 circuit 后停止新 admission，但继续心跳并保留本地 outbox。熔断不自动恢复；管理员核账后调用 `POST /api/edge/nodes/:id/settlement-circuit/clear`，清除 circuit 并递增 epoch，edge 随后用新的 HTTP request ID 重试同一 durable block，block ID、事件、序号和 digest 不变。
 
 消费日志 worker 使用全局 billing event key 投影正式 consume log；启用数据统计时，`quota_data` 使用独立事件标记在主数据库中原子累加。SQL 日志库、独立日志库和 ClickHouse 投影都必须以同一 billing event key 保持重试幂等。投影成功前 outbox 不会被删除；失败会退避重试，master 崩溃后可继续领取过期 claim。
 
 ## 健康检查语义
 
 - `/healthz` 只表示 edge 进程存活，不代表可以接收用户请求。
-- `/readyz` 只有在 admission 开启、签名快照仍有效、账务状态可写且没有待恢复 staged settlement 时返回 `200`；本地上游瞬时可达性不参与整机 readiness。
-- 应用新快照时先关闭数据面，在持有策略写锁的情况下原子替换投影，再恢复 readiness。请求完成本地 lease 预占后会固定快照与价格版本，重试不能跨快照使用新的价格或路由策略。
+- `/readyz` 只有在 admission 开启、已存在最后一份验证并应用的策略、余额副本已初始化、账务状态可写、没有待恢复 staged settlement 且 settlement circuit 未打开时返回 `200`；策略 TTL 过期和本地上游瞬时可达性不参与整机 readiness。
+- 应用新快照时先关闭数据面，在持有策略写锁的情况下原子替换投影，再恢复 readiness。请求完成本地余额 reservation 后会固定快照、价格和 balance revision，重试不能跨快照使用新的价格或路由策略。
 
 ## 配置与状态流向
 
@@ -276,7 +274,7 @@ Edge 本地部署配置
 ### 重装或迁移
 
 1. 保留或安全迁移节点身份。
-2. 未确认 usage 和 lease 必须先结算，或恢复原 edge SQLite。
+2. 未确认 usage、pending block 和 staged reservation 必须先结算，或恢复原 edge SQLite。
 3. 在新环境设置新的公开访问地址和 CPA 凭证。
 4. edge 重连后自动同步业务快照并更新公开地址声明。
 
@@ -289,7 +287,7 @@ Edge 本地部署配置
 ### 节点下线
 
 1. edge 停止接受新请求并上报剩余结算。
-2. 等待在途 handler 完成 durable settlement，上传 outbox，并关闭或归还可关闭的 lease。
+2. 等待在途 handler 完成 durable settlement，并上传本地 outbox。
 3. master 禁用节点或吊销凭证。
 4. 节点公开地址从可选节点列表中移除。
 
@@ -298,9 +296,9 @@ Edge 本地部署配置
 - master、edge 和 CPA 的时间必须由可靠时钟同步；允许偏差不能超过 `EDGE_CONTROL_CLOCK_SKEW_TOLERANCE_SECONDS`。
 - `EDGE_MASTER_URL` 和四个 CPA base URL 必须为根 URL；CPA base URL 不能带 `/v1`。
 - master 快照签名私钥与 edge 节点私钥必须属于不同密钥，并且都不能进入数据库、日志或版本库。
-- edge SQLite 必须位于持久化存储；未确认 usage、staged settlement、outbox 或 active lease 存在时不能删除或替换。
+- edge SQLite 必须位于持久化存储；未确认 usage、staged settlement、outbox、pending block 或 active reservation 存在时不能删除或替换。
 - 生产探针应使用 `/readyz` 决定是否接流量，`/healthz` 只用于判断进程是否需要重启。
-- 只有 `/v1/chat/completions` 和 `/v1/responses` 的文本及流式请求属于 v1 边界；图片、音频、视频、Realtime、异步任务和无法表达的内置工具在访问 CPA 前拒绝。
+- 只有 `/v1/chat/completions` 和 `/v1/responses` 的文本及流式请求属于当前 v2 数据面边界；图片、音频、视频、Realtime、异步任务和无法表达的内置工具在访问 CPA 前拒绝。
 
 ## 运维边界
 

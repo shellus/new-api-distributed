@@ -11,11 +11,12 @@ import (
 const edgeRequestPolicyGuardKey = "edge_request_policy_guard"
 
 var (
-	edgeAdmission       = newEdgeAdmissionGate()
-	edgeDataPlanePolicy sync.RWMutex
-	edgeAccountingReady atomic.Bool
-	edgeAccountingBlock atomic.Bool
-	edgeBalanceReady    atomic.Bool
+	edgeAdmission             = newEdgeAdmissionGate()
+	edgeDataPlanePolicy       sync.RWMutex
+	edgeAccountingReady       atomic.Bool
+	edgeAccountingBlock       atomic.Bool
+	edgeBalanceReady          atomic.Bool
+	edgeSettlementCircuitOpen atomic.Bool
 )
 
 func init() {
@@ -59,7 +60,7 @@ func EdgeServingReady() bool {
 	edgeAdmission.mu.Lock()
 	accepting := edgeAdmission.accepting
 	edgeAdmission.mu.Unlock()
-	return accepting && EdgeControlReady() && edgeBalanceReady.Load() && edgeAccountingReady.Load() && !edgeAccountingBlock.Load()
+	return accepting && EdgeControlReady() && edgeBalanceReady.Load() && edgeAccountingReady.Load() && !edgeAccountingBlock.Load() && !edgeSettlementCircuitOpen.Load()
 }
 
 func BeginEdgeRequest(c *gin.Context) bool {
@@ -69,7 +70,7 @@ func BeginEdgeRequest(c *gin.Context) bool {
 	edgeDataPlanePolicy.RLock()
 	edgeAdmission.mu.Lock()
 	defer edgeAdmission.mu.Unlock()
-	if !edgeAdmission.accepting || !EdgeControlReady() || !edgeBalanceReady.Load() || !edgeAccountingReady.Load() || edgeAccountingBlock.Load() {
+	if !edgeAdmission.accepting || !EdgeControlReady() || !edgeBalanceReady.Load() || !edgeAccountingReady.Load() || edgeAccountingBlock.Load() || edgeSettlementCircuitOpen.Load() {
 		edgeDataPlanePolicy.RUnlock()
 		return false
 	}
@@ -82,7 +83,7 @@ func BeginEdgeRequest(c *gin.Context) bool {
 }
 
 // ReleaseEdgeRequestPolicy releases the request's snapshot/runtime read guard
-// once local lease reservation has pinned the exact signed pricing snapshot.
+// once local balance reservation has pinned the exact signed pricing snapshot.
 // The handler remains counted as in-flight until EndEdgeRequest runs.
 func ReleaseEdgeRequestPolicy(c *gin.Context) {
 	if c == nil {
@@ -126,7 +127,7 @@ func EndEdgeRequest(c *gin.Context) {
 
 // withEdgeDataPlanePolicyMutation prevents a snapshot or CPA runtime refresh
 // from interleaving with local authentication, channel selection, pricing and
-// lease reservation. Long-running CPA relay work does not hold this lock.
+// balance reservation. Long-running CPA relay work does not hold this lock.
 func withEdgeDataPlanePolicyMutation(mutate func() error) error {
 	edgeDataPlanePolicy.Lock()
 	defer edgeDataPlanePolicy.Unlock()
@@ -135,7 +136,7 @@ func withEdgeDataPlanePolicyMutation(mutate func() error) error {
 
 // WithEdgeDataPlanePolicyRead keeps one short retry-selection operation on the
 // same snapshot/runtime revision. Initial request processing uses the longer
-// guard installed by BeginEdgeRequest and releases it after lease reservation.
+// guard installed by BeginEdgeRequest and releases it after balance reservation.
 func WithEdgeDataPlanePolicyRead(read func() error) error {
 	edgeDataPlanePolicy.RLock()
 	defer edgeDataPlanePolicy.RUnlock()

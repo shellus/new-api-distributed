@@ -19,10 +19,17 @@ func DrainEdgeControl(ctx context.Context) error {
 		return errors.New("edge control client is unavailable")
 	}
 	maxEvents := 100
-	if control, exists := ActiveEdgeControlConfig(); exists && control.SettlementMaxEvents > 0 {
-		maxEvents = control.SettlementMaxEvents
+	settlementCircuitEpoch := int64(0)
+	if control, exists := ActiveEdgeControlConfig(); exists {
+		if control.SettlementCircuitOpen {
+			return errors.New("edge settlement circuit is open")
+		}
+		settlementCircuitEpoch = control.SettlementCircuitEpoch
+		if control.SettlementMaxEvents > 0 {
+			maxEvents = control.SettlementMaxEvents
+		}
 	}
-	return DrainEdgeControlWithClient(ctx, client, maxEvents)
+	return flushAllEdgeSettlements(ctx, client, maxEvents, settlementCircuitEpoch)
 }
 
 func DrainEdgeControlWithClient(ctx context.Context, client *EdgeControlClient, maxEvents int) error {
@@ -35,10 +42,10 @@ func DrainEdgeControlWithClient(ctx context.Context, client *EdgeControlClient, 
 	if maxEvents <= 0 {
 		maxEvents = 100
 	}
-	return flushAllEdgeSettlements(ctx, client, maxEvents)
+	return flushAllEdgeSettlements(ctx, client, maxEvents, 0)
 }
 
-func flushAllEdgeSettlements(ctx context.Context, client *EdgeControlClient, maxEvents int) error {
+func flushAllEdgeSettlements(ctx context.Context, client *EdgeControlClient, maxEvents int, settlementCircuitEpoch int64) error {
 	edgeSettlementUploadMu.Lock()
 	defer edgeSettlementUploadMu.Unlock()
 	for {
@@ -52,12 +59,20 @@ func flushAllEdgeSettlements(ctx context.Context, client *EdgeControlClient, max
 				return metaErr
 			}
 			block, err = model.BuildEdgeLocalSettlementBlock(
-				model.DB.WithContext(ctx), meta, "block-"+uuid.NewString(), maxEvents, time.Now().UTC().UnixMilli(),
+				model.DB.WithContext(ctx), meta, "block-"+uuid.NewString(), maxEvents, time.Now().UTC().UnixMilli(), settlementCircuitEpoch,
 			)
 		}
 		if errors.Is(err, model.ErrEdgeLocalNoPendingUsageEvents) {
 			return nil
 		}
+		if err != nil {
+			return err
+		}
+		meta, err := client.NewRequestMeta("settlement")
+		if err != nil {
+			return err
+		}
+		block, err = model.RefreshEdgeLocalSettlementRequest(model.DB.WithContext(ctx), block.BlockID, meta, settlementCircuitEpoch)
 		if err != nil {
 			return err
 		}

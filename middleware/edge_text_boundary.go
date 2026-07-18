@@ -16,7 +16,7 @@ var errUnsupportedEdgeTextFeature = errors.New("request uses a feature outside t
 
 // EdgeTextBoundary keeps the first edge data plane limited to Chat and
 // Responses text requests whose accounting is represented by the v1 snapshot.
-// It runs before channel selection, lease reservation and any CPA request.
+// It runs before channel selection, balance reservation and any CPA request.
 func EdgeTextBoundary() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		storage, err := common.GetBodyStorage(c)

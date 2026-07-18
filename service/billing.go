@@ -102,7 +102,7 @@ func SettleBilling(ctx *gin.Context, relayInfo *relaycommon.RelayInfo, actualQuo
 		}
 
 		// 发送额度通知（订阅计费使用订阅剩余额度）
-		// Edge settlement is backed by a local lease and the master remains the
+		// Edge settlement is backed by a local balance projection and the master remains the
 		// authoritative notification sender. Sending wallet/subscription alerts
 		// from an edge would use snapshot balances and could notify twice.
 		if actualQuota != 0 && !common.IsEdgeMode() {

@@ -42,11 +42,13 @@ type EdgeControlLocalStore interface {
 	SettlementState(context.Context) (*dto.EdgeSettlementStateV1, error)
 	BalanceState(context.Context) (*model.EdgeLocalBalanceState, error)
 	ApplySnapshot(context.Context, model.EdgeLocalSnapshotProjectionData) error
+	ApplyControl(context.Context, dto.EdgeNodeControlConfigV1, int64) error
 	ApplyBalance(context.Context, dto.EdgeNodeControlConfigV1, dto.EdgeBalanceDeltaV2, int64) error
 	RefreshChannelRuntime(context.Context) error
 	InstallRoutingPolicy(context.Context) error
 	PendingSettlementBlock(context.Context) (*dto.EdgeSettlementBlockRequestV1, error)
-	BuildSettlementBlock(context.Context, dto.EdgeControlRequestMetaV1, string, int, int64) (*dto.EdgeSettlementBlockRequestV1, error)
+	BuildSettlementBlock(context.Context, dto.EdgeControlRequestMetaV1, string, int, int64, int64) (*dto.EdgeSettlementBlockRequestV1, error)
+	RefreshSettlementRequest(context.Context, string, dto.EdgeControlRequestMetaV1, int64) (*dto.EdgeSettlementBlockRequestV1, error)
 	AcknowledgeSettlement(context.Context, dto.EdgeSettlementAckV1) error
 }
 
@@ -286,6 +288,7 @@ func (r *edgeControlLoop) restoreLocalReadiness(ctx context.Context) error {
 		return err
 	}
 	edgeBalanceReady.Store(balance.Initialized && balance.Revision > 0)
+	edgeSettlementCircuitOpen.Store(balance.SettlementCircuitOpen)
 	if err := withEdgeDataPlanePolicyMutation(func() error {
 		r.transitionDataPlaneNotReady()
 		if err := r.store.RefreshChannelRuntime(ctx); err != nil {
@@ -358,16 +361,20 @@ func (r *edgeControlLoop) heartbeat(ctx context.Context, current dto.EdgeNodeCon
 	if err != nil {
 		return current, err
 	}
+	now := time.Now
+	if r.now != nil {
+		now = r.now
+	}
+	if err := r.store.ApplyControl(ctx, response.Control, now().UTC().UnixMilli()); err != nil {
+		return current, err
+	}
+	edgeSettlementCircuitOpen.Store(response.Control.SettlementCircuitOpen)
 	if response.SettlementAck != nil {
 		if err := r.store.AcknowledgeSettlement(ctx, *response.SettlementAck); err != nil {
 			return current, err
 		}
 	}
 	if response.BalanceDelta != nil {
-		now := time.Now
-		if r.now != nil {
-			now = r.now
-		}
 		if err := r.store.ApplyBalance(ctx, response.Control, *response.BalanceDelta, now().UTC().UnixMilli()); err != nil {
 			edgeBalanceReady.Store(false)
 			return current, err
@@ -427,6 +434,9 @@ func (r *edgeControlLoop) pollSnapshot(ctx context.Context, control dto.EdgeNode
 }
 
 func (r *edgeControlLoop) flushSettlement(ctx context.Context, control dto.EdgeNodeControlConfigV1) error {
+	if control.SettlementCircuitOpen {
+		return nil
+	}
 	edgeSettlementUploadMu.Lock()
 	defer edgeSettlementUploadMu.Unlock()
 	block, err := r.store.PendingSettlementBlock(ctx)
@@ -436,12 +446,20 @@ func (r *edgeControlLoop) flushSettlement(ctx context.Context, control dto.EdgeN
 			return metaErr
 		}
 		block, err = r.store.BuildSettlementBlock(
-			ctx, meta, "block-"+uuid.NewString(), control.SettlementMaxEvents, r.now().UTC().UnixMilli(),
+			ctx, meta, "block-"+uuid.NewString(), control.SettlementMaxEvents, r.now().UTC().UnixMilli(), control.SettlementCircuitEpoch,
 		)
 	}
 	if errors.Is(err, model.ErrEdgeLocalNoPendingUsageEvents) {
 		return nil
 	}
+	if err != nil {
+		return err
+	}
+	meta, err := r.client.NewRequestMeta("settlement")
+	if err != nil {
+		return err
+	}
+	block, err = r.store.RefreshSettlementRequest(ctx, block.BlockID, meta, control.SettlementCircuitEpoch)
 	if err != nil {
 		return err
 	}
@@ -790,6 +808,10 @@ func (s *edgeControlGormStore) ApplySnapshot(ctx context.Context, snapshot model
 	return model.ApplyEdgeLocalSnapshot(s.db.WithContext(ctx), snapshot)
 }
 
+func (s *edgeControlGormStore) ApplyControl(ctx context.Context, control dto.EdgeNodeControlConfigV1, nowUnixMilli int64) error {
+	return model.ApplyEdgeLocalControlConfig(s.db.WithContext(ctx), control, nowUnixMilli)
+}
+
 func (s *edgeControlGormStore) ApplyBalance(ctx context.Context, control dto.EdgeNodeControlConfigV1, delta dto.EdgeBalanceDeltaV2, nowUnixMilli int64) error {
 	return model.ApplyEdgeLocalBalanceDelta(s.db.WithContext(ctx), control, delta, nowUnixMilli)
 }
@@ -815,8 +837,12 @@ func (s *edgeControlGormStore) PendingSettlementBlock(ctx context.Context) (*dto
 	return model.GetEdgeLocalPendingSettlementBlock(s.db.WithContext(ctx))
 }
 
-func (s *edgeControlGormStore) BuildSettlementBlock(ctx context.Context, meta dto.EdgeControlRequestMetaV1, blockID string, maxEvents int, createdAtUnixMilli int64) (*dto.EdgeSettlementBlockRequestV1, error) {
-	return model.BuildEdgeLocalSettlementBlock(s.db.WithContext(ctx), meta, blockID, maxEvents, createdAtUnixMilli)
+func (s *edgeControlGormStore) BuildSettlementBlock(ctx context.Context, meta dto.EdgeControlRequestMetaV1, blockID string, maxEvents int, createdAtUnixMilli int64, settlementCircuitEpoch int64) (*dto.EdgeSettlementBlockRequestV1, error) {
+	return model.BuildEdgeLocalSettlementBlock(s.db.WithContext(ctx), meta, blockID, maxEvents, createdAtUnixMilli, settlementCircuitEpoch)
+}
+
+func (s *edgeControlGormStore) RefreshSettlementRequest(ctx context.Context, blockID string, meta dto.EdgeControlRequestMetaV1, settlementCircuitEpoch int64) (*dto.EdgeSettlementBlockRequestV1, error) {
+	return model.RefreshEdgeLocalSettlementRequest(s.db.WithContext(ctx), blockID, meta, settlementCircuitEpoch)
 }
 
 func (s *edgeControlGormStore) AcknowledgeSettlement(ctx context.Context, ack dto.EdgeSettlementAckV1) error {

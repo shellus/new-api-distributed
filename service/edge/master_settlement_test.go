@@ -4,7 +4,9 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"fmt"
+	"net/http"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -68,13 +70,148 @@ func TestMasterSettlementChargesSubscriptionAndAllowsActualAboveReserve(t *testi
 	assert.Equal(t, int64(220), stored.AmountUsed)
 }
 
+func TestProcessSettlementCircuitRejectionCommitsOnlyCircuitAndReceipt(t *testing.T) {
+	t.Setenv("EDGE_NODE_SETTLEMENT_WINDOW_SECONDS", "60")
+	t.Setenv("EDGE_NODE_SETTLEMENT_WINDOW_QUOTA", "200")
+	fixture := newMasterSettlementTestFixture(t, "circuit", 5_000, 5_000)
+	first := masterSettlementBlockForTest(t, fixture, 1, "wallet", 0, false)
+	settleMasterBlockForTest(t, fixture, first, "settlement-circuit-first")
+
+	second := masterSettlementBlockForTest(t, fixture, 2, "wallet", 0, false)
+	second.Meta.RequestID = "settlement-circuit-rejected"
+	second.PreviousBlockID = first.BlockID
+	second.PreviousBlockDigest = first.BlockDigest
+	require.NoError(t, edgesettlement.SetBlockDigestV1(fixture.node.NodeUID, fixture.node.Generation, &second))
+	principal := masterSettlementPrincipalForTest(t, fixture, second, "MDEyMzQ1Njc4OWFiY2RlZg")
+
+	response, err := ProcessSettlementBlock(principal, second, "server-circuit-rejected", fixture.now.Add(time.Minute))
+	require.NoError(t, err)
+	assert.Equal(t, http.StatusTooManyRequests, response.StatusCode)
+	assert.False(t, response.Replayed)
+
+	var node model.EdgeNode
+	require.NoError(t, fixture.db.First(&node, fixture.node.ID).Error)
+	assert.True(t, node.SettlementCircuitOpen)
+	assert.NotZero(t, node.SettlementCircuitOpenedAt)
+	assert.NotEmpty(t, node.SettlementCircuitReason)
+	assert.Equal(t, int64(1), node.SettlementCircuitEpoch)
+	assert.Equal(t, int64(1), node.LastEventSeq)
+	assertMasterSettlementBalances(t, fixture, 4_880, 120, 4_880, 120, 120)
+
+	var blockCount, eventCount, outboxCount int64
+	require.NoError(t, fixture.db.Model(&model.EdgeSettlementBlock{}).Count(&blockCount).Error)
+	require.NoError(t, fixture.db.Model(&model.EdgeUsageEvent{}).Count(&eventCount).Error)
+	require.NoError(t, fixture.db.Model(&model.EdgeConsumeLogOutbox{}).Count(&outboxCount).Error)
+	assert.Equal(t, int64(1), blockCount)
+	assert.Equal(t, int64(1), eventCount)
+	assert.Equal(t, int64(1), outboxCount)
+	var receipt model.EdgeRequestReceipt
+	require.NoError(t, fixture.db.Where("idempotency_key = ?", second.Meta.RequestID).First(&receipt).Error)
+	assert.Equal(t, model.EdgeRequestReceiptStatusRejected, receipt.Status)
+
+	replayPrincipal := masterSettlementPrincipalForTest(t, fixture, second, "ZmVkY2JhOTg3NjU0MzIxMA")
+	replayed, err := ProcessSettlementBlock(replayPrincipal, second, "server-circuit-replay", fixture.now.Add(2*time.Minute))
+	require.NoError(t, err)
+	assert.True(t, replayed.Replayed)
+	assert.Equal(t, response.StatusCode, replayed.StatusCode)
+	assert.Equal(t, response.Body, replayed.Body)
+
+	cleared, err := ClearNodeSettlementCircuit(fixture.node.ID)
+	require.NoError(t, err)
+	assert.False(t, cleared.SettlementCircuitOpen)
+	assert.Equal(t, int64(2), cleared.SettlementCircuitEpoch)
+	t.Setenv("EDGE_NODE_SETTLEMENT_WINDOW_QUOTA", "500")
+	second.Meta.RequestID = "settlement-circuit-retry"
+	retryPrincipal := masterSettlementPrincipalForTest(t, fixture, second, "YWJjZGVmMDEyMzQ1Njc4OQ")
+	accepted, err := ProcessSettlementBlock(retryPrincipal, second, "server-circuit-retry", fixture.now.Add(3*time.Minute))
+	require.NoError(t, err)
+	assert.Equal(t, http.StatusOK, accepted.StatusCode)
+	assertMasterSettlementBalances(t, fixture, 4_760, 240, 4_760, 240, 240)
+}
+
+func TestMasterSettlementWindowUsesEventTimeAndOpenLowerBoundary(t *testing.T) {
+	fixture := newMasterSettlementTestFixture(t, "window-boundary", 5_000, 5_000)
+	first := masterSettlementBlockForTest(t, fixture, 1, "wallet", 0, false)
+	settleMasterBlockForTest(t, fixture, first, "settlement-window-first")
+	baseFinished := first.Events[0].FinishedAtUnixMilli
+
+	for _, test := range []struct {
+		name       string
+		finishedAt int64
+		wantOpen   bool
+	}{
+		{name: "inside window", finishedAt: baseFinished + 59_000, wantOpen: true},
+		{name: "exact lower boundary excluded", finishedAt: baseFinished + 60_000, wantOpen: false},
+		{name: "replay upload burst outside event window", finishedAt: baseFinished + 120_000, wantOpen: false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			event := masterSettlementBlockForTest(t, fixture, 2, "wallet", 0, false).Events[0]
+			event.FinishedAtUnixMilli = test.finishedAt
+			charges := []masterSettlementCharge{{event: &event, chargedQuota: 120}}
+			exceeded, _, err := masterSettlementWindowExceededTx(fixture.db, fixture.node, charges, 60, 200)
+			require.NoError(t, err)
+			assert.Equal(t, test.wantOpen, exceeded)
+		})
+	}
+}
+
+func TestMasterSettlementConcurrentBlocksChargeOnlyOne(t *testing.T) {
+	fixture := newMasterSettlementTestFixture(t, "concurrent-blocks", 5_000, 5_000)
+	requests := []dto.EdgeSettlementBlockRequestV1{
+		masterSettlementBlockForTest(t, fixture, 1, "wallet", 0, false),
+		masterSettlementBlockForTest(t, fixture, 1, "wallet", 0, false),
+	}
+	requests[1].Meta.RequestID = "settlement-concurrent-2"
+	requests[1].BlockID = "block-concurrent-2"
+	requests[1].Events[0].EventID = "event-concurrent-2"
+	requests[1].Events[0].ReservationID = "reservation-concurrent-2"
+	requests[1].Events[0].RequestID = "request-concurrent-2"
+	require.NoError(t, edgesettlement.SetBlockDigestV1(fixture.node.NodeUID, fixture.node.Generation, &requests[1]))
+
+	start := make(chan struct{})
+	results := make(chan error, len(requests))
+	var ready sync.WaitGroup
+	ready.Add(len(requests))
+	for i := range requests {
+		request := requests[i]
+		go func(index int) {
+			ready.Done()
+			<-start
+			results <- fixture.db.Transaction(func(tx *gorm.DB) error {
+				_, err := SettleMasterUsageBlockTx(tx, fixture.identity, MasterSettlementCommand{
+					Request: request, IdempotencyKey: fmt.Sprintf("settlement-concurrent-%d", index+1),
+					RequestHash: strings.Repeat(string(rune('a'+index)), 64), Now: fixture.now.Add(time.Minute),
+				})
+				return err
+			})
+		}(i)
+	}
+	ready.Wait()
+	close(start)
+
+	successes := 0
+	for range requests {
+		if err := <-results; err == nil {
+			successes++
+		}
+	}
+	assert.Equal(t, 1, successes)
+	assertMasterSettlementBalances(t, fixture, 4_880, 120, 4_880, 120, 120)
+	for _, target := range []any{&model.EdgeSettlementBlock{}, &model.EdgeUsageEvent{}, &model.EdgeConsumeLogOutbox{}} {
+		var count int64
+		require.NoError(t, fixture.db.Model(target).Count(&count).Error)
+		assert.Equal(t, int64(1), count)
+	}
+}
+
 func newMasterSettlementTestFixture(t *testing.T, name string, userQuota int, tokenQuota int) *masterSettlementTestFixture {
 	t.Helper()
 	previousDB := model.DB
-	db, err := gorm.Open(sqlite.Open(fmt.Sprintf("file:master-settlement-%s?mode=memory&cache=shared", name)), &gorm.Config{})
+	db, err := gorm.Open(sqlite.Open(fmt.Sprintf("file:master-settlement-%s?mode=memory&cache=shared&_busy_timeout=30000", name)), &gorm.Config{})
 	require.NoError(t, err)
 	require.NoError(t, db.AutoMigrate(
 		&model.EdgeNode{}, &model.EdgeNodeCredential{}, &model.User{}, &model.Token{}, &model.Channel{},
+		&model.EdgeRequestReceipt{}, &model.EdgeRequestNonceClaim{},
 		&model.EdgeCompiledSnapshot{}, &model.EdgeCompiledSnapshotDataset{}, &model.EdgeCompiledSnapshotPage{},
 		&model.UserSubscription{}, &model.EdgeSettlementBlock{}, &model.EdgeUsageEvent{}, &model.EdgeConsumeLogOutbox{},
 		&model.QuotaData{}, &model.EdgeQuotaDataEvent{}, &model.EdgeQuotaDataBucket{},
@@ -100,7 +237,7 @@ func newMasterSettlementTestFixture(t *testing.T, name string, userQuota int, to
 	require.NoError(t, db.Create(node).Error)
 	credential := &model.EdgeNodeCredential{
 		CredentialUID: "key-" + name, NodeID: node.ID, Generation: 1, VerifyMaterial: material,
-		Status: model.EdgeNodeCredentialStatusActive, NotBefore: now.Add(-time.Hour).Unix(), ExpiresAt: now.Add(time.Hour).Unix(),
+		Status: model.EdgeNodeCredentialStatusActive, NotBefore: now.Add(-24 * time.Hour).Unix(), ExpiresAt: now.Add(24 * time.Hour).Unix(),
 	}
 	require.NoError(t, db.Create(credential).Error)
 	user := &model.User{Username: "user-" + name, Password: "password", Status: common.UserStatusEnabled, Quota: userQuota, Group: "default"}
@@ -117,6 +254,27 @@ func newMasterSettlementTestFixture(t *testing.T, name string, userQuota int, to
 		db: db, now: now, node: node, credential: credential,
 		identity: &model.EdgeControlIdentity{Node: node, Credential: credential},
 		user:     user, token: token, channel: channel, snapshot: snapshot,
+	}
+}
+
+func masterSettlementPrincipalForTest(t *testing.T, fixture *masterSettlementTestFixture, request dto.EdgeSettlementBlockRequestV1, nonce string) *ControlPrincipal {
+	t.Helper()
+	body, err := common.Marshal(request)
+	require.NoError(t, err)
+	signedRequest := edgeauth.Request{Method: http.MethodPost, EscapedPath: "/control/v1/settlement/block", Body: body}
+	requestHash, err := edgeauth.IdempotencySHA256(signedRequest)
+	require.NoError(t, err)
+	metadata := edgeauth.Metadata{
+		Version: edgeauth.VersionV1, NodeID: fixture.node.NodeUID, Generation: fixture.node.Generation,
+		KeyID: fixture.credential.CredentialUID, TimestampUnixSeconds: time.Now().Unix(),
+		Nonce: nonce, IdempotencyKey: request.Meta.RequestID,
+	}
+	return &ControlPrincipal{
+		NodeID: fixture.node.ID, NodeUID: fixture.node.NodeUID, NodeStatus: fixture.node.Status,
+		Generation: fixture.node.Generation, CredentialID: fixture.credential.ID,
+		CredentialUID: fixture.credential.CredentialUID, CredentialFingerprint: fixture.credential.Fingerprint,
+		SignedRequest: &edgeauth.SignedHTTPRequest{Metadata: metadata, Request: signedRequest}, RawBody: body,
+		RequestHash: requestHash, NonceHash: edgeauth.BodySHA256([]byte(nonce)),
 	}
 }
 

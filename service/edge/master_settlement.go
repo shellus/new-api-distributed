@@ -35,6 +35,18 @@ type SettlementSequenceError struct {
 	Received int64
 }
 
+type SettlementCircuitError struct {
+	Epoch  int64
+	Reason string
+}
+
+func (e *SettlementCircuitError) Error() string {
+	if e == nil {
+		return "edge settlement circuit is open"
+	}
+	return fmt.Sprintf("edge settlement circuit is open: epoch=%d reason=%s", e.Epoch, e.Reason)
+}
+
 func (e *SettlementSequenceError) Error() string {
 	if e == nil {
 		return ErrMasterSettlementOutOfOrder.Error()
@@ -78,10 +90,17 @@ type edgeConsumeLogOutboxPayload struct {
 	FinishedAtUnixMilli int64                  `json:"finished_at_unix_milli"`
 }
 
+type masterSettlementCharge struct {
+	event           *dto.EdgeUsageEventV1
+	snapshotID      int64
+	chargedQuota    int64
+	normalizedUsage *dto.Usage
+}
+
 // SettleMasterUsageBlockTx accepts one contiguous block exactly once. It
-// recomputes every charge from the lease's immutable snapshot, updates only
-// consumption statistics (never wallet/token remain quota a second time), and
-// writes the consume-log outbox in the same transaction.
+// recomputes every charge from the immutable snapshot, checks the node event-time
+// window, charges authoritative funding/token balances, and writes usage plus
+// the consume-log outbox in the same transaction.
 func SettleMasterUsageBlockTx(tx *gorm.DB, identity *model.EdgeControlIdentity, command MasterSettlementCommand) (*dto.EdgeSettlementAckV1, error) {
 	if tx == nil {
 		return nil, errors.New("database is nil")
@@ -125,6 +144,9 @@ func SettleMasterUsageBlockTx(tx *gorm.DB, identity *model.EdgeControlIdentity, 
 	if duplicate != nil {
 		return duplicate, nil
 	}
+	if node.SettlementCircuitOpen {
+		return nil, &SettlementCircuitError{Epoch: node.SettlementCircuitEpoch, Reason: node.SettlementCircuitReason}
+	}
 
 	expectedSequence := node.LastEventSeq + 1
 	if command.Request.FirstSequence != expectedSequence {
@@ -134,13 +156,7 @@ func SettleMasterUsageBlockTx(tx *gorm.DB, identity *model.EdgeControlIdentity, 
 		return nil, err
 	}
 
-	type settlementCharge struct {
-		event           *dto.EdgeUsageEventV1
-		snapshotID      int64
-		chargedQuota    int64
-		normalizedUsage *dto.Usage
-	}
-	charges := make([]settlementCharge, 0, len(command.Request.Events))
+	charges := make([]masterSettlementCharge, 0, len(command.Request.Events))
 	policyCache := make(map[string]*masterSnapshotPolicies)
 	snapshotIDs := make(map[string]int64)
 	for i := range command.Request.Events {
@@ -177,9 +193,28 @@ func SettleMasterUsageBlockTx(tx *gorm.DB, identity *model.EdgeControlIdentity, 
 		if chargedQuota != event.Billing.ChargedQuota {
 			return nil, fmt.Errorf("%w: event %s reported charge=%d master=%d", ErrMasterSettlementConflict, event.EventID, event.Billing.ChargedQuota, chargedQuota)
 		}
-		charges = append(charges, settlementCharge{
+		charges = append(charges, masterSettlementCharge{
 			event: event, snapshotID: snapshotID, chargedQuota: chargedQuota, normalizedUsage: normalizedUsage,
 		})
+	}
+	windowSeconds, windowQuota, err := masterSettlementWindowConfig()
+	if err != nil {
+		return nil, err
+	}
+	exceeded, reason, err := masterSettlementWindowExceededTx(tx, node, charges, windowSeconds, windowQuota)
+	if err != nil {
+		return nil, err
+	}
+	if exceeded {
+		node.SettlementCircuitOpen = true
+		node.SettlementCircuitOpenedAt = now.Unix()
+		node.SettlementCircuitReason = reason
+		node.SettlementCircuitEpoch++
+		node.UpdatedAt = now.Unix()
+		if err := tx.Save(node).Error; err != nil {
+			return nil, err
+		}
+		return nil, &SettlementCircuitError{Epoch: node.SettlementCircuitEpoch, Reason: reason}
 	}
 
 	block := &model.EdgeSettlementBlock{

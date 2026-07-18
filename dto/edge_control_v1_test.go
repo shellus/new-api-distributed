@@ -1105,6 +1105,8 @@ func TestEdgeControlV1StableMetadataAndKeyJSON(t *testing.T) {
 		"snapshot_page_limit":500,
 		"settlement_max_events":100,
 		"settlement_max_delay_seconds":5,
+		"settlement_circuit_open":false,
+		"settlement_circuit_epoch":0,
 		"clock_skew_tolerance_seconds":60,
 		"snapshot_verification_keys":[{
 			"key_id":"snapshot-key-1",
