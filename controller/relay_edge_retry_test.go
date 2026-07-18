@@ -13,7 +13,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestValidateEdgeRetrySnapshotPinsLeasePolicy(t *testing.T) {
+func TestValidateEdgeRetrySnapshotPinsBalancePolicyAcrossExpiry(t *testing.T) {
 	db, err := model.OpenEdgeSQLite(filepath.Join(t.TempDir(), "edge-retry.db"))
 	require.NoError(t, err)
 	sqlDB, err := db.DB()
@@ -35,26 +35,26 @@ func TestValidateEdgeRetrySnapshotPinsLeasePolicy(t *testing.T) {
 		Dataset: dto.EdgeSnapshotDatasetPricingV1, Revision: 11,
 	}).Error)
 	info := &relaycommon.RelayInfo{
-		EdgeLeaseSnapshotID:       "snapshot-retry",
-		EdgeLeaseSnapshotRevision: 7,
-		EdgeLeasePricingRevision:  11,
+		EdgeSnapshotID:       "snapshot-retry",
+		EdgeSnapshotRevision: 7,
+		EdgePricingRevision:  11,
 	}
 
 	require.NoError(t, validateEdgeRetrySnapshot(info))
 
-	info.EdgeLeaseSnapshotRevision = 6
+	info.EdgeSnapshotRevision = 6
 	assert.ErrorContains(t, validateEdgeRetrySnapshot(info), "cross-snapshot retry is denied")
-	info.EdgeLeaseSnapshotRevision = 7
+	info.EdgeSnapshotRevision = 7
 
-	info.EdgeLeasePricingRevision = 10
+	info.EdgePricingRevision = 10
 	assert.ErrorContains(t, validateEdgeRetrySnapshot(info), "cross-snapshot retry is denied")
-	info.EdgeLeasePricingRevision = 11
+	info.EdgePricingRevision = 11
 
 	require.NoError(t, db.Model(&model.EdgeLocalControlState{}).Where("id = ?", 1).
 		Update("snapshot_expires_at_unix_milli", now-1).Error)
-	assert.ErrorContains(t, validateEdgeRetrySnapshot(info), "policy expired")
+	require.NoError(t, validateEdgeRetrySnapshot(info))
 }
 
-func TestValidateEdgeRetrySnapshotRejectsMissingLeasePin(t *testing.T) {
-	assert.ErrorContains(t, validateEdgeRetrySnapshot(&relaycommon.RelayInfo{}), "no pinned lease snapshot")
+func TestValidateEdgeRetrySnapshotRejectsMissingBalancePin(t *testing.T) {
+	assert.ErrorContains(t, validateEdgeRetrySnapshot(&relaycommon.RelayInfo{}), "no pinned balance snapshot")
 }

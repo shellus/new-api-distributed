@@ -342,6 +342,12 @@ func (s *BillingSession) syncRelayInfo() {
 	info := s.relayInfo
 	info.FinalPreConsumedQuota = s.preConsumedQuota
 	info.BillingSource = s.funding.Source()
+	if synchronizer, ok := s.funding.(interface {
+		SyncBillingRelayInfo(*relaycommon.RelayInfo)
+	}); ok {
+		synchronizer.SyncBillingRelayInfo(info)
+		return
+	}
 
 	if sub, ok := s.funding.(*SubscriptionFunding); ok {
 		info.SubscriptionId = sub.subscriptionId
@@ -385,9 +391,8 @@ func validateBillingSessionInput(relayInfo *relaycommon.RelayInfo, preConsumedQu
 }
 
 // NewBillingSessionWithFunding creates a session with caller-owned funding and
-// token accounting. Edge uses this entry point with EdgeLeaseFunding and
-// NoopTokenQuotaAccounting because the master lease already reserved Token
-// and user/subscription quota.
+// token accounting. Edge uses this entry point with a durable local funding
+// adapter that atomically owns both funding and token balance reservations.
 func NewBillingSessionWithFunding(
 	c *gin.Context,
 	relayInfo *relaycommon.RelayInfo,

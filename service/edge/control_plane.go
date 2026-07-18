@@ -22,8 +22,6 @@ const (
 	controlRequestKindHeartbeat        = "heartbeat"
 	controlRequestKindSnapshotManifest = "snapshot_manifest"
 	controlRequestKindSnapshotPage     = "snapshot_page"
-	controlRequestKindLeaseAcquire     = "lease_acquire"
-	controlRequestKindLeaseClose       = "lease_close"
 	controlRequestKindSettlementBlock  = "settlement_block"
 	defaultControlReceiptTTLSeconds    = 86400
 	maximumControlReceiptTTLSeconds    = 604800
@@ -34,8 +32,6 @@ const (
 	ControlRequestKindHeartbeat        = controlRequestKindHeartbeat
 	ControlRequestKindSnapshotManifest = controlRequestKindSnapshotManifest
 	ControlRequestKindSnapshotPage     = controlRequestKindSnapshotPage
-	ControlRequestKindLeaseAcquire     = controlRequestKindLeaseAcquire
-	ControlRequestKindLeaseClose       = controlRequestKindLeaseClose
 	ControlRequestKindSettlementBlock  = controlRequestKindSettlementBlock
 )
 
@@ -109,7 +105,6 @@ func ProcessHeartbeat(principal *ControlPrincipal, request dto.EdgeHeartbeatRequ
 			Snapshot:        request.Snapshot,
 			Settlement:      request.Settlement,
 			BalanceRevision: request.BalanceRevision,
-			Leases:          request.Leases,
 			Runtime:         request.Runtime,
 			CPA:             request.CPA,
 			ObservedAt:      now.Unix(),

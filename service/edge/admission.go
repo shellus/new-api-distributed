@@ -15,6 +15,7 @@ var (
 	edgeDataPlanePolicy sync.RWMutex
 	edgeAccountingReady atomic.Bool
 	edgeAccountingBlock atomic.Bool
+	edgeBalanceReady    atomic.Bool
 )
 
 func init() {
@@ -58,7 +59,7 @@ func EdgeServingReady() bool {
 	edgeAdmission.mu.Lock()
 	accepting := edgeAdmission.accepting
 	edgeAdmission.mu.Unlock()
-	return accepting && EdgeControlReady() && edgeAccountingReady.Load() && !edgeAccountingBlock.Load()
+	return accepting && EdgeControlReady() && edgeBalanceReady.Load() && edgeAccountingReady.Load() && !edgeAccountingBlock.Load()
 }
 
 func BeginEdgeRequest(c *gin.Context) bool {
@@ -68,7 +69,7 @@ func BeginEdgeRequest(c *gin.Context) bool {
 	edgeDataPlanePolicy.RLock()
 	edgeAdmission.mu.Lock()
 	defer edgeAdmission.mu.Unlock()
-	if !edgeAdmission.accepting || !EdgeControlReady() || !edgeAccountingReady.Load() || edgeAccountingBlock.Load() {
+	if !edgeAdmission.accepting || !EdgeControlReady() || !edgeBalanceReady.Load() || !edgeAccountingReady.Load() || edgeAccountingBlock.Load() {
 		edgeDataPlanePolicy.RUnlock()
 		return false
 	}

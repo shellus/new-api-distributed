@@ -1,0 +1,240 @@
+package edge
+
+import (
+	"crypto/ed25519"
+	"crypto/rand"
+	"fmt"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/QuantumNous/new-api/common"
+	"github.com/QuantumNous/new-api/dto"
+	"github.com/QuantumNous/new-api/model"
+	"github.com/QuantumNous/new-api/pkg/edgeauth"
+	"github.com/QuantumNous/new-api/pkg/edgesettlement"
+
+	"github.com/glebarez/sqlite"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+	"gorm.io/gorm"
+)
+
+type masterSettlementTestFixture struct {
+	db         *gorm.DB
+	now        time.Time
+	node       *model.EdgeNode
+	credential *model.EdgeNodeCredential
+	identity   *model.EdgeControlIdentity
+	user       *model.User
+	token      *model.Token
+	channel    *model.Channel
+	snapshot   *model.EdgeCompiledSnapshot
+}
+
+func TestMasterSettlementChargesWalletAndTokenExactlyOnce(t *testing.T) {
+	fixture := newMasterSettlementTestFixture(t, "wallet", 5_000, 5_000)
+	request := masterSettlementBlockForTest(t, fixture, 1, "wallet", 0, false)
+
+	ack := settleMasterBlockForTest(t, fixture, request, "settlement-wallet")
+	assert.Equal(t, dto.EdgeSettlementAckAcceptedV1, ack.Status)
+	assertMasterSettlementBalances(t, fixture, 4_880, 120, 4_880, 120, 120)
+
+	duplicate := settleMasterBlockForTest(t, fixture, request, "settlement-wallet")
+	assert.Equal(t, dto.EdgeSettlementAckDuplicateV1, duplicate.Status)
+	assertMasterSettlementBalances(t, fixture, 4_880, 120, 4_880, 120, 120)
+	for _, target := range []any{&model.EdgeSettlementBlock{}, &model.EdgeUsageEvent{}, &model.EdgeConsumeLogOutbox{}} {
+		var count int64
+		require.NoError(t, fixture.db.Model(target).Count(&count).Error)
+		assert.Equal(t, int64(1), count)
+	}
+}
+
+func TestMasterSettlementChargesSubscriptionAndAllowsActualAboveReserve(t *testing.T) {
+	fixture := newMasterSettlementTestFixture(t, "subscription", 5_000, 5_000)
+	subscription := &model.UserSubscription{
+		UserId: fixture.user.Id, AmountTotal: 1_000, AmountUsed: 100,
+		StartTime: fixture.now.Add(-time.Hour).Unix(), EndTime: fixture.now.Add(time.Hour).Unix(), Status: "active",
+	}
+	require.NoError(t, fixture.db.Create(subscription).Error)
+	request := masterSettlementBlockForTest(t, fixture, 1, "subscription", int64(subscription.Id), false)
+	request.Events[0].Billing.ReservedQuota = 50
+	require.NoError(t, edgesettlement.SetBlockDigestV1(fixture.node.NodeUID, fixture.node.Generation, &request))
+
+	settleMasterBlockForTest(t, fixture, request, "settlement-subscription")
+	assertMasterSettlementBalances(t, fixture, 5_000, 120, 4_880, 120, 120)
+	var stored model.UserSubscription
+	require.NoError(t, fixture.db.First(&stored, subscription.Id).Error)
+	assert.Equal(t, int64(220), stored.AmountUsed)
+}
+
+func newMasterSettlementTestFixture(t *testing.T, name string, userQuota int, tokenQuota int) *masterSettlementTestFixture {
+	t.Helper()
+	previousDB := model.DB
+	db, err := gorm.Open(sqlite.Open(fmt.Sprintf("file:master-settlement-%s?mode=memory&cache=shared", name)), &gorm.Config{})
+	require.NoError(t, err)
+	require.NoError(t, db.AutoMigrate(
+		&model.EdgeNode{}, &model.EdgeNodeCredential{}, &model.User{}, &model.Token{}, &model.Channel{},
+		&model.EdgeCompiledSnapshot{}, &model.EdgeCompiledSnapshotDataset{}, &model.EdgeCompiledSnapshotPage{},
+		&model.UserSubscription{}, &model.EdgeSettlementBlock{}, &model.EdgeUsageEvent{}, &model.EdgeConsumeLogOutbox{},
+		&model.QuotaData{}, &model.EdgeQuotaDataEvent{}, &model.EdgeQuotaDataBucket{},
+	))
+	model.DB = db
+	common.SetDatabaseTypes(common.DatabaseTypeSQLite, common.DatabaseTypeSQLite)
+	t.Cleanup(func() {
+		model.DB = previousDB
+		if sqlDB, sqlErr := db.DB(); sqlErr == nil {
+			_ = sqlDB.Close()
+		}
+	})
+
+	now := time.Date(2026, time.July, 18, 12, 0, 0, 0, time.UTC)
+	publicKey, _, err := ed25519.GenerateKey(rand.Reader)
+	require.NoError(t, err)
+	material, err := edgeauth.EncodePublicKey(publicKey)
+	require.NoError(t, err)
+	node := &model.EdgeNode{
+		NodeUID: "edge." + name, Name: "edge-" + name, Status: model.EdgeNodeStatusActive,
+		Generation: 1, ProtocolVersion: dto.EdgeControlProtocolVersionV2,
+	}
+	require.NoError(t, db.Create(node).Error)
+	credential := &model.EdgeNodeCredential{
+		CredentialUID: "key-" + name, NodeID: node.ID, Generation: 1, VerifyMaterial: material,
+		Status: model.EdgeNodeCredentialStatusActive, NotBefore: now.Add(-time.Hour).Unix(), ExpiresAt: now.Add(time.Hour).Unix(),
+	}
+	require.NoError(t, db.Create(credential).Error)
+	user := &model.User{Username: "user-" + name, Password: "password", Status: common.UserStatusEnabled, Quota: userQuota, Group: "default"}
+	require.NoError(t, db.Create(user).Error)
+	token := &model.Token{
+		UserId: user.Id, Key: "token-" + name, Status: common.TokenStatusEnabled,
+		CreatedTime: now.Unix(), ExpiredTime: -1, RemainQuota: tokenQuota, Group: "default",
+	}
+	require.NoError(t, db.Create(token).Error)
+	channel := &model.Channel{Type: 1, Key: "upstream", Status: common.ChannelStatusEnabled, Name: "channel-" + name, Models: "gpt-test", Group: "default"}
+	require.NoError(t, db.Create(channel).Error)
+	snapshot := createMasterSettlementSnapshotForTest(t, db, now, user, token, channel)
+	return &masterSettlementTestFixture{
+		db: db, now: now, node: node, credential: credential,
+		identity: &model.EdgeControlIdentity{Node: node, Credential: credential},
+		user:     user, token: token, channel: channel, snapshot: snapshot,
+	}
+}
+
+func createMasterSettlementSnapshotForTest(t *testing.T, db *gorm.DB, now time.Time, user *model.User, token *model.Token, channel *model.Channel) *model.EdgeCompiledSnapshot {
+	t.Helper()
+	snapshot := &model.EdgeCompiledSnapshot{
+		SnapshotUID: "snapshot-1", Revision: 1, ProtocolVersion: dto.EdgeControlProtocolVersionV2,
+		Status: model.EdgeCompiledSnapshotStatusPublished, CreatedAt: now.Add(-time.Minute).Unix(),
+		ExpiresAt: now.Add(time.Hour).Unix(), PublishedAt: now.Add(-time.Minute).Unix(),
+	}
+	require.NoError(t, db.Session(&gorm.Session{SkipHooks: true}).Create(snapshot).Error)
+	modelRatio := 1.0
+	completionRatio := 2.0
+	cacheRatio := 1.0
+	payloads := map[dto.EdgeSnapshotDatasetV1]dto.EdgeSnapshotPagePayloadV1{
+		dto.EdgeSnapshotDatasetAuthenticationV1: {Authentication: []dto.EdgeTokenAuthRecordV1{{
+			TokenFingerprint: strings.Repeat("a", 64), TokenID: int64(token.Id), UserID: int64(user.Id), Enabled: true, Group: "default",
+		}}},
+		dto.EdgeSnapshotDatasetUsersV1: {Users: []dto.EdgeUserPolicyV1{{
+			UserID: int64(user.Id), Enabled: true, Username: user.Username, DefaultGroup: "default",
+			Setting: dto.EdgeUserSettingV1{BillingPreference: "subscription_first"},
+		}}},
+		dto.EdgeSnapshotDatasetGroupsV1: {Groups: []dto.EdgeGroupPolicyV1{{
+			UserGroup: "default", UsingGroups: []dto.EdgeUsingGroupPolicyV1{{Group: "default", Enabled: true, Ratio: 1}},
+		}}},
+		dto.EdgeSnapshotDatasetModelsV1: {Models: []dto.EdgeModelPolicyV1{{
+			Model: "gpt-test", Enabled: true, Endpoints: []dto.EdgeEndpointV1{dto.EdgeEndpointOpenAIChatCompletionsV1},
+			Streaming: true, ChannelIDs: []int64{int64(channel.Id)},
+		}}},
+		dto.EdgeSnapshotDatasetChannelsV1: {Channels: []dto.EdgeChannelProjectionV1{{
+			ChannelID: int64(channel.Id), Type: 1, Name: "test", Enabled: true,
+			Groups: []string{"default"}, Models: []string{"gpt-test"}, Weight: 1,
+			LocalService: dto.EdgeLocalServiceCPAPro20x4V1,
+		}}},
+		dto.EdgeSnapshotDatasetPricingV1: {Pricing: []dto.EdgePricingPolicyV1{{
+			PolicyID: "price-gpt-test", Version: "v1", Model: "gpt-test", BillingMode: dto.EdgeBillingModeRatioV1,
+			ModelRatio: &modelRatio, CompletionRatio: &completionRatio, CacheReadRatio: &cacheRatio,
+			CacheCreationRatio: &cacheRatio, CacheCreation1hRatio: &cacheRatio, QuotaPerUnit: 1,
+		}}},
+	}
+	for _, datasetName := range []dto.EdgeSnapshotDatasetV1{
+		dto.EdgeSnapshotDatasetAuthenticationV1, dto.EdgeSnapshotDatasetUsersV1, dto.EdgeSnapshotDatasetGroupsV1,
+		dto.EdgeSnapshotDatasetModelsV1, dto.EdgeSnapshotDatasetChannelsV1, dto.EdgeSnapshotDatasetPricingV1,
+	} {
+		payload := payloads[datasetName]
+		require.NoError(t, payload.Validate(datasetName, 1))
+		payloadBytes, err := common.Marshal(payload)
+		require.NoError(t, err)
+		dataset := &model.EdgeCompiledSnapshotDataset{SnapshotID: snapshot.ID, Dataset: datasetName, Revision: 1, ItemCount: 1, PageCount: 1}
+		require.NoError(t, db.Session(&gorm.Session{SkipHooks: true}).Create(dataset).Error)
+		require.NoError(t, db.Session(&gorm.Session{SkipHooks: true}).Create(&model.EdgeCompiledSnapshotPage{
+			DatasetID: dataset.ID, Ordinal: 0, ItemCount: 1, Payload: string(payloadBytes),
+		}).Error)
+	}
+	return snapshot
+}
+
+func masterSettlementBlockForTest(
+	t *testing.T,
+	fixture *masterSettlementTestFixture,
+	sequence int64,
+	fundingSource string,
+	userSubscriptionID int64,
+	tokenUnlimited bool,
+) dto.EdgeSettlementBlockRequestV1 {
+	t.Helper()
+	status := 200
+	request := dto.EdgeSettlementBlockRequestV1{
+		Meta:    dto.EdgeControlRequestMetaV1{ProtocolVersion: dto.EdgeControlProtocolVersionV2, RequestID: fmt.Sprintf("settlement-%d", sequence)},
+		BlockID: fmt.Sprintf("block-%d", sequence), FirstSequence: sequence, LastSequence: sequence,
+		CreatedAtUnixMilli: fixture.now.Add(30 * time.Second).UnixMilli(), BlockDigest: strings.Repeat("9", 64),
+		Events: []dto.EdgeUsageEventV1{{
+			EventID: fmt.Sprintf("event-%d", sequence), Sequence: sequence,
+			ReservationID: fmt.Sprintf("reservation-%d", sequence), RequestID: fmt.Sprintf("request-%d", sequence),
+			UserID: int64(fixture.user.Id), TokenID: int64(fixture.token.Id),
+			SnapshotID: fixture.snapshot.SnapshotUID, SnapshotRevision: fixture.snapshot.Revision,
+			PricingRevision: 1, BalanceRevision: 1, FundingSource: fundingSource,
+			UserSubscriptionID: userSubscriptionID, TokenUnlimitedQuota: tokenUnlimited,
+			ChannelID: int64(fixture.channel.Id), Endpoint: dto.EdgeEndpointOpenAIChatCompletionsV1,
+			Model: "gpt-test", Group: "default", StartedAtUnixMilli: fixture.now.Add(10 * time.Second).UnixMilli(),
+			FinishedAtUnixMilli: fixture.now.Add(20 * time.Second).UnixMilli(), Outcome: dto.EdgeUsageOutcomeSuccessV1,
+			HTTPStatus: &status, Usage: dto.NewOpenAIChatBillingUsage(&dto.Usage{PromptTokens: 100, CompletionTokens: 10, TotalTokens: 110}),
+			Billing: dto.EdgeUsageBillingV1{
+				PricingPolicyID: "price-gpt-test", PricingPolicyVersion: "v1", BillingMode: dto.EdgeBillingModeRatioV1,
+				GroupRatio: 1, ReservedQuota: 100, ChargedQuota: 120,
+			},
+		}},
+	}
+	require.NoError(t, edgesettlement.SetBlockDigestV1(fixture.node.NodeUID, fixture.node.Generation, &request))
+	return request
+}
+
+func settleMasterBlockForTest(t *testing.T, fixture *masterSettlementTestFixture, request dto.EdgeSettlementBlockRequestV1, idempotencyKey string) *dto.EdgeSettlementAckV1 {
+	t.Helper()
+	var ack *dto.EdgeSettlementAckV1
+	require.NoError(t, fixture.db.Transaction(func(tx *gorm.DB) error {
+		var err error
+		ack, err = SettleMasterUsageBlockTx(tx, fixture.identity, MasterSettlementCommand{
+			Request: request, IdempotencyKey: idempotencyKey,
+			RequestHash: strings.Repeat("a", 64), Now: fixture.now.Add(time.Minute),
+		})
+		return err
+	}))
+	require.NotNil(t, ack)
+	return ack
+}
+
+func assertMasterSettlementBalances(t *testing.T, fixture *masterSettlementTestFixture, userQuota int, userUsed int, tokenRemain int, tokenUsed int, channelUsed int64) {
+	t.Helper()
+	var user model.User
+	var token model.Token
+	var channel model.Channel
+	require.NoError(t, fixture.db.First(&user, fixture.user.Id).Error)
+	require.NoError(t, fixture.db.First(&token, fixture.token.Id).Error)
+	require.NoError(t, fixture.db.First(&channel, fixture.channel.Id).Error)
+	assert.Equal(t, userQuota, user.Quota)
+	assert.Equal(t, userUsed, user.UsedQuota)
+	assert.Equal(t, tokenRemain, token.RemainQuota)
+	assert.Equal(t, tokenUsed, token.UsedQuota)
+	assert.Equal(t, channelUsed, channel.UsedQuota)
+}

@@ -56,8 +56,10 @@ func settlementDigestRequestForTest() dto.EdgeSettlementBlockRequestV1 {
 		BlockID: "block-1", FirstSequence: 1, LastSequence: 1,
 		CreatedAtUnixMilli: 1_784_145_630_000, BlockDigest: strings.Repeat("0", 64),
 		Events: []dto.EdgeUsageEventV1{{
-			EventID: "event-1", Sequence: 1, LeaseID: "lease-1", ReservationID: "reservation-1", RequestID: "request-1",
-			UserID: 1, TokenID: 1, ChannelID: 1, Endpoint: dto.EdgeEndpointOpenAIChatCompletionsV1,
+			EventID: "event-1", Sequence: 1, ReservationID: "reservation-1", RequestID: "request-1",
+			UserID: 1, TokenID: 1, SnapshotID: "snapshot-1", SnapshotRevision: 1,
+			PricingRevision: 1, BalanceRevision: 1, FundingSource: "wallet",
+			ChannelID: 1, Endpoint: dto.EdgeEndpointOpenAIChatCompletionsV1,
 			Model: "gpt-test", Group: "default", StartedAtUnixMilli: 1_784_145_600_000,
 			FinishedAtUnixMilli: 1_784_145_620_000, Outcome: dto.EdgeUsageOutcomeSuccessV1, HTTPStatus: &status,
 			Usage: dto.NewOpenAIChatBillingUsage(&dto.Usage{PromptTokens: 10, CompletionTokens: 2, TotalTokens: 12}),

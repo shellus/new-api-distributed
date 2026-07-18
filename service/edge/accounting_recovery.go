@@ -99,8 +99,8 @@ func RecoverEdgeStagedSettlements(ctx context.Context, db *gorm.DB) error {
 			settledAny = true
 		}
 		if settledAny {
-			// A later reservation may have returned unused quota to a lease that
-			// an earlier staged settlement needs. Re-scan from the deterministic
+			// A later reservation may have released balance overlay that an
+			// earlier staged settlement needs. Re-scan from the deterministic
 			// head before declaring recovery blocked.
 			continue
 		}
@@ -112,8 +112,6 @@ func RecoverEdgeStagedSettlements(ctx context.Context, db *gorm.DB) error {
 
 func edgeAccountingRecoveryRequiresIntervention(err error) bool {
 	return errors.Is(err, gorm.ErrRecordNotFound) ||
-		errors.Is(err, model.ErrEdgeLocalLeaseUnavailable) ||
-		errors.Is(err, model.ErrEdgeLocalLeaseExpired) ||
 		errors.Is(err, model.ErrEdgeLocalSnapshotMismatch) ||
 		errors.Is(err, model.ErrEdgeLocalReservationConflict) ||
 		errors.Is(err, model.ErrEdgeLocalReservationFinalized) ||

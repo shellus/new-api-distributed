@@ -22,14 +22,14 @@ import (
 func TestBillingSessionWithCustomFundingSettlesZeroDelta(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	context, _ := gin.CreateTestContext(httptest.NewRecorder())
-	funding := &recordingFunding{source: BillingSourceEdgeLease}
+	funding := &recordingFunding{source: BillingSourceEdgeBalance}
 	tokenAccounting := &recordingTokenAccounting{}
 	relayInfo := &relaycommon.RelayInfo{UserId: 1, TokenId: 2}
 
 	session, apiErr := NewBillingSessionWithFunding(context, relayInfo, 100, funding, tokenAccounting)
 	require.Nil(t, apiErr)
 	assert.Equal(t, []int{100}, funding.preConsumed)
-	assert.Equal(t, BillingSourceEdgeLease, relayInfo.BillingSource)
+	assert.Equal(t, BillingSourceEdgeBalance, relayInfo.BillingSource)
 	assert.Equal(t, 100, session.GetPreConsumedQuota())
 
 	require.NoError(t, session.Settle(100))
@@ -43,7 +43,7 @@ func TestBillingSessionWithCustomFundingSettlesZeroDelta(t *testing.T) {
 func TestBillingSessionReserveUsesGenericFundingAndRollsBackOnTokenFailure(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	context, _ := gin.CreateTestContext(httptest.NewRecorder())
-	funding := &recordingFunding{source: BillingSourceEdgeLease}
+	funding := &recordingFunding{source: BillingSourceEdgeBalance}
 	tokenAccounting := &recordingTokenAccounting{reserveErr: errors.New("token reserve failed")}
 	session, apiErr := NewBillingSessionWithFunding(
 		context,
@@ -63,7 +63,7 @@ func TestBillingSessionReserveUsesGenericFundingAndRollsBackOnTokenFailure(t *te
 func TestBillingSessionNeedsRefundUsesFundingAndTokenInterfaces(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	context, _ := gin.CreateTestContext(httptest.NewRecorder())
-	funding := &recordingFunding{source: BillingSourceEdgeLease, refunded: make(chan struct{}, 1)}
+	funding := &recordingFunding{source: BillingSourceEdgeBalance, refunded: make(chan struct{}, 1)}
 	tokenAccounting := &recordingTokenAccounting{refunded: make(chan struct{}, 1)}
 	session, apiErr := NewBillingSessionWithFunding(
 		context,
@@ -92,7 +92,7 @@ func TestBillingSessionNeedsRefundUsesFundingAndTokenInterfaces(t *testing.T) {
 func TestBillingSessionRefundRetainsFailedReservationForRetry(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	context, _ := gin.CreateTestContext(httptest.NewRecorder())
-	funding := &recordingFunding{source: BillingSourceEdgeLease, refundFailures: 1}
+	funding := &recordingFunding{source: BillingSourceEdgeBalance, refundFailures: 1}
 	tokenAccounting := &recordingTokenAccounting{}
 	session, apiErr := NewBillingSessionWithFunding(
 		context,
@@ -156,7 +156,7 @@ func TestBillingSessionReservePoisonedWhenFundingRollbackFails(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	context, _ := gin.CreateTestContext(httptest.NewRecorder())
 	funding := &recordingFunding{
-		source:             BillingSourceEdgeLease,
+		source:             BillingSourceEdgeBalance,
 		reserveRollbackErr: errors.New("funding rollback failed"),
 	}
 	tokenAccounting := &recordingTokenAccounting{reserveErr: errors.New("token reserve failed")}
@@ -182,7 +182,7 @@ func TestBillingSessionReservePoisonedWhenFundingRollbackFails(t *testing.T) {
 func TestBillingSessionCustomConstructorRejectsUnsafeInputsBeforeFunding(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	context, _ := gin.CreateTestContext(httptest.NewRecorder())
-	funding := &recordingFunding{source: BillingSourceEdgeLease}
+	funding := &recordingFunding{source: BillingSourceEdgeBalance}
 
 	_, apiErr := NewBillingSessionWithFunding(
 		context,
@@ -288,7 +288,7 @@ func TestBillingSessionReservePreservesErrorContract(t *testing.T) {
 		})
 	}
 
-	funding := &recordingFunding{source: BillingSourceEdgeLease}
+	funding := &recordingFunding{source: BillingSourceEdgeBalance}
 	session, apiErr := NewBillingSessionWithFunding(
 		context,
 		&relaycommon.RelayInfo{},
@@ -306,7 +306,7 @@ func TestBillingSessionReservePreservesErrorContract(t *testing.T) {
 func TestBillingSessionRejectsNegativeActualQuota(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	context, _ := gin.CreateTestContext(httptest.NewRecorder())
-	funding := &recordingFunding{source: BillingSourceEdgeLease}
+	funding := &recordingFunding{source: BillingSourceEdgeBalance}
 	session, apiErr := NewBillingSessionWithFunding(context, &relaycommon.RelayInfo{}, 100, funding, NoopTokenQuotaAccounting{})
 	require.Nil(t, apiErr)
 	require.Error(t, session.Settle(-1))
@@ -427,7 +427,7 @@ func TestBillingSessionConcurrentSettleCommitsOnce(t *testing.T) {
 func TestBillingSessionRejectsConflictingRepeatedSettlement(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	context, _ := gin.CreateTestContext(httptest.NewRecorder())
-	funding := &recordingFunding{source: BillingSourceEdgeLease}
+	funding := &recordingFunding{source: BillingSourceEdgeBalance}
 	session, apiErr := NewBillingSessionWithFunding(
 		context,
 		&relaycommon.RelayInfo{},
@@ -446,7 +446,7 @@ func TestPreConsumeBillingEdgeCompensatesFactoryErrorOnce(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	context, _ := gin.CreateTestContext(httptest.NewRecorder())
 	require.NoError(t, common.SetRuntimeMode(common.RuntimeModeEdge))
-	funding := &recordingFunding{source: BillingSourceEdgeLease}
+	funding := &recordingFunding{source: BillingSourceEdgeBalance}
 	SetEdgeBillingSessionFactory(func(c *gin.Context, quota int, relayInfo *relaycommon.RelayInfo) (*BillingSession, *types.NewAPIError) {
 		session, apiErr := NewBillingSessionWithFunding(c, relayInfo, quota, funding, NoopTokenQuotaAccounting{})
 		require.Nil(t, apiErr)
@@ -475,7 +475,7 @@ func TestBillingSessionReturnsCompensatableSessionWhenPreConsumeRollbackFails(t 
 	context, _ := gin.CreateTestContext(httptest.NewRecorder())
 	fundingErr := errors.New("funding pre-consume failed")
 	rollbackErr := errors.New("token rollback failed")
-	funding := &recordingFunding{source: BillingSourceEdgeLease, preConsumeErr: fundingErr}
+	funding := &recordingFunding{source: BillingSourceEdgeBalance, preConsumeErr: fundingErr}
 	tokenAccounting := &recordingTokenAccounting{refundFailures: 1, refundErr: rollbackErr}
 
 	session, apiErr := NewBillingSessionWithFunding(

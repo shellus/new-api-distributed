@@ -386,59 +386,6 @@ func (c *EdgeControlClient) SnapshotPage(ctx context.Context, request dto.EdgeSn
 	return response, nil
 }
 
-func (c *EdgeControlClient) AcquireLease(ctx context.Context, request dto.EdgeLeaseAcquireRequestV1) (*dto.EdgeLeaseAcquireResponseV1, error) {
-	meta, err := c.prepareMeta(request.Meta, "lease-acquire")
-	if err != nil {
-		return nil, err
-	}
-	request.Meta = meta
-	if err := request.Validate(); err != nil {
-		return nil, err
-	}
-	response := &dto.EdgeLeaseAcquireResponseV1{}
-	if err := c.doJSON(ctx, "/control/v1/lease/acquire", request.Meta.RequestID, request, response); err != nil {
-		return nil, err
-	}
-	if err := response.Validate(); err != nil {
-		return nil, edgeControlInvalidResponse("lease acquire response", err)
-	}
-	if err := c.validateResponseMeta(response.Meta, request.Meta.RequestID); err != nil {
-		return nil, err
-	}
-	if response.Lease.NodeID != c.nodeID || response.Lease.NodeGeneration != c.nodeGeneration {
-		return nil, fmt.Errorf("%w: lease belongs to another node generation", ErrEdgeControlProtocolViolation)
-	}
-	if response.Lease.Subject != request.Subject || response.Lease.SnapshotID != request.SnapshotID || response.Lease.SnapshotRevision != request.SnapshotRevision {
-		return nil, fmt.Errorf("%w: lease does not match the requested subject and snapshot", ErrEdgeControlProtocolViolation)
-	}
-	return response, nil
-}
-
-func (c *EdgeControlClient) CloseLease(ctx context.Context, request dto.EdgeLeaseCloseRequestV1) (*dto.EdgeLeaseCloseResponseV1, error) {
-	meta, err := c.prepareMeta(request.Meta, "lease-close")
-	if err != nil {
-		return nil, err
-	}
-	request.Meta = meta
-	if err := request.Validate(); err != nil {
-		return nil, err
-	}
-	response := &dto.EdgeLeaseCloseResponseV1{}
-	if err := c.doJSON(ctx, "/control/v1/lease/close", request.Meta.RequestID, request, response); err != nil {
-		return nil, err
-	}
-	if err := response.Validate(); err != nil {
-		return nil, edgeControlInvalidResponse("lease close response", err)
-	}
-	if err := c.validateResponseMeta(response.Meta, request.Meta.RequestID); err != nil {
-		return nil, err
-	}
-	if response.LeaseID != request.LeaseID || response.LeaseVersion < request.LeaseVersion {
-		return nil, fmt.Errorf("%w: lease close response does not match the request", ErrEdgeControlProtocolViolation)
-	}
-	return response, nil
-}
-
 func (c *EdgeControlClient) SubmitSettlement(ctx context.Context, request dto.EdgeSettlementBlockRequestV1) (*dto.EdgeSettlementBlockResponseV1, error) {
 	meta, err := c.prepareMeta(request.Meta, "settlement")
 	if err != nil {

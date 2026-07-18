@@ -46,20 +46,6 @@ func EdgeControlSnapshotPage(c *gin.Context) {
 	)
 }
 
-func EdgeControlLeaseAcquire(c *gin.Context) {
-	handleEdgeControlRequest(c, edgeservice.ControlRequestKindLeaseAcquire,
-		func(request dto.EdgeLeaseAcquireRequestV1) string { return request.Meta.RequestID },
-		edgeservice.ProcessLeaseAcquire,
-	)
-}
-
-func EdgeControlLeaseClose(c *gin.Context) {
-	handleEdgeControlRequest(c, edgeservice.ControlRequestKindLeaseClose,
-		func(request dto.EdgeLeaseCloseRequestV1) string { return request.Meta.RequestID },
-		edgeservice.ProcessLeaseClose,
-	)
-}
-
 func EdgeControlSettlementBlock(c *gin.Context) {
 	handleEdgeControlRequest(c, edgeservice.ControlRequestKindSettlementBlock,
 		func(request dto.EdgeSettlementBlockRequestV1) string { return request.Meta.RequestID },

@@ -110,7 +110,7 @@ func Run(config Config) (runErr error) {
 		backgroundWorkers.Add(1)
 		go func() {
 			defer backgroundWorkers.Done()
-			edgeservice.RunEdgeLeaseMaintenance(backgroundContext)
+			edgeservice.RunEdgeAccountingMaintenance(backgroundContext)
 		}()
 		backgroundWorkers.Add(1)
 		go func() {

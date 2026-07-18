@@ -135,11 +135,11 @@ func publishMasterConsumeLogClaim(ctx context.Context, claim *model.EdgeConsumeL
 	if err := db.First(&node, stored.NodeID).Error; err != nil {
 		return fmt.Errorf("load edge usage node: %w", err)
 	}
-	var lease model.EdgeQuotaLease
-	if err := db.First(&lease, stored.LeaseID).Error; err != nil {
-		return fmt.Errorf("load edge usage lease: %w", err)
+	var snapshot model.EdgeCompiledSnapshot
+	if err := db.First(&snapshot, stored.SnapshotID).Error; err != nil {
+		return fmt.Errorf("load edge usage snapshot: %w", err)
 	}
-	billingEventKey, err := validateConsumeLogOutboxProjection(claim, payload, stored, node, lease)
+	billingEventKey, err := validateConsumeLogOutboxProjection(claim, payload, stored, node)
 	if err != nil {
 		return err
 	}
@@ -158,9 +158,13 @@ func publishMasterConsumeLogClaim(ctx context.Context, claim *model.EdgeConsumeL
 		httpStatus = &status
 	}
 	event := dto.EdgeUsageEventV1{
-		EventID: payload.EventID, Sequence: stored.Sequence, LeaseID: payload.LeaseID,
+		EventID: payload.EventID, Sequence: stored.Sequence,
 		ReservationID: stored.ReservationUID, RequestID: stored.RequestUID,
-		UserID: int64(stored.UserID), TokenID: int64(stored.TokenID), ChannelID: int64(stored.ChannelID),
+		UserID: int64(stored.UserID), TokenID: int64(stored.TokenID),
+		SnapshotID: snapshot.SnapshotUID, SnapshotRevision: stored.SnapshotRevision,
+		PricingRevision: stored.PricingRevision, BalanceRevision: stored.BalanceRevision,
+		FundingSource: stored.FundingSource, UserSubscriptionID: int64(stored.UserSubscriptionID),
+		TokenUnlimitedQuota: stored.TokenUnlimitedQuota, ChannelID: int64(stored.ChannelID),
 		Endpoint: dto.EdgeEndpointV1(stored.Endpoint), Streaming: stored.Streaming,
 		Model: stored.Model, Group: stored.Group, StartedAtUnixMilli: stored.StartedAtUnixMilli,
 		FinishedAtUnixMilli: stored.FinishedAtUnixMilli, Outcome: dto.EdgeUsageOutcomeV1(stored.Outcome),
@@ -189,7 +193,7 @@ func publishMasterConsumeLogClaim(ctx context.Context, claim *model.EdgeConsumeL
 		"edge_event_id":        event.EventID,
 		"edge_node_id":         payload.NodeID,
 		"edge_node_generation": payload.NodeGeneration,
-		"edge_lease_id":        payload.LeaseID,
+		"edge_funding_source":  event.FundingSource,
 		"edge_outcome":         event.Outcome,
 		"edge_endpoint":        event.Endpoint,
 	}
@@ -239,7 +243,7 @@ func publishMasterConsumeLogClaim(ctx context.Context, claim *model.EdgeConsumeL
 	return err
 }
 
-func validateConsumeLogOutboxProjection(claim *model.EdgeConsumeLogOutbox, payload edgeConsumeLogOutboxPayload, stored model.EdgeUsageEvent, node model.EdgeNode, lease model.EdgeQuotaLease) (string, error) {
+func validateConsumeLogOutboxProjection(claim *model.EdgeConsumeLogOutbox, payload edgeConsumeLogOutboxPayload, stored model.EdgeUsageEvent, node model.EdgeNode) (string, error) {
 	billingEventKey, err := model.EdgeConsumeLogBillingEventKey(node.NodeUID, stored.NodeGeneration, stored.EventUID)
 	if err != nil {
 		return "", fmt.Errorf("derive edge consume-log billing event key: %w", err)
@@ -252,8 +256,6 @@ func validateConsumeLogOutboxProjection(claim *model.EdgeConsumeLogOutbox, paylo
 	}
 	if stored.ID != claim.EventID || payload.EventID != stored.EventUID ||
 		payload.NodeID != node.NodeUID || payload.NodeGeneration != stored.NodeGeneration || stored.NodeID != node.ID ||
-		payload.LeaseID != lease.LeaseUID || stored.LeaseID != lease.ID || stored.NodeID != lease.NodeID ||
-		stored.NodeGeneration != lease.NodeGeneration || stored.UserID != lease.UserID || stored.TokenID != lease.TokenID ||
 		payload.RequestID != stored.RequestUID || payload.UserID != stored.UserID || payload.TokenID != stored.TokenID ||
 		payload.ChannelID != stored.ChannelID || string(payload.Endpoint) != stored.Endpoint || payload.Streaming != stored.Streaming ||
 		payload.Model != stored.Model || payload.Group != stored.Group || string(payload.Outcome) != stored.Outcome ||

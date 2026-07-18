@@ -108,6 +108,17 @@ auth: runtime-test-key
 			ChannelAffinity: dto.EdgeChannelAffinityPolicyV1{Enabled: false, MaxEntries: 1_000, DefaultTTLSeconds: 60},
 		}},
 	}))
+	require.NoError(t, model.ApplyEdgeLocalBalanceDelta(db, dto.EdgeNodeControlConfigV1{
+		NodeID: edgeRuntimeTestNodeID, NodeGeneration: edgeRuntimeTestNodeGeneration,
+	}, dto.EdgeBalanceDeltaV2{
+		Dataset: dto.EdgeBalanceDatasetBalancesV2, BaseRevision: 0, Revision: 1, Full: true,
+		Wallets: []dto.EdgeWalletBalanceV2{{UserID: 7, RemainQuota: 1_000_000}},
+		Tokens:  []dto.EdgeTokenBalanceV2{{TokenID: 11, UserID: 7, RemainQuota: 1_000_000}},
+		Subscriptions: []dto.EdgeSubscriptionBalanceV2{{
+			SubscriptionID: 21, UserID: 7, TotalQuota: 1_000_000, RemainQuota: 1_000_000,
+			ExpiresAtUnixMilli: now.Add(time.Hour).UnixMilli(), AllowWalletOverflow: true,
+		}},
+	}, now.UnixMilli()))
 	return db, now
 }
 
@@ -149,40 +160,27 @@ func enableEdgeRuntimeServing(t *testing.T) {
 	edgeAdmission.accepting = true
 	edgeAdmission.mu.Unlock()
 	previousReady := edgeControlReady.Load()
-	previousExpiry := edgeControlSnapshotExpiry.Load()
 	previousAccountingReady := edgeAccountingReady.Load()
 	previousAccountingBlock := edgeAccountingBlock.Load()
+	previousBalanceReady := edgeBalanceReady.Load()
 	edgeControlReady.Store(true)
-	edgeControlSnapshotExpiry.Store(time.Now().Add(time.Hour).UnixMilli())
 	edgeAccountingReady.Store(true)
 	edgeAccountingBlock.Store(false)
+	edgeBalanceReady.Store(true)
 	t.Cleanup(func() {
 		edgeAdmission.mu.Lock()
 		edgeAdmission.accepting = previousAdmission
 		edgeAdmission.mu.Unlock()
 		edgeControlReady.Store(previousReady)
-		edgeControlSnapshotExpiry.Store(previousExpiry)
 		edgeAccountingReady.Store(previousAccountingReady)
 		edgeAccountingBlock.Store(previousAccountingBlock)
+		edgeBalanceReady.Store(previousBalanceReady)
 	})
-}
-
-func edgeRuntimeTestLease(now time.Time, leaseID string, userID, tokenID, grantedQuota int64) dto.EdgeQuotaLeaseV1 {
-	return dto.EdgeQuotaLeaseV1{
-		LeaseID: leaseID, Version: 1, Status: dto.EdgeLeaseStatusActiveV1,
-		NodeID: edgeRuntimeTestNodeID, NodeGeneration: edgeRuntimeTestNodeGeneration,
-		Subject:      dto.EdgeLeaseSubjectV1{UserID: userID, TokenID: tokenID},
-		GrantedQuota: grantedQuota, RenewAfterRemainingQuota: grantedQuota / 10,
-		IssuedAtUnixMilli: now.Add(-2 * time.Minute).UnixMilli(), ExpiresAtUnixMilli: now.Add(10 * time.Minute).UnixMilli(),
-		SnapshotID: edgeRuntimeTestSnapshotID, SnapshotRevision: edgeRuntimeTestSnapshotRevision,
-		PricingRevision: edgeRuntimeTestSnapshotRevision,
-	}
 }
 
 func settleEdgeRuntimeUsage(
 	t *testing.T,
 	db *gorm.DB,
-	lease dto.EdgeQuotaLeaseV1,
 	reservationID string,
 	requestID string,
 	reservedQuota int64,
@@ -190,9 +188,9 @@ func settleEdgeRuntimeUsage(
 	now time.Time,
 ) *dto.EdgeUsageEventV1 {
 	t.Helper()
-	_, err := model.ReserveEdgeLocalQuota(db, model.EdgeLocalReservationRequest{
-		ReservationID: reservationID, RequestID: requestID, LeaseID: lease.LeaseID,
-		Quota: reservedQuota, NowUnixMilli: now.UnixMilli(),
+	_, err := model.ReserveEdgeLocalBalance(db, model.EdgeLocalBalanceReservationRequest{
+		ReservationID: reservationID, RequestID: requestID, UserID: 7, TokenID: 11,
+		Quota: reservedQuota, NegativeFloorQuota: -10_000_000, NowUnixMilli: now.UnixMilli(),
 	})
 	require.NoError(t, err)
 	status := http.StatusOK
@@ -240,11 +238,4 @@ func activeEdgeRuntimeReservation(t *testing.T, db *gorm.DB, reservationID strin
 	require.NoError(t, err)
 	require.Equal(t, model.EdgeLocalReservationStatusActive, reservation.Status)
 	return reservation
-}
-
-func requireEdgeRuntimeLease(t *testing.T, db *gorm.DB, leaseID string) *model.EdgeLocalQuotaLease {
-	t.Helper()
-	lease, err := model.GetEdgeLocalLease(db, leaseID)
-	require.NoError(t, err)
-	return lease
 }

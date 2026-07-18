@@ -13,7 +13,7 @@ import (
 )
 
 // StageEdgeLocalReservationSettlement persists the exact metered usage before
-// mutating lease balances. A staged reservation cannot be refunded, so a crash
+// mutating balance overlays. A staged reservation cannot be refunded, so a crash
 // or a transient settlement failure can never silently turn completed usage
 // into free usage.
 func StageEdgeLocalReservationSettlement(db *gorm.DB, reservationID string, event dto.EdgeUsageEventV1) error {
@@ -171,33 +171,7 @@ func SettleStagedEdgeLocalReservation(db *gorm.DB, reservationID string) (*dto.E
 		if err := validateEdgeLocalQuota(chargedQuota, true); err != nil {
 			return ErrEdgeLocalAccountingCorruption
 		}
-		var lease EdgeLocalQuotaLease
-		if err := tx.Where("lease_id = ?", reservation.LeaseID).First(&lease).Error; err != nil {
-			return err
-		}
-		if err := validateEdgeLocalLeaseAccounting(lease); err != nil {
-			return err
-		}
-		if event.StartedAtUnixMilli > lease.ExpiresAtUnixMilli {
-			return ErrEdgeLocalLeaseExpired
-		}
 		originalReservedQuota := reservation.ReservedQuota
-		effectiveReservedQuota := originalReservedQuota
-		additionalQuota := int64(0)
-		unusedQuota := int64(0)
-		if chargedQuota > originalReservedQuota {
-			additionalQuota = chargedQuota - originalReservedQuota
-			effectiveReservedQuota = chargedQuota
-			if lease.RemainingQuota < additionalQuota {
-				return ErrEdgeLocalQuotaInsufficient
-			}
-		} else {
-			unusedQuota = originalReservedQuota - chargedQuota
-		}
-		if lease.ReservedQuota < originalReservedQuota {
-			return ErrEdgeLocalAccountingCorruption
-		}
-		reservation.ReservedQuota = effectiveReservedQuota
 		var control EdgeLocalControlState
 		if err := tx.First(&control, edgeLocalControlStateID).Error; err != nil {
 			return err
@@ -215,26 +189,14 @@ func SettleStagedEdgeLocalReservation(db *gorm.DB, reservationID string) (*dto.E
 			return err
 		}
 
-		result := tx.Model(&EdgeLocalQuotaLease{}).
-			Where("lease_id = ? AND remaining_quota >= ? AND reserved_quota >= ?",
-				reservation.LeaseID, additionalQuota, originalReservedQuota).
-			Updates(map[string]any{
-				"remaining_quota":       gorm.Expr("remaining_quota - ? + ?", additionalQuota, unusedQuota),
-				"reserved_quota":        gorm.Expr("reserved_quota - ?", originalReservedQuota),
-				"consumed_quota":        gorm.Expr("consumed_quota + ?", chargedQuota),
-				"updated_at_unix_milli": event.FinishedAtUnixMilli,
-			})
-		if result.Error != nil {
-			return result.Error
+		if err := settleStagedEdgeLocalBalanceReservationTx(tx, &reservation, &event); err != nil {
+			return err
 		}
-		if result.RowsAffected != 1 {
-			return ErrEdgeLocalAccountingCorruption
-		}
-		result = tx.Model(&EdgeLocalQuotaReservation{}).
+		result := tx.Model(&EdgeLocalQuotaReservation{}).
 			Where("reservation_id = ? AND status = ?", reservationID, EdgeLocalReservationStatusActive).
 			Updates(map[string]any{
 				"status":                  EdgeLocalReservationStatusSettled,
-				"reserved_quota":          effectiveReservedQuota,
+				"reserved_quota":          originalReservedQuota,
 				"charged_quota":           chargedQuota,
 				"event_id":                event.EventID,
 				"event_sequence":          sequence,
@@ -248,7 +210,7 @@ func SettleStagedEdgeLocalReservation(db *gorm.DB, reservationID string) (*dto.E
 			return ErrEdgeLocalReservationConflict
 		}
 		storedEvent := EdgeLocalUsageEvent{
-			EventID: event.EventID, Sequence: sequence, LeaseID: reservation.LeaseID,
+			EventID: event.EventID, Sequence: sequence,
 			ReservationID: reservation.ReservationID, RequestID: reservation.RequestID,
 			Payload: string(payload), CreatedAtUnixMilli: event.FinishedAtUnixMilli,
 		}
@@ -340,21 +302,32 @@ func edgeLocalReservationSettlementStaged(reservation EdgeLocalQuotaReservation)
 
 func canonicalizeEdgeLocalStagedUsageEvent(event *dto.EdgeUsageEventV1) {
 	event.Sequence = 0
-	event.LeaseID = ""
 	event.ReservationID = ""
 	event.RequestID = ""
 	event.UserID = 0
 	event.TokenID = 0
+	event.SnapshotID = ""
+	event.SnapshotRevision = 0
+	event.PricingRevision = 0
+	event.BalanceRevision = 0
+	event.FundingSource = ""
+	event.UserSubscriptionID = 0
+	event.TokenUnlimitedQuota = false
 	event.Billing.ReservedQuota = 0
 }
 
 func normalizeEdgeLocalUsageEvent(event *dto.EdgeUsageEventV1, reservation EdgeLocalQuotaReservation, sequence int64) {
 	event.Sequence = sequence
-	event.LeaseID = reservation.LeaseID
 	event.ReservationID = reservation.ReservationID
 	event.RequestID = reservation.RequestID
 	event.UserID = reservation.UserID
 	event.TokenID = reservation.TokenID
+	event.SnapshotID = reservation.SnapshotID
+	event.SnapshotRevision = reservation.SnapshotRevision
+	event.PricingRevision = reservation.PricingRevision
+	event.BalanceRevision = reservation.BalanceRevision
+	event.FundingSource, event.UserSubscriptionID, _ = edgeLocalBalanceFundingSource(reservation)
+	event.TokenUnlimitedQuota = reservation.TokenUnlimitedQuota
 	event.Billing.ReservedQuota = reservation.ReservedQuota
 }
 
@@ -421,7 +394,6 @@ func BuildEdgeLocalSettlementBlock(
 			return ErrEdgeLocalSettlementOutOfOrder
 		}
 		events := make([]dto.EdgeUsageEventV1, 0, len(storedEvents))
-		leaseIDs := make(map[string]struct{})
 		for i := range storedEvents {
 			expected := expectedFirst + int64(i)
 			if storedEvents[i].Sequence != expected {
@@ -435,21 +407,9 @@ func BuildEdgeLocalSettlementBlock(
 				return ErrEdgeLocalAccountingCorruption
 			}
 			events = append(events, event)
-			leaseIDs[event.LeaseID] = struct{}{}
 		}
-		var nodeID string
-		var nodeGeneration int64
-		for leaseID := range leaseIDs {
-			var lease EdgeLocalQuotaLease
-			if err := tx.Where("lease_id = ?", leaseID).First(&lease).Error; err != nil {
-				return err
-			}
-			if nodeID == "" {
-				nodeID = lease.NodeID
-				nodeGeneration = lease.NodeGeneration
-			} else if nodeID != lease.NodeID || nodeGeneration != lease.NodeGeneration {
-				return ErrEdgeLocalSettlementConflict
-			}
+		if control.NodeID == "" || control.NodeGeneration <= 0 {
+			return ErrEdgeLocalAccountingCorruption
 		}
 
 		built := dto.EdgeSettlementBlockRequestV1{
@@ -458,7 +418,7 @@ func BuildEdgeLocalSettlementBlock(
 			FirstSequence: events[0].Sequence, LastSequence: events[len(events)-1].Sequence,
 			CreatedAtUnixMilli: createdAtUnixMilli, Events: events,
 		}
-		if err := edgesettlement.SetBlockDigestV1(nodeID, nodeGeneration, &built); err != nil {
+		if err := edgesettlement.SetBlockDigestV1(control.NodeID, control.NodeGeneration, &built); err != nil {
 			return err
 		}
 		if err := built.Validate(); err != nil {
@@ -469,7 +429,7 @@ func BuildEdgeLocalSettlementBlock(
 			return err
 		}
 		block := EdgeLocalSettlementBlock{
-			BlockID: blockID, NodeID: nodeID, NodeGeneration: nodeGeneration,
+			BlockID: blockID, NodeID: control.NodeID, NodeGeneration: control.NodeGeneration,
 			PreviousBlockID: built.PreviousBlockID, PreviousBlockDigest: built.PreviousBlockDigest,
 			FirstSequence: built.FirstSequence, LastSequence: built.LastSequence, EventCount: len(events),
 			BlockDigest: built.BlockDigest, Status: EdgeLocalSettlementBlockStatusPending,

@@ -29,7 +29,6 @@ const (
 	EdgeControlMaxSupportedProtocolVersionsV1   = 8
 	EdgeControlMaxCapabilitiesV1                = 32
 	EdgeControlMaxSnapshotDatasetsV1            = 7
-	EdgeControlMaxHeartbeatLeasesV1             = 4096
 	EdgeControlMaxHeartbeatCPAStatusesV1        = 4096
 	EdgeControlMaxAvailableModelsV1             = 4096
 	EdgeControlMaxChannelGroupsV1               = 256
@@ -131,16 +130,6 @@ const (
 	EdgeSettlementAckDuplicateV1 EdgeSettlementAckStatusV1 = "duplicate"
 )
 
-type EdgeLeaseStatusV1 string
-
-const (
-	EdgeLeaseStatusActiveV1      EdgeLeaseStatusV1 = "active"
-	EdgeLeaseStatusClosingV1     EdgeLeaseStatusV1 = "closing"
-	EdgeLeaseStatusClosedV1      EdgeLeaseStatusV1 = "closed"
-	EdgeLeaseStatusRevokedV1     EdgeLeaseStatusV1 = "revoked"
-	EdgeLeaseStatusForceClosedV1 EdgeLeaseStatusV1 = "force_closed"
-)
-
 type EdgeControlErrorCodeV1 string
 
 const (
@@ -153,8 +142,6 @@ const (
 	EdgeControlErrorCodeIdempotencyConflictV1    EdgeControlErrorCodeV1 = "idempotency_conflict"
 	EdgeControlErrorCodeSnapshotNotFoundV1       EdgeControlErrorCodeV1 = "snapshot_not_found"
 	EdgeControlErrorCodeSnapshotCursorStaleV1    EdgeControlErrorCodeV1 = "snapshot_cursor_stale"
-	EdgeControlErrorCodeLeaseUnavailableV1       EdgeControlErrorCodeV1 = "lease_unavailable"
-	EdgeControlErrorCodeLeaseConflictV1          EdgeControlErrorCodeV1 = "lease_conflict"
 	EdgeControlErrorCodeSettlementOutOfOrderV1   EdgeControlErrorCodeV1 = "settlement_out_of_order"
 	EdgeControlErrorCodeSettlementConflictV1     EdgeControlErrorCodeV1 = "settlement_conflict"
 	EdgeControlErrorCodeRateLimitedV1            EdgeControlErrorCodeV1 = "rate_limited"
@@ -483,63 +470,6 @@ type EdgeSnapshotPageResponseV1 struct {
 	Payload    EdgeSnapshotPagePayloadV1 `json:"payload"`
 }
 
-type EdgeLeaseSubjectV1 struct {
-	UserID  int64 `json:"user_id"`
-	TokenID int64 `json:"token_id"`
-}
-
-type EdgeLeaseAcquireRequestV1 struct {
-	Meta                   EdgeControlRequestMetaV1 `json:"meta"`
-	Subject                EdgeLeaseSubjectV1       `json:"subject"`
-	RequestedQuota         int64                    `json:"requested_quota"`
-	MinimumAcceptableQuota int64                    `json:"minimum_acceptable_quota"`
-	ExistingLeaseID        string                   `json:"existing_lease_id,omitempty"`
-	SnapshotID             string                   `json:"snapshot_id"`
-	SnapshotRevision       int64                    `json:"snapshot_revision"`
-}
-
-type EdgeQuotaLeaseV1 struct {
-	LeaseID                  string             `json:"lease_id"`
-	Version                  int64              `json:"version"`
-	Status                   EdgeLeaseStatusV1  `json:"status"`
-	NodeID                   string             `json:"node_id"`
-	NodeGeneration           int64              `json:"node_generation"`
-	Subject                  EdgeLeaseSubjectV1 `json:"subject"`
-	GrantedQuota             int64              `json:"granted_quota"`
-	RenewAfterRemainingQuota int64              `json:"renew_after_remaining_quota"`
-	IssuedAtUnixMilli        int64              `json:"issued_at_unix_milli"`
-	ExpiresAtUnixMilli       int64              `json:"expires_at_unix_milli"`
-	SnapshotID               string             `json:"snapshot_id"`
-	SnapshotRevision         int64              `json:"snapshot_revision"`
-	PricingRevision          int64              `json:"pricing_revision"`
-}
-
-type EdgeLeaseAcquireResponseV1 struct {
-	Meta  EdgeControlResponseMetaV1 `json:"meta"`
-	Lease EdgeQuotaLeaseV1          `json:"lease"`
-}
-
-// EdgeLeaseCloseRequestV1 declares only the edge's final durable event
-// watermark. Unused quota is intentionally absent and is computed by master
-// after all events through FinalEventSequence have been accepted.
-type EdgeLeaseCloseRequestV1 struct {
-	Meta               EdgeControlRequestMetaV1 `json:"meta"`
-	LeaseID            string                   `json:"lease_id"`
-	LeaseVersion       int64                    `json:"lease_version"`
-	FinalEventSequence int64                    `json:"final_event_sequence"`
-}
-
-type EdgeLeaseCloseResponseV1 struct {
-	Meta                    EdgeControlResponseMetaV1 `json:"meta"`
-	LeaseID                 string                    `json:"lease_id"`
-	LeaseVersion            int64                     `json:"lease_version"`
-	Status                  EdgeLeaseStatusV1         `json:"status"`
-	GrantedQuota            int64                     `json:"granted_quota"`
-	AcceptedQuota           int64                     `json:"accepted_quota"`
-	ReturnedQuota           int64                     `json:"returned_quota"`
-	CloseAfterEventSequence int64                     `json:"close_after_event_sequence"`
-}
-
 type EdgeUsageBillingV1 struct {
 	PricingPolicyID       string             `json:"pricing_policy_id"`
 	PricingPolicyVersion  string             `json:"pricing_policy_version"`
@@ -557,11 +487,17 @@ type EdgeUsageBillingV1 struct {
 type EdgeUsageEventV1 struct {
 	EventID             string             `json:"event_id"`
 	Sequence            int64              `json:"sequence"`
-	LeaseID             string             `json:"lease_id"`
 	ReservationID       string             `json:"reservation_id"`
 	RequestID           string             `json:"request_id"`
 	UserID              int64              `json:"user_id"`
 	TokenID             int64              `json:"token_id"`
+	SnapshotID          string             `json:"snapshot_id,omitempty"`
+	SnapshotRevision    int64              `json:"snapshot_revision,omitempty"`
+	PricingRevision     int64              `json:"pricing_revision,omitempty"`
+	BalanceRevision     int64              `json:"balance_revision,omitempty"`
+	FundingSource       string             `json:"funding_source,omitempty"`
+	UserSubscriptionID  int64              `json:"user_subscription_id,omitempty"`
+	TokenUnlimitedQuota bool               `json:"token_unlimited_quota,omitempty"`
 	ChannelID           int64              `json:"channel_id"`
 	Endpoint            EdgeEndpointV1     `json:"endpoint"`
 	Streaming           bool               `json:"streaming"`
@@ -604,16 +540,6 @@ type EdgeSettlementBlockResponseV1 struct {
 	Ack  EdgeSettlementAckV1       `json:"ack"`
 }
 
-type EdgeLeaseRuntimeStateV1 struct {
-	LeaseID            string            `json:"lease_id"`
-	Version            int64             `json:"version"`
-	Status             EdgeLeaseStatusV1 `json:"status"`
-	RemainingQuota     int64             `json:"remaining_quota"`
-	ReservedQuota      int64             `json:"reserved_quota"`
-	ConsumedQuota      int64             `json:"consumed_quota"`
-	ExpiresAtUnixMilli int64             `json:"expires_at_unix_milli"`
-}
-
 type EdgeRuntimeStatusV1 struct {
 	UptimeSeconds      int64 `json:"uptime_seconds"`
 	InFlightRequests   int64 `json:"in_flight_requests"`
@@ -636,14 +562,13 @@ type EdgeCPAStatusV1 struct {
 }
 
 type EdgeHeartbeatRequestV1 struct {
-	Meta            EdgeControlRequestMetaV1  `json:"meta"`
-	Declaration     EdgeNodeDeclarationV1     `json:"declaration"`
-	Snapshot        EdgeSnapshotStateV1       `json:"snapshot"`
-	Settlement      EdgeSettlementStateV1     `json:"settlement"`
-	BalanceRevision int64                     `json:"balance_revision,omitempty"`
-	Leases          []EdgeLeaseRuntimeStateV1 `json:"leases"`
-	Runtime         EdgeRuntimeStatusV1       `json:"runtime"`
-	CPA             []EdgeCPAStatusV1         `json:"cpa"`
+	Meta            EdgeControlRequestMetaV1 `json:"meta"`
+	Declaration     EdgeNodeDeclarationV1    `json:"declaration"`
+	Snapshot        EdgeSnapshotStateV1      `json:"snapshot"`
+	Settlement      EdgeSettlementStateV1    `json:"settlement"`
+	BalanceRevision int64                    `json:"balance_revision,omitempty"`
+	Runtime         EdgeRuntimeStatusV1      `json:"runtime"`
+	CPA             []EdgeCPAStatusV1        `json:"cpa"`
 }
 
 type EdgeHeartbeatResponseV1 struct {
@@ -750,19 +675,6 @@ func (t EdgeChannelAffinityKeySourceTypeV1) Valid() bool {
 		EdgeChannelAffinityKeySourceContextStringV1,
 		EdgeChannelAffinityKeySourceRequestHeaderV1,
 		EdgeChannelAffinityKeySourceGJSONV1:
-		return true
-	default:
-		return false
-	}
-}
-
-func (s EdgeLeaseStatusV1) Valid() bool {
-	switch s {
-	case EdgeLeaseStatusActiveV1,
-		EdgeLeaseStatusClosingV1,
-		EdgeLeaseStatusClosedV1,
-		EdgeLeaseStatusRevokedV1,
-		EdgeLeaseStatusForceClosedV1:
 		return true
 	default:
 		return false
@@ -1047,28 +959,6 @@ func (r EdgeBootstrapRequestV1) Validate() error {
 	return r.Settlement.Validate()
 }
 
-func (l EdgeLeaseRuntimeStateV1) Validate() error {
-	if err := validateEdgeControlIdentifierV1("lease.lease_id", l.LeaseID); err != nil {
-		return err
-	}
-	if l.Version <= 0 {
-		return fmt.Errorf("lease.version must be greater than zero")
-	}
-	if !l.Status.Valid() {
-		return fmt.Errorf("lease.status is invalid")
-	}
-	if err := validateEdgeControlQuotaV1("lease.remaining_quota", l.RemainingQuota); err != nil {
-		return err
-	}
-	if err := validateEdgeControlQuotaV1("lease.reserved_quota", l.ReservedQuota); err != nil {
-		return err
-	}
-	if err := validateEdgeControlQuotaV1("lease.consumed_quota", l.ConsumedQuota); err != nil {
-		return err
-	}
-	return validateEdgeControlUnixMilliV1("lease.expires_at_unix_milli", l.ExpiresAtUnixMilli, false)
-}
-
 func (r EdgeRuntimeStatusV1) Validate() error {
 	if r.UptimeSeconds < 0 {
 		return fmt.Errorf("runtime.uptime_seconds must not be negative")
@@ -1113,19 +1003,6 @@ func (r EdgeHeartbeatRequestV1) Validate() error {
 	}
 	if r.BalanceRevision < 0 {
 		return fmt.Errorf("balance_revision must not be negative")
-	}
-	if len(r.Leases) > EdgeControlMaxHeartbeatLeasesV1 {
-		return fmt.Errorf("leases exceeds %d items", EdgeControlMaxHeartbeatLeasesV1)
-	}
-	seenLeases := make(map[string]struct{}, len(r.Leases))
-	for i, lease := range r.Leases {
-		if err := lease.Validate(); err != nil {
-			return fmt.Errorf("leases[%d]: %w", i, err)
-		}
-		if _, exists := seenLeases[lease.LeaseID]; exists {
-			return fmt.Errorf("leases contains duplicate lease_id %q", lease.LeaseID)
-		}
-		seenLeases[lease.LeaseID] = struct{}{}
 	}
 	if err := r.Runtime.Validate(); err != nil {
 		return err
@@ -1748,164 +1625,6 @@ func EdgeBillingExpressionHasRequestOrTimeDependenciesV1(expression string) bool
 	return false
 }
 
-func (s EdgeLeaseSubjectV1) Validate() error {
-	if s.UserID <= 0 {
-		return fmt.Errorf("lease.subject.user_id must be greater than zero")
-	}
-	if s.TokenID <= 0 {
-		return fmt.Errorf("lease.subject.token_id must be greater than zero")
-	}
-	return nil
-}
-
-func (r EdgeLeaseAcquireRequestV1) Validate() error {
-	if err := r.Meta.Validate(); err != nil {
-		return fmt.Errorf("meta: %w", err)
-	}
-	if err := r.Subject.Validate(); err != nil {
-		return err
-	}
-	if err := validateEdgeControlQuotaV1("lease.requested_quota", r.RequestedQuota); err != nil {
-		return err
-	}
-	if err := validateEdgeControlQuotaV1("lease.minimum_acceptable_quota", r.MinimumAcceptableQuota); err != nil {
-		return err
-	}
-	if r.MinimumAcceptableQuota > r.RequestedQuota {
-		return fmt.Errorf("lease.minimum_acceptable_quota must not exceed requested_quota")
-	}
-	if r.ExistingLeaseID != "" {
-		if err := validateEdgeControlIdentifierV1("lease.existing_lease_id", r.ExistingLeaseID); err != nil {
-			return err
-		}
-	}
-	if err := validateEdgeControlIdentifierV1("lease.snapshot_id", r.SnapshotID); err != nil {
-		return err
-	}
-	if r.SnapshotRevision <= 0 {
-		return fmt.Errorf("lease.snapshot_revision must be greater than zero")
-	}
-	return nil
-}
-
-func (l EdgeQuotaLeaseV1) Validate() error {
-	if err := validateEdgeControlIdentifierV1("lease.lease_id", l.LeaseID); err != nil {
-		return err
-	}
-	if l.Version <= 0 {
-		return fmt.Errorf("lease.version must be greater than zero")
-	}
-	if !l.Status.Valid() {
-		return fmt.Errorf("lease.status is invalid")
-	}
-	if err := validateEdgeControlIdentifierV1("lease.node_id", l.NodeID); err != nil {
-		return err
-	}
-	if l.NodeGeneration <= 0 {
-		return fmt.Errorf("lease.node_generation must be greater than zero")
-	}
-	if err := l.Subject.Validate(); err != nil {
-		return err
-	}
-	if err := validateEdgeControlQuotaV1("lease.granted_quota", l.GrantedQuota); err != nil {
-		return err
-	}
-	if err := validateEdgeControlQuotaV1("lease.renew_after_remaining_quota", l.RenewAfterRemainingQuota); err != nil {
-		return err
-	}
-	if l.GrantedQuota == 0 && l.RenewAfterRemainingQuota != 0 {
-		return fmt.Errorf("zero-quota lease must have a zero renewal threshold")
-	}
-	if l.GrantedQuota > 0 && l.RenewAfterRemainingQuota >= l.GrantedQuota {
-		return fmt.Errorf("lease.renew_after_remaining_quota must be less than granted_quota")
-	}
-	if err := validateEdgeControlUnixMilliV1("lease.issued_at_unix_milli", l.IssuedAtUnixMilli, false); err != nil {
-		return err
-	}
-	if err := validateEdgeControlUnixMilliV1("lease.expires_at_unix_milli", l.ExpiresAtUnixMilli, false); err != nil {
-		return err
-	}
-	if l.ExpiresAtUnixMilli <= l.IssuedAtUnixMilli {
-		return fmt.Errorf("lease.expires_at_unix_milli must be after issued_at_unix_milli")
-	}
-	if err := validateEdgeControlIdentifierV1("lease.snapshot_id", l.SnapshotID); err != nil {
-		return err
-	}
-	if l.SnapshotRevision <= 0 {
-		return fmt.Errorf("lease.snapshot_revision must be greater than zero")
-	}
-	if l.PricingRevision <= 0 || l.PricingRevision > l.SnapshotRevision {
-		return fmt.Errorf("lease.pricing_revision must be between 1 and snapshot_revision")
-	}
-	return nil
-}
-
-func (r EdgeLeaseAcquireResponseV1) Validate() error {
-	if err := r.Meta.Validate(); err != nil {
-		return fmt.Errorf("meta: %w", err)
-	}
-	if err := r.Lease.Validate(); err != nil {
-		return err
-	}
-	if r.Lease.Status != EdgeLeaseStatusActiveV1 {
-		return fmt.Errorf("lease acquisition must return an active lease")
-	}
-	return nil
-}
-
-func (r EdgeLeaseCloseRequestV1) Validate() error {
-	if err := r.Meta.Validate(); err != nil {
-		return fmt.Errorf("meta: %w", err)
-	}
-	if err := validateEdgeControlIdentifierV1("lease_close.lease_id", r.LeaseID); err != nil {
-		return err
-	}
-	if r.LeaseVersion <= 0 {
-		return fmt.Errorf("lease_close.lease_version must be greater than zero")
-	}
-	if r.FinalEventSequence < 0 {
-		return fmt.Errorf("lease_close.final_event_sequence must not be negative")
-	}
-	return nil
-}
-
-func (r EdgeLeaseCloseResponseV1) Validate() error {
-	if err := r.Meta.Validate(); err != nil {
-		return fmt.Errorf("meta: %w", err)
-	}
-	if err := validateEdgeControlIdentifierV1("lease_close.lease_id", r.LeaseID); err != nil {
-		return err
-	}
-	if r.LeaseVersion <= 0 {
-		return fmt.Errorf("lease_close.lease_version must be greater than zero")
-	}
-	switch r.Status {
-	case EdgeLeaseStatusClosingV1, EdgeLeaseStatusClosedV1, EdgeLeaseStatusRevokedV1, EdgeLeaseStatusForceClosedV1:
-	default:
-		return fmt.Errorf("lease_close.status is invalid")
-	}
-	if err := validateEdgeControlQuotaV1("lease_close.granted_quota", r.GrantedQuota); err != nil {
-		return err
-	}
-	if err := validateEdgeControlQuotaV1("lease_close.accepted_quota", r.AcceptedQuota); err != nil {
-		return err
-	}
-	if err := validateEdgeControlQuotaV1("lease_close.returned_quota", r.ReturnedQuota); err != nil {
-		return err
-	}
-	accounted := r.AcceptedQuota + r.ReturnedQuota
-	if accounted > r.GrantedQuota {
-		return fmt.Errorf("lease_close accepted_quota plus returned_quota must not exceed granted_quota")
-	}
-	if r.Status != EdgeLeaseStatusClosingV1 && accounted != r.GrantedQuota {
-		return fmt.Errorf("terminal lease_close response must account for all granted_quota")
-	}
-	if r.CloseAfterEventSequence < 0 {
-		return fmt.Errorf("lease_close.close_after_event_sequence must not be negative")
-	}
-	return nil
-}
-
 func (b EdgeUsageBillingV1) Validate() error {
 	if err := validateEdgeControlIdentifierV1("usage.billing.pricing_policy_id", b.PricingPolicyID); err != nil {
 		return err
@@ -1953,22 +1672,36 @@ func (b EdgeUsageBillingV1) Validate() error {
 	if err := validateEdgeControlQuotaV1("usage.billing.charged_quota", b.ChargedQuota); err != nil {
 		return err
 	}
-	if b.ChargedQuota > b.ReservedQuota {
-		return fmt.Errorf("usage.billing.charged_quota must not exceed reserved_quota")
-	}
 	return nil
 }
 
 func (e EdgeUsageEventV1) Validate() error {
 	for field, value := range map[string]string{
 		"usage.event_id":       e.EventID,
-		"usage.lease_id":       e.LeaseID,
 		"usage.reservation_id": e.ReservationID,
 		"usage.request_id":     e.RequestID,
 	} {
 		if err := validateEdgeControlIdentifierV1(field, value); err != nil {
 			return err
 		}
+	}
+	if err := validateEdgeControlIdentifierV1("usage.snapshot_id", e.SnapshotID); err != nil {
+		return err
+	}
+	if e.SnapshotRevision <= 0 || e.PricingRevision <= 0 || e.PricingRevision > e.SnapshotRevision || e.BalanceRevision <= 0 {
+		return fmt.Errorf("usage snapshot, pricing and balance revisions are invalid")
+	}
+	switch e.FundingSource {
+	case "wallet":
+		if e.UserSubscriptionID != 0 {
+			return fmt.Errorf("wallet usage must not contain user_subscription_id")
+		}
+	case "subscription":
+		if e.UserSubscriptionID <= 0 {
+			return fmt.Errorf("subscription usage requires user_subscription_id")
+		}
+	default:
+		return fmt.Errorf("usage.funding_source is invalid")
 	}
 	if e.Sequence <= 0 {
 		return fmt.Errorf("usage.sequence must be greater than zero")

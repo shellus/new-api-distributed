@@ -27,11 +27,10 @@ const (
 )
 
 var (
-	edgeControlReady          atomic.Bool
-	edgeControlSnapshotExpiry atomic.Int64
-	activeEdgeControlClient   atomic.Pointer[EdgeControlClient]
-	activeEdgeControlConfig   atomic.Pointer[dto.EdgeNodeControlConfigV1]
-	edgeSettlementUploadMu    sync.Mutex
+	edgeControlReady        atomic.Bool
+	activeEdgeControlClient atomic.Pointer[EdgeControlClient]
+	activeEdgeControlConfig atomic.Pointer[dto.EdgeNodeControlConfigV1]
+	edgeSettlementUploadMu  sync.Mutex
 )
 
 // EdgeControlLocalStore is the durable edge-local boundary used by the
@@ -41,8 +40,9 @@ type EdgeControlLocalStore interface {
 	SnapshotState(context.Context) (*dto.EdgeSnapshotStateV1, error)
 	SnapshotExpiry(context.Context) (int64, error)
 	SettlementState(context.Context) (*dto.EdgeSettlementStateV1, error)
-	LeaseRuntimeStates(context.Context) ([]dto.EdgeLeaseRuntimeStateV1, error)
+	BalanceState(context.Context) (*model.EdgeLocalBalanceState, error)
 	ApplySnapshot(context.Context, model.EdgeLocalSnapshotProjectionData) error
+	ApplyBalance(context.Context, dto.EdgeNodeControlConfigV1, dto.EdgeBalanceDeltaV2, int64) error
 	RefreshChannelRuntime(context.Context) error
 	InstallRoutingPolicy(context.Context) error
 	PendingSettlementBlock(context.Context) (*dto.EdgeSettlementBlockRequestV1, error)
@@ -73,7 +73,7 @@ type edgeControlGormStore struct {
 // EdgeControlReady reports whether bootstrap completed and a fully verified
 // snapshot is available in the edge-local database for request admission.
 func EdgeControlReady() bool {
-	return edgeControlReady.Load() && time.Now().UTC().UnixMilli() < edgeControlSnapshotExpiry.Load()
+	return edgeControlReady.Load()
 }
 
 // ActiveEdgeControlClient returns the single validated client owned by the
@@ -157,7 +157,6 @@ func RunEdgeControlLoopsWithDependencies(ctx context.Context, dependencies EdgeC
 	setReady := func(ready bool) {
 		if !ready {
 			edgeControlReady.Store(false)
-			edgeControlSnapshotExpiry.Store(0)
 		} else {
 			edgeControlReady.Store(true)
 		}
@@ -174,6 +173,7 @@ func RunEdgeControlLoopsWithDependencies(ctx context.Context, dependencies EdgeC
 
 func (r *edgeControlLoop) run(ctx context.Context) error {
 	r.setReady(false)
+	edgeBalanceReady.Store(false)
 	defer r.setReady(false)
 
 	if err := r.restoreLocalReadiness(ctx); err != nil {
@@ -273,10 +273,6 @@ func (r *edgeControlLoop) restoreLocalReadiness(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	expiresAt, err := r.store.SnapshotExpiry(ctx)
-	if err != nil {
-		return err
-	}
 	if state.SnapshotID == "" || state.Revision <= 0 || state.AppliedAtUnixMilli <= 0 || len(state.Datasets) != len(edgeSnapshotDatasetOrder) {
 		return nil
 	}
@@ -285,9 +281,11 @@ func (r *edgeControlLoop) restoreLocalReadiness(ctx context.Context) error {
 			return fmt.Errorf("%w: persisted snapshot dataset state is incomplete", ErrEdgeControlProtocolViolation)
 		}
 	}
-	if expiresAt <= r.now().UTC().UnixMilli() {
-		return nil
+	balance, err := r.store.BalanceState(ctx)
+	if err != nil {
+		return err
 	}
+	edgeBalanceReady.Store(balance.Initialized && balance.Revision > 0)
 	if err := withEdgeDataPlanePolicyMutation(func() error {
 		r.transitionDataPlaneNotReady()
 		if err := r.store.RefreshChannelRuntime(ctx); err != nil {
@@ -297,7 +295,7 @@ func (r *edgeControlLoop) restoreLocalReadiness(ctx context.Context) error {
 	}); err != nil {
 		return err
 	}
-	return r.activateSnapshot(expiresAt)
+	return r.activateSnapshot(0)
 }
 
 func (r *edgeControlLoop) bootstrap(ctx context.Context) (dto.EdgeNodeControlConfigV1, error) {
@@ -326,7 +324,18 @@ func (r *edgeControlLoop) bootstrap(ctx context.Context) (dto.EdgeNodeControlCon
 	if _, err := r.syncSnapshot(ctx, response.Snapshot, response.Control); err != nil {
 		return dto.EdgeNodeControlConfigV1{}, err
 	}
-	return response.Control, nil
+	updated, err := r.heartbeat(ctx, response.Control)
+	if err != nil {
+		return dto.EdgeNodeControlConfigV1{}, err
+	}
+	balance, err := r.store.BalanceState(ctx)
+	if err != nil {
+		return dto.EdgeNodeControlConfigV1{}, err
+	}
+	if !balance.Initialized || balance.Revision <= 0 {
+		return dto.EdgeNodeControlConfigV1{}, fmt.Errorf("%w: bootstrap heartbeat did not initialize balances", ErrEdgeControlProtocolViolation)
+	}
+	return updated, nil
 }
 
 func (r *edgeControlLoop) heartbeat(ctx context.Context, current dto.EdgeNodeControlConfigV1) (dto.EdgeNodeControlConfigV1, error) {
@@ -338,13 +347,13 @@ func (r *edgeControlLoop) heartbeat(ctx context.Context, current dto.EdgeNodeCon
 	if err != nil {
 		return current, err
 	}
-	leases, err := r.store.LeaseRuntimeStates(ctx)
+	balance, err := r.store.BalanceState(ctx)
 	if err != nil {
 		return current, err
 	}
 	response, err := r.client.Heartbeat(ctx, dto.EdgeHeartbeatRequestV1{
 		Declaration: r.client.Declaration(), Snapshot: *snapshot, Settlement: *settlement,
-		Leases: leases, Runtime: r.runtimeStatus(), CPA: nil,
+		BalanceRevision: balance.Revision, Runtime: r.runtimeStatus(), CPA: nil,
 	})
 	if err != nil {
 		return current, err
@@ -353,6 +362,17 @@ func (r *edgeControlLoop) heartbeat(ctx context.Context, current dto.EdgeNodeCon
 		if err := r.store.AcknowledgeSettlement(ctx, *response.SettlementAck); err != nil {
 			return current, err
 		}
+	}
+	if response.BalanceDelta != nil {
+		now := time.Now
+		if r.now != nil {
+			now = r.now
+		}
+		if err := r.store.ApplyBalance(ctx, response.Control, *response.BalanceDelta, now().UTC().UnixMilli()); err != nil {
+			edgeBalanceReady.Store(false)
+			return current, err
+		}
+		edgeBalanceReady.Store(true)
 	}
 	if response.Snapshot != nil {
 		if _, err := r.syncSnapshot(ctx, *response.Snapshot, response.Control); err != nil {
@@ -363,7 +383,7 @@ func (r *edgeControlLoop) heartbeat(ctx context.Context, current dto.EdgeNodeCon
 }
 
 func (r *edgeControlLoop) transitionDataPlaneNotReady() {
-	if edgeControlReady.Load() || edgeControlSnapshotExpiry.Load() != 0 {
+	if edgeControlReady.Load() {
 		r.setDataPlaneReady(false)
 	}
 }
@@ -375,15 +395,13 @@ func (r *edgeControlLoop) setDataPlaneReady(ready bool) {
 	}
 	if !ready {
 		edgeControlReady.Store(false)
-		edgeControlSnapshotExpiry.Store(0)
 		return
 	}
 	edgeControlReady.Store(true)
 }
 
-func (r *edgeControlLoop) activateSnapshot(expiresAtUnixMilli int64) error {
+func (r *edgeControlLoop) activateSnapshot(_ int64) error {
 	return withEdgeDataPlanePolicyMutation(func() error {
-		edgeControlSnapshotExpiry.Store(expiresAtUnixMilli)
 		r.setDataPlaneReady(true)
 		return nil
 	})
@@ -764,30 +782,16 @@ func (s *edgeControlGormStore) SettlementState(ctx context.Context) (*dto.EdgeSe
 	return model.GetEdgeLocalSettlementState(s.db.WithContext(ctx))
 }
 
-func (s *edgeControlGormStore) LeaseRuntimeStates(ctx context.Context) ([]dto.EdgeLeaseRuntimeStateV1, error) {
-	var leases []model.EdgeLocalQuotaLease
-	result := s.db.WithContext(ctx).
-		Where("status IN ?", []dto.EdgeLeaseStatusV1{dto.EdgeLeaseStatusActiveV1, dto.EdgeLeaseStatusClosingV1}).
-		Order("lease_id asc").Limit(dto.EdgeControlMaxHeartbeatLeasesV1 + 1).Find(&leases)
-	if result.Error != nil {
-		return nil, result.Error
-	}
-	if len(leases) > dto.EdgeControlMaxHeartbeatLeasesV1 {
-		return nil, fmt.Errorf("edge local live leases exceed heartbeat limit %d", dto.EdgeControlMaxHeartbeatLeasesV1)
-	}
-	states := make([]dto.EdgeLeaseRuntimeStateV1, 0, len(leases))
-	for _, lease := range leases {
-		states = append(states, dto.EdgeLeaseRuntimeStateV1{
-			LeaseID: lease.LeaseID, Version: lease.Version, Status: lease.Status,
-			RemainingQuota: lease.RemainingQuota, ReservedQuota: lease.ReservedQuota,
-			ConsumedQuota: lease.ConsumedQuota, ExpiresAtUnixMilli: lease.ExpiresAtUnixMilli,
-		})
-	}
-	return states, nil
+func (s *edgeControlGormStore) BalanceState(ctx context.Context) (*model.EdgeLocalBalanceState, error) {
+	return model.GetEdgeLocalBalanceState(s.db.WithContext(ctx))
 }
 
 func (s *edgeControlGormStore) ApplySnapshot(ctx context.Context, snapshot model.EdgeLocalSnapshotProjectionData) error {
 	return model.ApplyEdgeLocalSnapshot(s.db.WithContext(ctx), snapshot)
+}
+
+func (s *edgeControlGormStore) ApplyBalance(ctx context.Context, control dto.EdgeNodeControlConfigV1, delta dto.EdgeBalanceDeltaV2, nowUnixMilli int64) error {
+	return model.ApplyEdgeLocalBalanceDelta(s.db.WithContext(ctx), control, delta, nowUnixMilli)
 }
 
 func (s *edgeControlGormStore) RefreshChannelRuntime(ctx context.Context) error {

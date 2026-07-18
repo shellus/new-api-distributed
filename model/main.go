@@ -1,6 +1,7 @@
 package model
 
 import (
+	"errors"
 	"fmt"
 	"log"
 	"net/url"
@@ -266,6 +267,9 @@ func migrateDB() error {
 	if err := prepareQuotaDataModelNameMigration(); err != nil {
 		return err
 	}
+	if err := migrateRemovedEdgeLeaseTables(); err != nil {
+		return err
+	}
 	// Migrate price_amount column from float/double to decimal for existing tables
 	migrateSubscriptionPlanPriceAmount()
 	// Migrate model_limits column from varchar to text for existing tables
@@ -312,8 +316,6 @@ func migrateDB() error {
 		&EdgeCompiledSnapshot{},
 		&EdgeCompiledSnapshotDataset{},
 		&EdgeCompiledSnapshotPage{},
-		&EdgeQuotaLease{},
-		&EdgeLeaseFunding{},
 		&EdgeSettlementBlock{},
 		&EdgeUsageEvent{},
 		&EdgeConsumeLogOutbox{},
@@ -339,6 +341,9 @@ func migrateDB() error {
 
 func migrateDBFast() error {
 	if err := prepareQuotaDataModelNameMigration(); err != nil {
+		return err
+	}
+	if err := migrateRemovedEdgeLeaseTables(); err != nil {
 		return err
 	}
 
@@ -386,8 +391,6 @@ func migrateDBFast() error {
 		{&EdgeCompiledSnapshot{}, "EdgeCompiledSnapshot"},
 		{&EdgeCompiledSnapshotDataset{}, "EdgeCompiledSnapshotDataset"},
 		{&EdgeCompiledSnapshotPage{}, "EdgeCompiledSnapshotPage"},
-		{&EdgeQuotaLease{}, "EdgeQuotaLease"},
-		{&EdgeLeaseFunding{}, "EdgeLeaseFunding"},
 		{&EdgeSettlementBlock{}, "EdgeSettlementBlock"},
 		{&EdgeUsageEvent{}, "EdgeUsageEvent"},
 		{&EdgeConsumeLogOutbox{}, "EdgeConsumeLogOutbox"},
@@ -428,6 +431,32 @@ func migrateDBFast() error {
 	}
 	common.SysLog("database migrated")
 	return nil
+}
+
+func migrateRemovedEdgeLeaseTables() error {
+	if DB == nil || !DB.Migrator().HasTable("edge_quota_leases") {
+		return nil
+	}
+	var live int64
+	if err := DB.Table("edge_quota_leases").
+		Where("status IN ?", []string{"active", "closing", "revoked"}).
+		Count(&live).Error; err != nil {
+		return fmt.Errorf("inspect active edge quota leases before balance migration: %w", err)
+	}
+	if live != 0 {
+		return errors.New("balance replication migration requires all master quota leases to be closed")
+	}
+	return DB.Transaction(func(tx *gorm.DB) error {
+		if tx.Migrator().HasTable("edge_lease_fundings") {
+			if err := tx.Migrator().DropTable("edge_lease_fundings"); err != nil {
+				return fmt.Errorf("drop edge lease fundings: %w", err)
+			}
+		}
+		if err := tx.Migrator().DropTable("edge_quota_leases"); err != nil {
+			return fmt.Errorf("drop edge quota leases: %w", err)
+		}
+		return nil
+	})
 }
 
 func migrateLOGDB() error {

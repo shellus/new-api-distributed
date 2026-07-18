@@ -115,20 +115,15 @@ func TestEdgeControlBootstrapRetriesPageWithStableIdempotencyAndCancelsCleanly(t
 	assert.Equal(t, []string{"", "p1"}, handler.userCursors)
 }
 
-func TestEdgeControlReadyFailsClosedAtSnapshotExpiry(t *testing.T) {
-	edgeControlSnapshotExpiry.Store(time.Now().Add(time.Minute).UnixMilli())
+func TestEdgeControlReadyDoesNotDependOnSnapshotExpiry(t *testing.T) {
 	edgeControlReady.Store(true)
 	t.Cleanup(func() {
 		edgeControlReady.Store(false)
-		edgeControlSnapshotExpiry.Store(0)
 	})
 	assert.True(t, EdgeControlReady())
-
-	edgeControlSnapshotExpiry.Store(time.Now().Add(-time.Millisecond).UnixMilli())
-	assert.False(t, EdgeControlReady())
 }
 
-func TestEdgeControlRestoresUnexpiredPersistedSnapshotOffline(t *testing.T) {
+func TestEdgeControlRestoresExpiredPersistedSnapshotOffline(t *testing.T) {
 	now := time.Now().UTC()
 	store := newEdgeControlTestStore()
 	store.state = dto.EdgeSnapshotStateV1{
@@ -138,12 +133,10 @@ func TestEdgeControlRestoresUnexpiredPersistedSnapshotOffline(t *testing.T) {
 	for _, dataset := range edgeSnapshotDatasetOrder {
 		store.state.Datasets = append(store.state.Datasets, dto.EdgeSnapshotDatasetStateV1{Dataset: dataset, Revision: 9})
 	}
-	store.expiresAt = now.Add(time.Minute).UnixMilli()
+	store.expiresAt = now.Add(-time.Minute).UnixMilli()
 	edgeControlReady.Store(false)
-	edgeControlSnapshotExpiry.Store(0)
 	t.Cleanup(func() {
 		edgeControlReady.Store(false)
-		edgeControlSnapshotExpiry.Store(0)
 	})
 
 	runner := edgeControlLoop{store: store, now: func() time.Time { return now }}
@@ -249,15 +242,12 @@ func TestEdgeSnapshotApplyFailsClosedWhenRoutingInstallFails(t *testing.T) {
 	store.routingInstallErr = errors.New("install routing policy")
 
 	edgeControlReady.Store(true)
-	edgeControlSnapshotExpiry.Store(fixture.now.Add(time.Minute).UnixMilli())
 	t.Cleanup(func() {
 		edgeControlReady.Store(false)
-		edgeControlSnapshotExpiry.Store(0)
 	})
 	setReady := func(ready bool) {
 		if !ready {
 			edgeControlReady.Store(false)
-			edgeControlSnapshotExpiry.Store(0)
 			return
 		}
 		edgeControlReady.Store(true)
@@ -281,16 +271,13 @@ func TestEdgeSnapshotApplyActivatesAfterRoutingInstall(t *testing.T) {
 	readyTransitions := make([]bool, 0, 2)
 
 	edgeControlReady.Store(true)
-	edgeControlSnapshotExpiry.Store(fixture.now.Add(time.Minute).UnixMilli())
 	t.Cleanup(func() {
 		edgeControlReady.Store(false)
-		edgeControlSnapshotExpiry.Store(0)
 	})
 	setReady := func(ready bool) {
 		readyTransitions = append(readyTransitions, ready)
 		if !ready {
 			edgeControlReady.Store(false)
-			edgeControlSnapshotExpiry.Store(0)
 			return
 		}
 		edgeControlReady.Store(true)
@@ -594,6 +581,16 @@ func (h *edgeControlTestHandler) ServeHTTP(writer http.ResponseWriter, request *
 		h.mu.Unlock()
 		h.writeJSON(writer, dto.EdgeHeartbeatResponseV1{
 			Meta: h.responseMeta(envelope.Meta.RequestID), Control: h.fixture.control,
+			BalanceDelta: func() *dto.EdgeBalanceDeltaV2 {
+				if heartbeatRequest.BalanceRevision != 0 {
+					return nil
+				}
+				return &dto.EdgeBalanceDeltaV2{
+					Dataset: dto.EdgeBalanceDatasetBalancesV2, BaseRevision: 0, Revision: 1, Full: true,
+					Wallets: []dto.EdgeWalletBalanceV2{{UserID: 7, RemainQuota: 1000}},
+					Tokens:  []dto.EdgeTokenBalanceV2{{TokenID: 11, UserID: 7, UnlimitedQuota: true}},
+				}
+			}(),
 		})
 	default:
 		h.fail(writer, fmt.Errorf("unexpected request path %s", request.URL.Path))
@@ -648,6 +645,7 @@ type edgeControlTestStore struct {
 	channelRefreshCount int
 	routingInstallCount int
 	routingInstallErr   error
+	balance             model.EdgeLocalBalanceState
 }
 
 func newEdgeControlTestStore() *edgeControlTestStore {
@@ -672,8 +670,11 @@ func (s *edgeControlTestStore) SettlementState(context.Context) (*dto.EdgeSettle
 	return &dto.EdgeSettlementStateV1{NextEventSequence: 1}, nil
 }
 
-func (s *edgeControlTestStore) LeaseRuntimeStates(context.Context) ([]dto.EdgeLeaseRuntimeStateV1, error) {
-	return nil, nil
+func (s *edgeControlTestStore) BalanceState(context.Context) (*model.EdgeLocalBalanceState, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	copy := s.balance
+	return &copy, nil
 }
 
 func (s *edgeControlTestStore) ApplySnapshot(_ context.Context, snapshot model.EdgeLocalSnapshotProjectionData) error {
@@ -682,6 +683,16 @@ func (s *edgeControlTestStore) ApplySnapshot(_ context.Context, snapshot model.E
 	s.state = snapshot.State
 	s.expiresAt = snapshot.ExpiresAtUnixMilli
 	s.applyCount++
+	return nil
+}
+
+func (s *edgeControlTestStore) ApplyBalance(_ context.Context, _ dto.EdgeNodeControlConfigV1, delta dto.EdgeBalanceDeltaV2, _ int64) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.balance = model.EdgeLocalBalanceState{
+		Revision: delta.Revision, Initialized: true,
+		SettlementSequence: delta.SettlementAppliedThroughSequence,
+	}
 	return nil
 }
 

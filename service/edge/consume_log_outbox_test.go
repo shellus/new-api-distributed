@@ -22,7 +22,7 @@ func TestPublishMasterConsumeLogOutboxSupportsSharedAndSeparateLogDB(t *testing.
 			name = "separate"
 		}
 		t.Run(name, func(t *testing.T) {
-			fixture := newMasterLeaseTestFixture(t, "consume-log-"+name, "wallet_only", 5_000, 5_000, 10_000)
+			fixture := newMasterSettlementTestFixture(t, "consume-log-"+name, 5_000, 5_000)
 			logDB := configureConsumeLogFixture(t, fixture, separateLogDB)
 
 			outbox := settleConsumeLogEventForTest(t, fixture)
@@ -68,7 +68,7 @@ func TestPublishMasterConsumeLogOutboxCrashRecoveryDoesNotDuplicateLog(t *testin
 			name = "separate"
 		}
 		t.Run(name, func(t *testing.T) {
-			fixture := newMasterLeaseTestFixture(t, "consume-log-crash-"+name, "wallet_only", 5_000, 5_000, 10_000)
+			fixture := newMasterSettlementTestFixture(t, "consume-log-crash-"+name, 5_000, 5_000)
 			logDB := configureConsumeLogFixture(t, fixture, separateLogDB)
 			settleConsumeLogEventForTest(t, fixture)
 
@@ -115,7 +115,7 @@ func TestPublishMasterConsumeLogOutboxCrashAfterLogWriteProjectsQuotaOnce(t *tes
 			name = "separate"
 		}
 		t.Run(name, func(t *testing.T) {
-			fixture := newMasterLeaseTestFixture(t, "consume-log-after-log-"+name, "wallet_only", 5_000, 5_000, 10_000)
+			fixture := newMasterSettlementTestFixture(t, "consume-log-after-log-"+name, 5_000, 5_000)
 			logDB := configureConsumeLogFixture(t, fixture, separateLogDB)
 			outbox := settleConsumeLogEventForTest(t, fixture)
 
@@ -163,7 +163,7 @@ func TestPublishMasterConsumeLogOutboxCrashAfterLogWriteProjectsQuotaOnce(t *tes
 }
 
 func TestPublishMasterConsumeLogOutboxUpgradesLegacyRawEventIdentity(t *testing.T) {
-	fixture := newMasterLeaseTestFixture(t, "consume-log-legacy", "wallet_only", 5_000, 5_000, 10_000)
+	fixture := newMasterSettlementTestFixture(t, "consume-log-legacy", 5_000, 5_000)
 	require.NoError(t, fixture.db.AutoMigrate(&model.Log{}))
 	configureConsumeLogTestDB(t, fixture.db)
 	outbox := settleConsumeLogEventForTest(t, fixture)
@@ -182,7 +182,7 @@ func TestPublishMasterConsumeLogOutboxUpgradesLegacyRawEventIdentity(t *testing.
 }
 
 func TestPublishMasterConsumeLogOutboxRejectsTamperedProjection(t *testing.T) {
-	fixture := newMasterLeaseTestFixture(t, "consume-log-tampered", "wallet_only", 5_000, 5_000, 10_000)
+	fixture := newMasterSettlementTestFixture(t, "consume-log-tampered", 5_000, 5_000)
 	require.NoError(t, fixture.db.AutoMigrate(&model.Log{}))
 	configureConsumeLogTestDB(t, fixture.db)
 	outbox := settleConsumeLogEventForTest(t, fixture)
@@ -231,7 +231,7 @@ func configureConsumeLogTestDB(t *testing.T, logDB *gorm.DB) {
 	})
 }
 
-func configureConsumeLogFixture(t *testing.T, fixture *masterLeaseTestFixture, separateLogDB bool) *gorm.DB {
+func configureConsumeLogFixture(t *testing.T, fixture *masterSettlementTestFixture, separateLogDB bool) *gorm.DB {
 	t.Helper()
 	logDB := fixture.db
 	if separateLogDB {
@@ -244,17 +244,10 @@ func configureConsumeLogFixture(t *testing.T, fixture *masterLeaseTestFixture, s
 	return logDB
 }
 
-func settleConsumeLogEventForTest(t *testing.T, fixture *masterLeaseTestFixture) model.EdgeConsumeLogOutbox {
+func settleConsumeLogEventForTest(t *testing.T, fixture *masterSettlementTestFixture) model.EdgeConsumeLogOutbox {
 	t.Helper()
-	lease := acquireMasterLeaseForTest(t, fixture, "consume-log-lease", 200, 200)
-	request := masterSettlementBlockForTest(t, fixture, lease, 1, 120)
-	require.NoError(t, fixture.db.Transaction(func(tx *gorm.DB) error {
-		_, err := SettleMasterUsageBlockTx(tx, fixture.identity, MasterSettlementCommand{
-			Request: request, IdempotencyKey: "consume-log-settlement", RequestHash: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-			Now: fixture.now.Add(time.Minute),
-		})
-		return err
-	}))
+	request := masterSettlementBlockForTest(t, fixture, 1, "wallet", 0, false)
+	settleMasterBlockForTest(t, fixture, request, "consume-log-settlement")
 	var outbox model.EdgeConsumeLogOutbox
 	require.NoError(t, fixture.db.First(&outbox).Error)
 	return outbox

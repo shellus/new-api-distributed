@@ -369,11 +369,15 @@ func TestEdgeControlV1ContractsRoundTripWithCommonJSON(t *testing.T) {
 	usageEvent := EdgeUsageEventV1{
 		EventID:             "event-test-9",
 		Sequence:            9,
-		LeaseID:             "lease-test-1",
 		ReservationID:       "reservation-test-9",
 		RequestID:           "relay-request-test-9",
 		UserID:              21,
 		TokenID:             11,
+		SnapshotID:          manifest.SnapshotID,
+		SnapshotRevision:    manifest.Revision,
+		PricingRevision:     4,
+		BalanceRevision:     2,
+		FundingSource:       "wallet",
 		ChannelID:           31,
 		Endpoint:            EdgeEndpointOpenAIResponsesV1,
 		Streaming:           true,
@@ -497,65 +501,6 @@ func TestEdgeControlV1ContractsRoundTripWithCommonJSON(t *testing.T) {
 			output: &EdgeSnapshotPageResponseV1{},
 		},
 		{
-			name: "lease acquire request",
-			input: &EdgeLeaseAcquireRequestV1{
-				Meta:                   edgeTestRequestMetaV1("request-lease"),
-				Subject:                EdgeLeaseSubjectV1{UserID: 21, TokenID: 11},
-				RequestedQuota:         10_000,
-				MinimumAcceptableQuota: 1_000,
-				ExistingLeaseID:        "lease-test-0",
-				SnapshotID:             manifest.SnapshotID,
-				SnapshotRevision:       manifest.Revision,
-			},
-			output: &EdgeLeaseAcquireRequestV1{},
-		},
-		{
-			name: "lease acquire response",
-			input: &EdgeLeaseAcquireResponseV1{
-				Meta: edgeTestResponseMetaV1("request-lease"),
-				Lease: EdgeQuotaLeaseV1{
-					LeaseID:                  "lease-test-1",
-					Version:                  2,
-					Status:                   EdgeLeaseStatusActiveV1,
-					NodeID:                   "node-test-1",
-					NodeGeneration:           3,
-					Subject:                  EdgeLeaseSubjectV1{UserID: 21, TokenID: 11},
-					GrantedQuota:             10_000,
-					RenewAfterRemainingQuota: 2_000,
-					IssuedAtUnixMilli:        1_700_000_000_100,
-					ExpiresAtUnixMilli:       1_700_003_600_100,
-					SnapshotID:               manifest.SnapshotID,
-					SnapshotRevision:         manifest.Revision,
-					PricingRevision:          4,
-				},
-			},
-			output: &EdgeLeaseAcquireResponseV1{},
-		},
-		{
-			name: "lease close request",
-			input: &EdgeLeaseCloseRequestV1{
-				Meta:               edgeTestRequestMetaV1("request-lease-close"),
-				LeaseID:            "lease-test-1",
-				LeaseVersion:       2,
-				FinalEventSequence: 10,
-			},
-			output: &EdgeLeaseCloseRequestV1{},
-		},
-		{
-			name: "lease close response",
-			input: &EdgeLeaseCloseResponseV1{
-				Meta:                    edgeTestResponseMetaV1("request-lease-close"),
-				LeaseID:                 "lease-test-1",
-				LeaseVersion:            3,
-				Status:                  EdgeLeaseStatusClosedV1,
-				GrantedQuota:            10_000,
-				AcceptedQuota:           100,
-				ReturnedQuota:           9_900,
-				CloseAfterEventSequence: 10,
-			},
-			output: &EdgeLeaseCloseResponseV1{},
-		},
-		{
 			name: "settlement block request",
 			input: &EdgeSettlementBlockRequestV1{
 				Meta:                edgeTestRequestMetaV1("request-settlement"),
@@ -585,17 +530,6 @@ func TestEdgeControlV1ContractsRoundTripWithCommonJSON(t *testing.T) {
 				Declaration: declaration,
 				Snapshot:    snapshotState,
 				Settlement:  settlementState,
-				Leases: []EdgeLeaseRuntimeStateV1{
-					{
-						LeaseID:            "lease-test-1",
-						Version:            2,
-						Status:             EdgeLeaseStatusActiveV1,
-						RemainingQuota:     9_880,
-						ReservedQuota:      20,
-						ConsumedQuota:      100,
-						ExpiresAtUnixMilli: 1_700_003_600_100,
-					},
-				},
 				Runtime: EdgeRuntimeStatusV1{
 					UptimeSeconds:      600,
 					InFlightRequests:   2,
@@ -665,10 +599,6 @@ func TestEdgeControlV1SchemaExcludesSecretsAndTransportAuthFields(t *testing.T) 
 		reflect.TypeOf(EdgeSnapshotManifestResponseV1{}),
 		reflect.TypeOf(EdgeSnapshotPageRequestV1{}),
 		reflect.TypeOf(EdgeSnapshotPageResponseV1{}),
-		reflect.TypeOf(EdgeLeaseAcquireRequestV1{}),
-		reflect.TypeOf(EdgeLeaseAcquireResponseV1{}),
-		reflect.TypeOf(EdgeLeaseCloseRequestV1{}),
-		reflect.TypeOf(EdgeLeaseCloseResponseV1{}),
 		reflect.TypeOf(EdgeSettlementBlockRequestV1{}),
 		reflect.TypeOf(EdgeSettlementBlockResponseV1{}),
 		reflect.TypeOf(EdgeHeartbeatRequestV1{}),
@@ -774,8 +704,6 @@ func TestEdgeControlV1ErrorCodesAreUnique(t *testing.T) {
 		EdgeControlErrorCodeIdempotencyConflictV1,
 		EdgeControlErrorCodeSnapshotNotFoundV1,
 		EdgeControlErrorCodeSnapshotCursorStaleV1,
-		EdgeControlErrorCodeLeaseUnavailableV1,
-		EdgeControlErrorCodeLeaseConflictV1,
 		EdgeControlErrorCodeSettlementOutOfOrderV1,
 		EdgeControlErrorCodeSettlementConflictV1,
 		EdgeControlErrorCodeRateLimitedV1,
@@ -805,24 +733,6 @@ func TestEdgeControlV1InitialEndpointBoundary(t *testing.T) {
 		{"endpoint":"openai_chat_completions","streaming":true},
 		{"endpoint":"openai_responses","streaming":true}
 	]`, string(encoded))
-}
-
-func TestEdgeControlV1LeaseStatuses(t *testing.T) {
-	statuses := []EdgeLeaseStatusV1{
-		EdgeLeaseStatusActiveV1,
-		EdgeLeaseStatusClosingV1,
-		EdgeLeaseStatusClosedV1,
-		EdgeLeaseStatusRevokedV1,
-		EdgeLeaseStatusForceClosedV1,
-	}
-
-	assert.Equal(t, []EdgeLeaseStatusV1{
-		"active",
-		"closing",
-		"closed",
-		"revoked",
-		"force_closed",
-	}, statuses)
 }
 
 func TestEdgeControlV1IdentifierLimit(t *testing.T) {
@@ -877,18 +787,6 @@ func edgeValidBootstrapRequestForValidationV1() EdgeBootstrapRequestV1 {
 	}
 }
 
-func edgeValidLeaseRuntimeForValidationV1() EdgeLeaseRuntimeStateV1 {
-	return EdgeLeaseRuntimeStateV1{
-		LeaseID:            "lease-1",
-		Version:            1,
-		Status:             EdgeLeaseStatusActiveV1,
-		RemainingQuota:     100,
-		ReservedQuota:      20,
-		ConsumedQuota:      80,
-		ExpiresAtUnixMilli: 1_700_003_600_000,
-	}
-}
-
 func edgeValidCPAStatusForValidationV1() EdgeCPAStatusV1 {
 	return EdgeCPAStatusV1{
 		LocalService:        EdgeLocalServiceCPAPro20x4V1,
@@ -905,7 +803,6 @@ func edgeValidHeartbeatRequestForValidationV1() EdgeHeartbeatRequestV1 {
 		Declaration: edgeValidDeclarationForValidationV1(),
 		Snapshot:    edgeValidSnapshotStateForValidationV1(),
 		Settlement:  edgeValidSettlementStateForValidationV1(),
-		Leases:      []EdgeLeaseRuntimeStateV1{edgeValidLeaseRuntimeForValidationV1()},
 		Runtime: EdgeRuntimeStatusV1{
 			UptimeSeconds:      60,
 			InFlightRequests:   1,
@@ -1055,8 +952,7 @@ func TestEdgeBootstrapRequestV1Validate(t *testing.T) {
 	}
 }
 
-func TestEdgeLeaseRuntimeAndCPAStatusV1Validate(t *testing.T) {
-	require.NoError(t, edgeValidLeaseRuntimeForValidationV1().Validate())
+func TestEdgeCPAStatusV1Validate(t *testing.T) {
 	require.NoError(t, edgeValidCPAStatusForValidationV1().Validate())
 	for _, service := range []EdgeLocalServiceV1{
 		EdgeLocalServiceCPAVIPV1,
@@ -1067,26 +963,6 @@ func TestEdgeLeaseRuntimeAndCPAStatusV1Validate(t *testing.T) {
 		status := edgeValidCPAStatusForValidationV1()
 		status.LocalService = service
 		assert.NoError(t, status.Validate())
-	}
-
-	leaseCases := []struct {
-		name   string
-		mutate func(*EdgeLeaseRuntimeStateV1)
-	}{
-		{name: "uppercase id", mutate: func(value *EdgeLeaseRuntimeStateV1) { value.LeaseID = "Lease-1" }},
-		{name: "zero version", mutate: func(value *EdgeLeaseRuntimeStateV1) { value.Version = 0 }},
-		{name: "unknown status", mutate: func(value *EdgeLeaseRuntimeStateV1) { value.Status = "expired" }},
-		{name: "negative remaining quota", mutate: func(value *EdgeLeaseRuntimeStateV1) { value.RemainingQuota = -1 }},
-		{name: "negative reserved quota", mutate: func(value *EdgeLeaseRuntimeStateV1) { value.ReservedQuota = -1 }},
-		{name: "negative consumed quota", mutate: func(value *EdgeLeaseRuntimeStateV1) { value.ConsumedQuota = -1 }},
-		{name: "zero expiry", mutate: func(value *EdgeLeaseRuntimeStateV1) { value.ExpiresAtUnixMilli = 0 }},
-	}
-	for _, tc := range leaseCases {
-		t.Run("lease "+tc.name, func(t *testing.T) {
-			value := edgeValidLeaseRuntimeForValidationV1()
-			tc.mutate(&value)
-			assert.Error(t, value.Validate())
-		})
 	}
 
 	cpaCases := []struct {
@@ -1121,10 +997,6 @@ func TestEdgeHeartbeatRequestV1Validate(t *testing.T) {
 		name   string
 		mutate func(*EdgeHeartbeatRequestV1)
 	}{
-		{name: "duplicate lease", mutate: func(value *EdgeHeartbeatRequestV1) { value.Leases = append(value.Leases, value.Leases[0]) }},
-		{name: "too many leases", mutate: func(value *EdgeHeartbeatRequestV1) {
-			value.Leases = make([]EdgeLeaseRuntimeStateV1, EdgeControlMaxHeartbeatLeasesV1+1)
-		}},
 		{name: "negative uptime", mutate: func(value *EdgeHeartbeatRequestV1) { value.Runtime.UptimeSeconds = -1 }},
 		{name: "negative in flight requests", mutate: func(value *EdgeHeartbeatRequestV1) { value.Runtime.InFlightRequests = -1 }},
 		{name: "negative recent request count", mutate: func(value *EdgeHeartbeatRequestV1) { value.Runtime.RecentRequestCount = -1 }},
@@ -1496,34 +1368,20 @@ func edgeValidSnapshotPageResponseV1(dataset EdgeSnapshotDatasetV1) EdgeSnapshot
 	return response
 }
 
-func edgeValidQuotaLeaseV1() EdgeQuotaLeaseV1 {
-	return EdgeQuotaLeaseV1{
-		LeaseID:                  "lease-validation-1",
-		Version:                  2,
-		Status:                   EdgeLeaseStatusActiveV1,
-		NodeID:                   "node-validation-1",
-		NodeGeneration:           3,
-		Subject:                  EdgeLeaseSubjectV1{UserID: 21, TokenID: 11},
-		GrantedQuota:             10_000,
-		RenewAfterRemainingQuota: 2_000,
-		IssuedAtUnixMilli:        1_700_000_000_100,
-		ExpiresAtUnixMilli:       1_700_003_600_100,
-		SnapshotID:               "snapshot-validation-7",
-		SnapshotRevision:         7,
-		PricingRevision:          4,
-	}
-}
-
 func edgeValidUsageEventV1() EdgeUsageEventV1 {
 	httpStatus := 200
 	return EdgeUsageEventV1{
 		EventID:             "event-validation-9",
 		Sequence:            9,
-		LeaseID:             "lease-validation-1",
 		ReservationID:       "reservation-validation-9",
 		RequestID:           "relay-request-validation-9",
 		UserID:              21,
 		TokenID:             11,
+		SnapshotID:          "snapshot-validation-7",
+		SnapshotRevision:    7,
+		PricingRevision:     4,
+		BalanceRevision:     2,
+		FundingSource:       "wallet",
 		ChannelID:           31,
 		Endpoint:            EdgeEndpointOpenAIResponsesV1,
 		Streaming:           true,
@@ -1877,83 +1735,6 @@ func TestEdgePricingPolicyV1ValidateAndDetectDynamicDependencies(t *testing.T) {
 	assert.False(t, EdgeBillingExpressionHasRequestOrTimeDependenciesV1(`tier("header( param( hour(", p)|||"weekday("`))
 }
 
-func TestEdgeLeaseContractsV1Validate(t *testing.T) {
-	request := EdgeLeaseAcquireRequestV1{
-		Meta:                   edgeTestRequestMetaV1("request-lease-validation"),
-		Subject:                EdgeLeaseSubjectV1{UserID: 21, TokenID: 11},
-		RequestedQuota:         10_000,
-		MinimumAcceptableQuota: 1_000,
-		ExistingLeaseID:        "lease-validation-0",
-		SnapshotID:             "snapshot-validation-7",
-		SnapshotRevision:       7,
-	}
-	require.NoError(t, request.Validate())
-	zeroRequest := request
-	zeroRequest.RequestedQuota = 0
-	zeroRequest.MinimumAcceptableQuota = 0
-	require.NoError(t, zeroRequest.Validate())
-	request.MinimumAcceptableQuota = request.RequestedQuota + 1
-	assert.Error(t, request.Validate())
-	request = EdgeLeaseAcquireRequestV1{
-		Meta:             edgeTestRequestMetaV1("request-lease-validation"),
-		Subject:          EdgeLeaseSubjectV1{UserID: 21, TokenID: 11},
-		RequestedQuota:   int64(common.MaxQuota) + 1,
-		SnapshotID:       "snapshot-validation-7",
-		SnapshotRevision: 7,
-	}
-	assert.Error(t, request.Validate())
-
-	lease := edgeValidQuotaLeaseV1()
-	require.NoError(t, lease.Validate())
-	zeroLease := lease
-	zeroLease.GrantedQuota = 0
-	zeroLease.RenewAfterRemainingQuota = 0
-	require.NoError(t, zeroLease.Validate())
-	lease.RenewAfterRemainingQuota = lease.GrantedQuota
-	assert.Error(t, lease.Validate())
-	lease = edgeValidQuotaLeaseV1()
-	lease.ExpiresAtUnixMilli = lease.IssuedAtUnixMilli
-	assert.Error(t, lease.Validate())
-	lease = edgeValidQuotaLeaseV1()
-	lease.PricingRevision = lease.SnapshotRevision + 1
-	assert.Error(t, lease.Validate())
-
-	acquireResponse := EdgeLeaseAcquireResponseV1{Meta: edgeTestResponseMetaV1("request-lease-validation"), Lease: edgeValidQuotaLeaseV1()}
-	require.NoError(t, acquireResponse.Validate())
-	acquireResponse.Lease.Status = EdgeLeaseStatusClosedV1
-	assert.Error(t, acquireResponse.Validate())
-
-	closeRequest := EdgeLeaseCloseRequestV1{
-		Meta:               edgeTestRequestMetaV1("request-lease-close-validation"),
-		LeaseID:            "lease-validation-1",
-		LeaseVersion:       2,
-		FinalEventSequence: 10,
-	}
-	require.NoError(t, closeRequest.Validate())
-	closeRequest.FinalEventSequence = -1
-	assert.Error(t, closeRequest.Validate())
-
-	closeResponse := EdgeLeaseCloseResponseV1{
-		Meta:                    edgeTestResponseMetaV1("request-lease-close-validation"),
-		LeaseID:                 "lease-validation-1",
-		LeaseVersion:            3,
-		Status:                  EdgeLeaseStatusClosedV1,
-		GrantedQuota:            10_000,
-		AcceptedQuota:           100,
-		ReturnedQuota:           9_900,
-		CloseAfterEventSequence: 10,
-	}
-	require.NoError(t, closeResponse.Validate())
-	closeResponse.ReturnedQuota++
-	assert.Error(t, closeResponse.Validate())
-	closeResponse.ReturnedQuota = 9_899
-	assert.Error(t, closeResponse.Validate())
-	closeResponse.Status = EdgeLeaseStatusClosingV1
-	require.NoError(t, closeResponse.Validate())
-	closeResponse.Status = EdgeLeaseStatusActiveV1
-	assert.Error(t, closeResponse.Validate())
-}
-
 func TestEdgeUsageBillingAndEventV1Validate(t *testing.T) {
 	event := edgeValidUsageEventV1()
 	require.NoError(t, event.Validate())
@@ -1974,7 +1755,7 @@ func TestEdgeUsageBillingAndEventV1Validate(t *testing.T) {
 		}},
 		{name: "bad expression hash", mutate: func(value *EdgeUsageBillingV1) { value.BillingExpressionHash = "bad" }},
 		{name: "quota over maximum", mutate: func(value *EdgeUsageBillingV1) { value.ReservedQuota = int64(common.MaxQuota) + 1 }},
-		{name: "charge exceeds reservation", mutate: func(value *EdgeUsageBillingV1) { value.ChargedQuota = value.ReservedQuota + 1 }},
+		{name: "charge over maximum", mutate: func(value *EdgeUsageBillingV1) { value.ChargedQuota = int64(common.MaxQuota) + 1 }},
 	}
 	for _, tc := range billingCases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1989,6 +1770,10 @@ func TestEdgeUsageBillingAndEventV1Validate(t *testing.T) {
 		mutate func(*EdgeUsageEventV1)
 	}{
 		{name: "zero sequence", mutate: func(value *EdgeUsageEventV1) { value.Sequence = 0 }},
+		{name: "missing snapshot", mutate: func(value *EdgeUsageEventV1) { value.SnapshotID = "" }},
+		{name: "invalid balance revision", mutate: func(value *EdgeUsageEventV1) { value.BalanceRevision = 0 }},
+		{name: "invalid funding source", mutate: func(value *EdgeUsageEventV1) { value.FundingSource = "lease" }},
+		{name: "wallet with subscription", mutate: func(value *EdgeUsageEventV1) { value.UserSubscriptionID = 9 }},
 		{name: "invalid endpoint", mutate: func(value *EdgeUsageEventV1) { value.Endpoint = "images" }},
 		{name: "finish before start", mutate: func(value *EdgeUsageEventV1) { value.FinishedAtUnixMilli = value.StartedAtUnixMilli - 1 }},
 		{name: "invalid outcome", mutate: func(value *EdgeUsageEventV1) { value.Outcome = "timeout" }},

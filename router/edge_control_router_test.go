@@ -18,8 +18,6 @@ func TestEdgeControlRoutesUseDedicatedNamespace(t *testing.T) {
 		http.MethodPost + " /control/v1/heartbeat":         false,
 		http.MethodPost + " /control/v1/snapshot/manifest": false,
 		http.MethodPost + " /control/v1/snapshot/page":     false,
-		http.MethodPost + " /control/v1/lease/acquire":     false,
-		http.MethodPost + " /control/v1/lease/close":       false,
 		http.MethodPost + " /control/v1/settlement/block":  false,
 	}
 	for _, route := range engine.Routes() {

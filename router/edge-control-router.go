@@ -17,8 +17,6 @@ func SetEdgeControlRouter(router *gin.Engine) {
 		control.POST("/heartbeat", controller.EdgeControlHeartbeat)
 		control.POST("/snapshot/manifest", controller.EdgeControlSnapshotManifest)
 		control.POST("/snapshot/page", controller.EdgeControlSnapshotPage)
-		control.POST("/lease/acquire", controller.EdgeControlLeaseAcquire)
-		control.POST("/lease/close", controller.EdgeControlLeaseClose)
 		control.POST("/settlement/block", controller.EdgeControlSettlementBlock)
 	}
 }

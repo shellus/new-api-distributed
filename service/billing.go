@@ -14,7 +14,7 @@ import (
 const (
 	BillingSourceWallet       = "wallet"
 	BillingSourceSubscription = "subscription"
-	BillingSourceEdgeLease    = "edge_lease"
+	BillingSourceEdgeBalance  = "edge_balance"
 )
 
 type EdgeBillingSessionFactory func(c *gin.Context, preConsumedQuota int, relayInfo *relaycommon.RelayInfo) (*BillingSession, *types.NewAPIError)
@@ -24,7 +24,7 @@ var (
 	edgeBillingSessionFactory   EdgeBillingSessionFactory
 )
 
-// SetEdgeBillingSessionFactory installs the edge-local lease funding adapter.
+// SetEdgeBillingSessionFactory installs the edge-local balance funding adapter.
 // The application sets it once before the edge HTTP server accepts requests.
 func SetEdgeBillingSessionFactory(factory EdgeBillingSessionFactory) {
 	edgeBillingSessionFactoryMu.Lock()
@@ -105,7 +105,7 @@ func SettleBilling(ctx *gin.Context, relayInfo *relaycommon.RelayInfo, actualQuo
 		// Edge settlement is backed by a local lease and the master remains the
 		// authoritative notification sender. Sending wallet/subscription alerts
 		// from an edge would use snapshot balances and could notify twice.
-		if actualQuota != 0 && relayInfo.BillingSource != BillingSourceEdgeLease {
+		if actualQuota != 0 && !common.IsEdgeMode() {
 			if relayInfo.BillingSource == BillingSourceSubscription {
 				checkAndSendSubscriptionQuotaNotify(relayInfo)
 			} else {

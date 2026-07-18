@@ -9,7 +9,8 @@ import (
 
 // TokenQuotaAccounting separates request billing from Token table mutation.
 // Master requests use the database implementation; edge requests pass the
-// no-op implementation because token quota was already reserved by the lease.
+// no-op implementation because their local funding adapter atomically reserves
+// both the funding account and finite token account.
 type TokenQuotaAccounting interface {
 	PreConsume(amount int) error
 	Reserve(delta int) error

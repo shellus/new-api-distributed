@@ -64,8 +64,6 @@ func TestMain(m *testing.M) {
 		&EdgeCompiledSnapshot{},
 		&EdgeCompiledSnapshotDataset{},
 		&EdgeCompiledSnapshotPage{},
-		&EdgeQuotaLease{},
-		&EdgeLeaseFunding{},
 		&EdgeSettlementBlock{},
 		&EdgeUsageEvent{},
 		&EdgeConsumeLogOutbox{},

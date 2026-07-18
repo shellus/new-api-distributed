@@ -25,7 +25,6 @@ type EdgeNodeHeartbeat struct {
 	InFlightRequests  int64  `json:"in_flight_requests" gorm:"type:bigint;not null"`
 	SnapshotPayload   string `json:"snapshot_payload" gorm:"type:text;not null"`
 	SettlementPayload string `json:"settlement_payload" gorm:"type:text;not null"`
-	LeasesPayload     string `json:"leases_payload" gorm:"type:text;not null"`
 	RuntimePayload    string `json:"runtime_payload" gorm:"type:text;not null"`
 	CPAPayload        string `json:"cpa_payload" gorm:"type:text;not null"`
 	ObservedAt        int64  `json:"observed_at" gorm:"type:bigint;not null;index"`
@@ -37,7 +36,6 @@ type EdgeNodeHeartbeatObservation struct {
 	Snapshot        dto.EdgeSnapshotStateV1
 	Settlement      dto.EdgeSettlementStateV1
 	BalanceRevision int64
-	Leases          []dto.EdgeLeaseRuntimeStateV1
 	Runtime         dto.EdgeRuntimeStatusV1
 	CPA             []dto.EdgeCPAStatusV1
 	ObservedAt      int64
@@ -62,11 +60,6 @@ func UpsertEdgeNodeHeartbeatTx(tx *gorm.DB, nodeID int64, generation int64, obse
 	if err := observation.Runtime.Validate(); err != nil {
 		return err
 	}
-	for i := range observation.Leases {
-		if err := observation.Leases[i].Validate(); err != nil {
-			return err
-		}
-	}
 	for i := range observation.CPA {
 		if err := observation.CPA[i].Validate(); err != nil {
 			return err
@@ -81,10 +74,6 @@ func UpsertEdgeNodeHeartbeatTx(tx *gorm.DB, nodeID int64, generation int64, obse
 		return err
 	}
 	settlementPayload, err := common.Marshal(observation.Settlement)
-	if err != nil {
-		return err
-	}
-	leasesPayload, err := common.Marshal(observation.Leases)
 	if err != nil {
 		return err
 	}
@@ -108,7 +97,6 @@ func UpsertEdgeNodeHeartbeatTx(tx *gorm.DB, nodeID int64, generation int64, obse
 		"in_flight_requests":  observation.Runtime.InFlightRequests,
 		"snapshot_payload":    string(snapshotPayload),
 		"settlement_payload":  string(settlementPayload),
-		"leases_payload":      string(leasesPayload),
 		"runtime_payload":     string(runtimePayload),
 		"cpa_payload":         string(cpaPayload),
 		"observed_at":         observation.ObservedAt,
@@ -132,7 +120,6 @@ func UpsertEdgeNodeHeartbeatTx(tx *gorm.DB, nodeID int64, generation int64, obse
 			InFlightRequests:  observation.Runtime.InFlightRequests,
 			SnapshotPayload:   string(snapshotPayload),
 			SettlementPayload: string(settlementPayload),
-			LeasesPayload:     string(leasesPayload),
 			RuntimePayload:    string(runtimePayload),
 			CPAPayload:        string(cpaPayload),
 			ObservedAt:        observation.ObservedAt,

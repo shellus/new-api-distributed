@@ -14,8 +14,6 @@ import (
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/dto"
-	"github.com/QuantumNous/new-api/pkg/edgeauth"
-
 	"github.com/glebarez/sqlite"
 	"gorm.io/gorm"
 )
@@ -26,13 +24,10 @@ const (
 )
 
 var (
-	ErrEdgeLocalLeaseUnavailable     = errors.New("edge local lease is unavailable")
-	ErrEdgeLocalLeaseExpired         = errors.New("edge local lease is expired")
-	ErrEdgeLocalSnapshotMismatch     = errors.New("edge local lease snapshot does not match the applied snapshot")
+	ErrEdgeLocalSnapshotMismatch     = errors.New("edge local balance state does not match the applied snapshot")
 	ErrEdgeLocalSnapshotStale        = errors.New("edge local snapshot revision is stale")
 	ErrEdgeLocalSnapshotConflict     = errors.New("edge local snapshot revision conflicts with applied state")
-	ErrEdgeLocalSnapshotExpired      = errors.New("edge local snapshot is expired")
-	ErrEdgeLocalQuotaInsufficient    = errors.New("edge local lease quota is insufficient")
+	ErrEdgeLocalQuotaInsufficient    = errors.New("edge local balance is insufficient")
 	ErrEdgeLocalReservationConflict  = errors.New("edge local reservation conflicts with existing state")
 	ErrEdgeLocalReservationFinalized = errors.New("edge local reservation is already finalized")
 	ErrEdgeLocalSettlementStaged     = errors.New("edge local reservation has a durable staged settlement")
@@ -54,6 +49,8 @@ var edgeLocalSnapshotDatasetOrder = [...]dto.EdgeSnapshotDatasetV1{
 
 type EdgeLocalControlState struct {
 	ID                         int    `gorm:"primaryKey;autoIncrement:false"`
+	NodeID                     string `gorm:"type:varchar(64);not null;default:''"`
+	NodeGeneration             int64  `gorm:"not null;default:0"`
 	SnapshotID                 string `gorm:"type:varchar(64);not null"`
 	SnapshotRevision           int64  `gorm:"not null"`
 	SnapshotDigest             string `gorm:"type:char(64);not null"`
@@ -66,6 +63,9 @@ type EdgeLocalControlState struct {
 	LastAckedSequence          int64  `gorm:"not null"`
 	LastAckedBlockID           string `gorm:"type:varchar(64);not null"`
 	LastAckedBlockDigest       string `gorm:"type:char(64);not null"`
+	BalanceRevision            int64  `gorm:"not null;default:0"`
+	BalanceInitialized         bool   `gorm:"not null;default:false"`
+	BalanceSettlementSequence  int64  `gorm:"not null;default:0"`
 	CreatedAtUnixMilli         int64  `gorm:"not null"`
 	UpdatedAtUnixMilli         int64  `gorm:"not null"`
 }
@@ -138,46 +138,32 @@ type EdgeLocalRoutingProjection struct {
 
 func (EdgeLocalRoutingProjection) TableName() string { return "edge_local_routing_projection" }
 
-type EdgeLocalQuotaLease struct {
-	LeaseID                  string                `gorm:"type:varchar(64);primaryKey;autoIncrement:false"`
-	Version                  int64                 `gorm:"not null"`
-	Status                   dto.EdgeLeaseStatusV1 `gorm:"type:varchar(32);not null;index"`
-	NodeID                   string                `gorm:"type:varchar(64);not null;index:idx_edge_local_lease_node,priority:1"`
-	NodeGeneration           int64                 `gorm:"not null;index:idx_edge_local_lease_node,priority:2"`
-	UserID                   int64                 `gorm:"not null;index:idx_edge_local_lease_subject,priority:1"`
-	TokenID                  int64                 `gorm:"not null;index:idx_edge_local_lease_subject,priority:2"`
-	GrantedQuota             int64                 `gorm:"not null"`
-	RemainingQuota           int64                 `gorm:"not null"`
-	ReservedQuota            int64                 `gorm:"not null"`
-	ConsumedQuota            int64                 `gorm:"not null"`
-	RenewAfterRemainingQuota int64                 `gorm:"not null"`
-	IssuedAtUnixMilli        int64                 `gorm:"not null"`
-	ExpiresAtUnixMilli       int64                 `gorm:"not null;index"`
-	SnapshotID               string                `gorm:"type:varchar(64);not null"`
-	SnapshotRevision         int64                 `gorm:"not null"`
-	PricingRevision          int64                 `gorm:"not null"`
-	CreatedAtUnixMilli       int64                 `gorm:"not null"`
-	UpdatedAtUnixMilli       int64                 `gorm:"not null"`
+type EdgeBalanceAccountType string
+
+const (
+	EdgeBalanceAccountTypeWallet       EdgeBalanceAccountType = "wallet"
+	EdgeBalanceAccountTypeToken        EdgeBalanceAccountType = "token"
+	EdgeBalanceAccountTypeSubscription EdgeBalanceAccountType = "subscription"
+)
+
+type EdgeLocalBalanceAccount struct {
+	AccountType          EdgeBalanceAccountType `gorm:"type:varchar(32);primaryKey;autoIncrement:false"`
+	AccountID            int64                  `gorm:"primaryKey;autoIncrement:false"`
+	UserID               int64                  `gorm:"not null;index"`
+	ReplicatedQuota      int64                  `gorm:"not null"`
+	UnlimitedQuota       bool                   `gorm:"not null"`
+	ReservedQuota        int64                  `gorm:"not null"`
+	UnsettledQuota       int64                  `gorm:"not null"`
+	TotalQuota           int64                  `gorm:"not null"`
+	NextResetAtUnixMilli int64                  `gorm:"not null"`
+	ExpiresAtUnixMilli   int64                  `gorm:"not null"`
+	AllowWalletOverflow  bool                   `gorm:"not null"`
+	Deleted              bool                   `gorm:"not null;index"`
+	BalanceRevision      int64                  `gorm:"not null;index"`
+	UpdatedAtUnixMilli   int64                  `gorm:"not null"`
 }
 
-func (EdgeLocalQuotaLease) TableName() string { return "edge_local_quota_leases" }
-
-// EdgeLocalLeaseAcquireIntent keeps the exact logical lease request durable
-// until the returned lease is installed. The composite primary key permits at
-// most one pending acquisition per user/token pair, so retries after a lost
-// response reuse the original request and idempotency key.
-type EdgeLocalLeaseAcquireIntent struct {
-	UserID             int64  `gorm:"primaryKey;autoIncrement:false"`
-	TokenID            int64  `gorm:"primaryKey;autoIncrement:false"`
-	RequestID          string `gorm:"type:varchar(64);not null;uniqueIndex"`
-	Payload            string `gorm:"type:text;not null"`
-	CreatedAtUnixMilli int64  `gorm:"not null"`
-	UpdatedAtUnixMilli int64  `gorm:"not null"`
-}
-
-func (EdgeLocalLeaseAcquireIntent) TableName() string {
-	return "edge_local_lease_acquire_intents"
-}
+func (EdgeLocalBalanceAccount) TableName() string { return "edge_local_balance_accounts" }
 
 type EdgeLocalReservationStatus string
 
@@ -190,9 +176,17 @@ const (
 type EdgeLocalQuotaReservation struct {
 	ReservationID        string                     `gorm:"type:varchar(64);primaryKey;autoIncrement:false"`
 	RequestID            string                     `gorm:"type:varchar(64);not null;uniqueIndex"`
-	LeaseID              string                     `gorm:"type:varchar(64);not null;index"`
 	UserID               int64                      `gorm:"not null;index"`
 	TokenID              int64                      `gorm:"not null;index"`
+	FundingAccountType   EdgeBalanceAccountType     `gorm:"type:varchar(32);not null;default:'';index"`
+	FundingAccountID     int64                      `gorm:"not null;default:0;index"`
+	TokenAccountID       int64                      `gorm:"not null;default:0"`
+	TokenUnlimitedQuota  bool                       `gorm:"not null;default:false"`
+	SnapshotID           string                     `gorm:"type:varchar(64);not null;default:''"`
+	SnapshotRevision     int64                      `gorm:"not null;default:0"`
+	PricingRevision      int64                      `gorm:"not null;default:0"`
+	BalanceRevision      int64                      `gorm:"not null;default:0"`
+	NegativeFloorQuota   int64                      `gorm:"not null;default:0"`
 	Status               EdgeLocalReservationStatus `gorm:"type:varchar(32);not null;index"`
 	ReservedQuota        int64                      `gorm:"not null"`
 	ChargedQuota         int64                      `gorm:"not null"`
@@ -211,7 +205,6 @@ func (EdgeLocalQuotaReservation) TableName() string { return "edge_local_quota_r
 type EdgeLocalUsageEvent struct {
 	EventID                 string `gorm:"type:varchar(64);primaryKey;autoIncrement:false"`
 	Sequence                int64  `gorm:"not null;uniqueIndex"`
-	LeaseID                 string `gorm:"type:varchar(64);not null;index"`
 	ReservationID           string `gorm:"type:varchar(64);not null;uniqueIndex"`
 	RequestID               string `gorm:"type:varchar(64);not null;uniqueIndex"`
 	Payload                 string `gorm:"type:text;not null"`
@@ -283,14 +276,6 @@ type EdgeLocalSnapshotProjectionData struct {
 	Channels           []dto.EdgeChannelProjectionV1
 	Pricing            []dto.EdgePricingPolicyV1
 	Routing            []dto.EdgeRoutingPolicyV1
-}
-
-type EdgeLocalReservationRequest struct {
-	ReservationID string
-	RequestID     string
-	LeaseID       string
-	Quota         int64
-	NowUnixMilli  int64
 }
 
 func InitEdgeDB() error {
@@ -417,8 +402,7 @@ func migrateEdgeLocalDB(db *gorm.DB) error {
 		&EdgeLocalChannelProjection{},
 		&EdgeLocalPricingProjection{},
 		&EdgeLocalRoutingProjection{},
-		&EdgeLocalQuotaLease{},
-		&EdgeLocalLeaseAcquireIntent{},
+		&EdgeLocalBalanceAccount{},
 		&EdgeLocalQuotaReservation{},
 		&EdgeLocalUsageEvent{},
 		&EdgeLocalOutbox{},
@@ -436,7 +420,136 @@ func migrateEdgeLocalDB(db *gorm.DB) error {
 	if err := db.Where("id = ?", edgeLocalControlStateID).FirstOrCreate(&state).Error; err != nil {
 		return fmt.Errorf("initialize edge local control state: %w", err)
 	}
+	if err := migrateEdgeLocalLeaseSchema(db); err != nil {
+		return err
+	}
 	return nil
+}
+
+func migrateEdgeLocalLeaseSchema(db *gorm.DB) error {
+	hasLeaseTable := db.Migrator().HasTable("edge_local_quota_leases")
+	hasIntentTable := db.Migrator().HasTable("edge_local_lease_acquire_intents")
+	hasReservationLeaseID := db.Migrator().HasColumn("edge_local_quota_reservations", "lease_id")
+	hasUsageLeaseID := db.Migrator().HasColumn("edge_local_usage_events", "lease_id")
+	if !hasLeaseTable && !hasIntentTable && !hasReservationLeaseID && !hasUsageLeaseID {
+		return nil
+	}
+
+	dirtyChecks := []struct {
+		table string
+		where string
+		args  []any
+		label string
+	}{
+		{table: "edge_local_quota_reservations", where: "status = ?", args: []any{EdgeLocalReservationStatusActive}, label: "active reservation"},
+		{table: "edge_local_quota_reservations", where: "staged_event_id <> '' OR staged_event_payload <> '' OR staged_at_unix_milli <> 0", label: "staged usage"},
+		{table: "edge_local_outbox", where: "status IN ?", args: []any{[]EdgeLocalOutboxStatus{EdgeLocalOutboxStatusPending, EdgeLocalOutboxStatusInBlock}}, label: "pending outbox"},
+		{table: "edge_local_settlement_blocks", where: "status = ?", args: []any{EdgeLocalSettlementBlockStatusPending}, label: "pending settlement block"},
+	}
+	for _, check := range dirtyChecks {
+		if !db.Migrator().HasTable(check.table) {
+			continue
+		}
+		var count int64
+		if err := db.Table(check.table).Where(check.where, check.args...).Count(&count).Error; err != nil {
+			return fmt.Errorf("inspect edge SQLite %s before balance migration: %w", check.label, err)
+		}
+		if count != 0 {
+			return fmt.Errorf("edge SQLite balance migration requires drained accounting: found %s", check.label)
+		}
+	}
+	if hasLeaseTable && db.Migrator().HasColumn("edge_local_quota_leases", "status") {
+		var count int64
+		if err := db.Table("edge_local_quota_leases").Where("status IN ?", []string{"active", "closing", "revoked"}).Count(&count).Error; err != nil {
+			return fmt.Errorf("inspect edge SQLite live leases before balance migration: %w", err)
+		}
+		if count != 0 {
+			return errors.New("edge SQLite balance migration requires all quota leases to be closed")
+		}
+	}
+
+	return db.Transaction(func(tx *gorm.DB) error {
+		if hasReservationLeaseID {
+			if err := rebuildEdgeLocalTableTx(tx, &EdgeLocalQuotaReservation{}, "edge_local_quota_reservations"); err != nil {
+				return fmt.Errorf("remove edge reservation lease_id: %w", err)
+			}
+		}
+		if hasUsageLeaseID {
+			if err := rebuildEdgeLocalTableTx(tx, &EdgeLocalUsageEvent{}, "edge_local_usage_events"); err != nil {
+				return fmt.Errorf("remove edge usage lease_id: %w", err)
+			}
+		}
+		if hasIntentTable {
+			if err := tx.Migrator().DropTable("edge_local_lease_acquire_intents"); err != nil {
+				return fmt.Errorf("drop edge lease acquire intents: %w", err)
+			}
+		}
+		if hasLeaseTable {
+			if err := tx.Migrator().DropTable("edge_local_quota_leases"); err != nil {
+				return fmt.Errorf("drop edge local quota leases: %w", err)
+			}
+		}
+		return tx.Model(&EdgeLocalControlState{}).Where("id = ?", edgeLocalControlStateID).
+			Update("balance_settlement_sequence", gorm.Expr("last_acked_sequence")).Error
+	})
+}
+
+func rebuildEdgeLocalTableTx(tx *gorm.DB, target any, tableName string) error {
+	temporaryName := tableName + "_balance_migration"
+	if tx.Migrator().HasTable(temporaryName) {
+		return fmt.Errorf("temporary migration table %s already exists", temporaryName)
+	}
+	type sqliteColumn struct {
+		Name string `gorm:"column:name"`
+	}
+	var legacyColumns []sqliteColumn
+	if err := tx.Raw("PRAGMA table_info(\"" + tableName + "\")").Scan(&legacyColumns).Error; err != nil {
+		return err
+	}
+	type sqliteIndex struct {
+		Name string `gorm:"column:name"`
+	}
+	var indexes []sqliteIndex
+	if err := tx.Raw("SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = ? AND name NOT LIKE 'sqlite_autoindex%'", tableName).
+		Scan(&indexes).Error; err != nil {
+		return err
+	}
+	for _, index := range indexes {
+		quotedIndex := "\"" + strings.ReplaceAll(index.Name, "\"", "\"\"") + "\""
+		if err := tx.Exec("DROP INDEX " + quotedIndex).Error; err != nil {
+			return err
+		}
+	}
+	if err := tx.Migrator().RenameTable(tableName, temporaryName); err != nil {
+		return err
+	}
+	if err := tx.AutoMigrate(target); err != nil {
+		return err
+	}
+	var targetColumns []sqliteColumn
+	if err := tx.Raw("PRAGMA table_info(\"" + tableName + "\")").Scan(&targetColumns).Error; err != nil {
+		return err
+	}
+	legacySet := make(map[string]struct{}, len(legacyColumns))
+	for _, column := range legacyColumns {
+		legacySet[column.Name] = struct{}{}
+	}
+	columns := make([]string, 0, len(targetColumns))
+	for _, column := range targetColumns {
+		if _, exists := legacySet[column.Name]; exists {
+			columns = append(columns, "\""+strings.ReplaceAll(column.Name, "\"", "\"\"")+"\"")
+		}
+	}
+	if len(columns) == 0 {
+		return fmt.Errorf("no shared columns found while rebuilding %s", tableName)
+	}
+	quotedTable := "\"" + strings.ReplaceAll(tableName, "\"", "\"\"") + "\""
+	quotedTemporary := "\"" + strings.ReplaceAll(temporaryName, "\"", "\"\"") + "\""
+	columnList := strings.Join(columns, ", ")
+	if err := tx.Exec("INSERT INTO " + quotedTable + " (" + columnList + ") SELECT " + columnList + " FROM " + quotedTemporary).Error; err != nil {
+		return err
+	}
+	return tx.Migrator().DropTable(temporaryName)
 }
 
 func ApplyEdgeLocalSnapshot(db *gorm.DB, snapshot EdgeLocalSnapshotProjectionData) error {
@@ -1079,249 +1192,6 @@ func GetEdgeLocalRouting(db *gorm.DB) (*dto.EdgeRoutingPolicyV1, error) {
 	return &result, nil
 }
 
-func InstallEdgeLocalLease(db *gorm.DB, lease dto.EdgeQuotaLeaseV1) error {
-	if db == nil || db.Dialector.Name() != "sqlite" {
-		return errors.New("edge lease installation requires SQLite")
-	}
-	if err := lease.Validate(); err != nil {
-		return err
-	}
-	now := time.Now().UnixMilli()
-	return db.Transaction(func(tx *gorm.DB) error {
-		return installEdgeLocalLeaseTx(tx, lease, now)
-	})
-}
-
-func installEdgeLocalLeaseTx(tx *gorm.DB, lease dto.EdgeQuotaLeaseV1, nowUnixMilli int64) error {
-	if tx == nil {
-		return errors.New("edge lease installation transaction is nil")
-	}
-	if nowUnixMilli <= 0 {
-		return errors.New("edge lease installation time must be positive")
-	}
-	var existing EdgeLocalQuotaLease
-	query := tx.Where("lease_id = ?", lease.LeaseID).Limit(1).Find(&existing)
-	if query.Error != nil {
-		return query.Error
-	}
-	if query.RowsAffected == 0 {
-		return tx.Create(&EdgeLocalQuotaLease{
-			LeaseID: lease.LeaseID, Version: lease.Version, Status: lease.Status,
-			NodeID: lease.NodeID, NodeGeneration: lease.NodeGeneration,
-			UserID: lease.Subject.UserID, TokenID: lease.Subject.TokenID,
-			GrantedQuota: lease.GrantedQuota, RemainingQuota: lease.GrantedQuota,
-			RenewAfterRemainingQuota: lease.RenewAfterRemainingQuota,
-			IssuedAtUnixMilli:        lease.IssuedAtUnixMilli, ExpiresAtUnixMilli: lease.ExpiresAtUnixMilli,
-			SnapshotID: lease.SnapshotID, SnapshotRevision: lease.SnapshotRevision,
-			PricingRevision:    lease.PricingRevision,
-			CreatedAtUnixMilli: nowUnixMilli, UpdatedAtUnixMilli: nowUnixMilli,
-		}).Error
-	}
-	if existing.NodeID != lease.NodeID || existing.NodeGeneration != lease.NodeGeneration ||
-		existing.UserID != lease.Subject.UserID || existing.TokenID != lease.Subject.TokenID ||
-		existing.SnapshotID != lease.SnapshotID || existing.SnapshotRevision != lease.SnapshotRevision ||
-		existing.PricingRevision != lease.PricingRevision {
-		return ErrEdgeLocalSettlementConflict
-	}
-	if lease.Version < existing.Version {
-		return ErrEdgeLocalSettlementConflict
-	}
-	if lease.Version == existing.Version {
-		if edgeLocalLeaseMatches(existing, lease) && validateEdgeLocalLeaseAccounting(existing) == nil {
-			return nil
-		}
-		return ErrEdgeLocalSettlementConflict
-	}
-	accounted := existing.ReservedQuota + existing.ConsumedQuota
-	if accounted < 0 || accounted > lease.GrantedQuota {
-		return ErrEdgeLocalQuotaInsufficient
-	}
-	if existing.Status != dto.EdgeLeaseStatusActiveV1 && lease.Status == dto.EdgeLeaseStatusActiveV1 {
-		return ErrEdgeLocalSettlementConflict
-	}
-	updates := map[string]any{
-		"version": lease.Version, "status": lease.Status,
-		"granted_quota": lease.GrantedQuota, "remaining_quota": lease.GrantedQuota - accounted,
-		"renew_after_remaining_quota": lease.RenewAfterRemainingQuota,
-		"issued_at_unix_milli":        lease.IssuedAtUnixMilli, "expires_at_unix_milli": lease.ExpiresAtUnixMilli,
-		"updated_at_unix_milli": nowUnixMilli,
-	}
-	return tx.Model(&EdgeLocalQuotaLease{}).Where("lease_id = ?", lease.LeaseID).Updates(updates).Error
-}
-
-// GetOrCreateEdgeLocalLeaseAcquireIntent persists the exact acquire request on
-// first use. If the same subject already has a pending intent, the durable
-// request is returned unchanged so a retry cannot accidentally reserve twice
-// under a new request ID.
-func GetOrCreateEdgeLocalLeaseAcquireIntent(
-	db *gorm.DB,
-	request dto.EdgeLeaseAcquireRequestV1,
-	nowUnixMilli int64,
-) (*dto.EdgeLeaseAcquireRequestV1, error) {
-	if db == nil || db.Dialector.Name() != "sqlite" {
-		return nil, errors.New("edge lease acquire intent requires SQLite")
-	}
-	if err := request.Validate(); err != nil {
-		return nil, err
-	}
-	if err := edgeauth.ValidateIdempotencyKey(request.Meta.RequestID); err != nil {
-		return nil, err
-	}
-	if nowUnixMilli <= 0 {
-		return nil, errors.New("edge lease acquire intent time must be positive")
-	}
-
-	var durable *dto.EdgeLeaseAcquireRequestV1
-	err := db.Transaction(func(tx *gorm.DB) error {
-		var existing EdgeLocalLeaseAcquireIntent
-		query := tx.Where("user_id = ? AND token_id = ?", request.Subject.UserID, request.Subject.TokenID).
-			Limit(1).Find(&existing)
-		if query.Error != nil {
-			return query.Error
-		}
-		if query.RowsAffected == 1 {
-			stored, err := decodeEdgeLocalLeaseAcquireIntent(existing)
-			if err != nil {
-				return err
-			}
-			durable = stored
-			return nil
-		}
-
-		payload, err := common.Marshal(request)
-		if err != nil {
-			return err
-		}
-		intent := EdgeLocalLeaseAcquireIntent{
-			UserID: request.Subject.UserID, TokenID: request.Subject.TokenID,
-			RequestID: request.Meta.RequestID, Payload: string(payload),
-			CreatedAtUnixMilli: nowUnixMilli, UpdatedAtUnixMilli: nowUnixMilli,
-		}
-		if err := tx.Create(&intent).Error; err != nil {
-			return err
-		}
-		copy := request
-		durable = &copy
-		return nil
-	})
-	if err != nil {
-		return nil, err
-	}
-	return durable, nil
-}
-
-// GetEdgeLocalLeaseAcquireIntent restores one pending request after restart.
-func GetEdgeLocalLeaseAcquireIntent(db *gorm.DB, userID, tokenID int64) (*dto.EdgeLeaseAcquireRequestV1, error) {
-	if db == nil || db.Dialector.Name() != "sqlite" {
-		return nil, errors.New("edge lease acquire intent query requires SQLite")
-	}
-	if userID <= 0 || tokenID <= 0 {
-		return nil, errors.New("edge lease acquire intent subject must be positive")
-	}
-	var stored EdgeLocalLeaseAcquireIntent
-	if err := db.Where("user_id = ? AND token_id = ?", userID, tokenID).First(&stored).Error; err != nil {
-		return nil, err
-	}
-	return decodeEdgeLocalLeaseAcquireIntent(stored)
-}
-
-func decodeEdgeLocalLeaseAcquireIntent(stored EdgeLocalLeaseAcquireIntent) (*dto.EdgeLeaseAcquireRequestV1, error) {
-	var request dto.EdgeLeaseAcquireRequestV1
-	if err := common.Unmarshal([]byte(stored.Payload), &request); err != nil {
-		return nil, err
-	}
-	if err := request.Validate(); err != nil {
-		return nil, ErrEdgeLocalAccountingCorruption
-	}
-	if err := edgeauth.ValidateIdempotencyKey(request.Meta.RequestID); err != nil {
-		return nil, ErrEdgeLocalAccountingCorruption
-	}
-	if request.Subject.UserID != stored.UserID || request.Subject.TokenID != stored.TokenID ||
-		request.Meta.RequestID != stored.RequestID {
-		return nil, ErrEdgeLocalAccountingCorruption
-	}
-	return &request, nil
-}
-
-// InstallEdgeLocalLeaseFromAcquireIntent atomically installs the successful
-// response and clears only its matching durable intent.
-func InstallEdgeLocalLeaseFromAcquireIntent(db *gorm.DB, requestID string, lease dto.EdgeQuotaLeaseV1) error {
-	if db == nil || db.Dialector.Name() != "sqlite" {
-		return errors.New("edge lease acquire completion requires SQLite")
-	}
-	if err := edgeauth.ValidateIdempotencyKey(requestID); err != nil {
-		return fmt.Errorf("lease acquire request ID: %w", err)
-	}
-	if err := lease.Validate(); err != nil {
-		return err
-	}
-	now := time.Now().UnixMilli()
-	return db.Transaction(func(tx *gorm.DB) error {
-		var intent EdgeLocalLeaseAcquireIntent
-		if err := tx.Where("request_id = ?", requestID).First(&intent).Error; err != nil {
-			return err
-		}
-		request, err := decodeEdgeLocalLeaseAcquireIntent(intent)
-		if err != nil {
-			return err
-		}
-		if request.Subject != lease.Subject || request.SnapshotID != lease.SnapshotID ||
-			request.SnapshotRevision != lease.SnapshotRevision {
-			return ErrEdgeLocalSettlementConflict
-		}
-		if lease.Status != dto.EdgeLeaseStatusActiveV1 || lease.GrantedQuota < request.MinimumAcceptableQuota ||
-			lease.GrantedQuota > request.RequestedQuota {
-			return ErrEdgeLocalSettlementConflict
-		}
-		if err := installEdgeLocalLeaseTx(tx, lease, now); err != nil {
-			return err
-		}
-		result := tx.Where("user_id = ? AND token_id = ? AND request_id = ?",
-			intent.UserID, intent.TokenID, intent.RequestID).Delete(&EdgeLocalLeaseAcquireIntent{})
-		if result.Error != nil {
-			return result.Error
-		}
-		if result.RowsAffected != 1 {
-			return ErrEdgeLocalSettlementConflict
-		}
-		return nil
-	})
-}
-
-// DiscardEdgeLocalLeaseAcquireIntent clears an exact request only after the
-// caller has received an authoritative rejection. Ambiguous transport errors
-// must retain the intent and retry it instead.
-func DiscardEdgeLocalLeaseAcquireIntent(db *gorm.DB, requestID string) error {
-	if db == nil || db.Dialector.Name() != "sqlite" {
-		return errors.New("edge lease acquire intent discard requires SQLite")
-	}
-	if err := edgeauth.ValidateIdempotencyKey(requestID); err != nil {
-		return err
-	}
-	return db.Where("request_id = ?", requestID).Delete(&EdgeLocalLeaseAcquireIntent{}).Error
-}
-
-func edgeLocalLeaseMatches(stored EdgeLocalQuotaLease, lease dto.EdgeQuotaLeaseV1) bool {
-	return stored.Version == lease.Version && stored.Status == lease.Status &&
-		stored.NodeID == lease.NodeID && stored.NodeGeneration == lease.NodeGeneration &&
-		stored.UserID == lease.Subject.UserID && stored.TokenID == lease.Subject.TokenID &&
-		stored.GrantedQuota == lease.GrantedQuota && stored.RenewAfterRemainingQuota == lease.RenewAfterRemainingQuota &&
-		stored.IssuedAtUnixMilli == lease.IssuedAtUnixMilli && stored.ExpiresAtUnixMilli == lease.ExpiresAtUnixMilli &&
-		stored.SnapshotID == lease.SnapshotID && stored.SnapshotRevision == lease.SnapshotRevision &&
-		stored.PricingRevision == lease.PricingRevision
-}
-
-func GetEdgeLocalLease(db *gorm.DB, leaseID string) (*EdgeLocalQuotaLease, error) {
-	var lease EdgeLocalQuotaLease
-	if err := db.Where("lease_id = ?", leaseID).First(&lease).Error; err != nil {
-		return nil, err
-	}
-	if err := validateEdgeLocalLeaseAccounting(lease); err != nil {
-		return nil, err
-	}
-	return &lease, nil
-}
-
 func GetEdgeLocalReservation(db *gorm.DB, reservationID string) (*EdgeLocalQuotaReservation, error) {
 	if err := validateEdgeLocalIdentifier(reservationID); err != nil {
 		return nil, err
@@ -1331,234 +1201,6 @@ func GetEdgeLocalReservation(db *gorm.DB, reservationID string) (*EdgeLocalQuota
 		return nil, err
 	}
 	return &reservation, nil
-}
-
-func validateEdgeLocalLeaseAccounting(lease EdgeLocalQuotaLease) error {
-	for _, quota := range []int64{lease.GrantedQuota, lease.RemainingQuota, lease.ReservedQuota, lease.ConsumedQuota} {
-		if quota < 0 || quota > int64(common.MaxQuota) {
-			return ErrEdgeLocalAccountingCorruption
-		}
-	}
-	if lease.RemainingQuota+lease.ReservedQuota+lease.ConsumedQuota != lease.GrantedQuota {
-		return ErrEdgeLocalAccountingCorruption
-	}
-	return nil
-}
-
-func FindEdgeLocalActiveLease(db *gorm.DB, userID, tokenID, nowUnixMilli int64) (*EdgeLocalQuotaLease, error) {
-	var lease EdgeLocalQuotaLease
-	err := db.Where("user_id = ? AND token_id = ? AND status = ? AND expires_at_unix_milli > ?",
-		userID, tokenID, dto.EdgeLeaseStatusActiveV1, nowUnixMilli).
-		Order("issued_at_unix_milli desc, lease_id asc").First(&lease).Error
-	if err != nil {
-		return nil, err
-	}
-	return &lease, nil
-}
-
-func ReserveEdgeLocalQuota(db *gorm.DB, request EdgeLocalReservationRequest) (*EdgeLocalQuotaReservation, error) {
-	if db == nil || db.Dialector.Name() != "sqlite" {
-		return nil, errors.New("edge local reservation requires SQLite")
-	}
-	if err := validateEdgeLocalIdentifier(request.ReservationID); err != nil {
-		return nil, fmt.Errorf("reservation ID: %w", err)
-	}
-	if err := validateEdgeLocalIdentifier(request.RequestID); err != nil {
-		return nil, fmt.Errorf("request ID: %w", err)
-	}
-	if err := validateEdgeLocalIdentifier(request.LeaseID); err != nil {
-		return nil, fmt.Errorf("lease ID: %w", err)
-	}
-	if err := validateEdgeLocalQuota(request.Quota, true); err != nil {
-		return nil, err
-	}
-	if request.NowUnixMilli <= 0 {
-		return nil, errors.New("reservation time must be positive")
-	}
-
-	var reservation *EdgeLocalQuotaReservation
-	err := db.Transaction(func(tx *gorm.DB) error {
-		var existing EdgeLocalQuotaReservation
-		query := tx.Where("reservation_id = ? OR request_id = ?", request.ReservationID, request.RequestID).Limit(1).Find(&existing)
-		if query.Error != nil {
-			return query.Error
-		}
-		if query.RowsAffected == 1 {
-			if existing.ReservationID == request.ReservationID && existing.RequestID == request.RequestID &&
-				existing.LeaseID == request.LeaseID && existing.ReservedQuota == request.Quota {
-				if existing.Status != EdgeLocalReservationStatusActive {
-					return ErrEdgeLocalReservationFinalized
-				}
-				reservation = &existing
-				return nil
-			}
-			return ErrEdgeLocalReservationConflict
-		}
-		var control EdgeLocalControlState
-		if err := tx.First(&control, edgeLocalControlStateID).Error; err != nil {
-			return err
-		}
-		if control.SnapshotExpiresAtUnixMilli <= request.NowUnixMilli {
-			return ErrEdgeLocalSnapshotExpired
-		}
-		var pricingDataset EdgeLocalDatasetState
-		if err := tx.Where("dataset = ?", dto.EdgeSnapshotDatasetPricingV1).First(&pricingDataset).Error; err != nil {
-			return ErrEdgeLocalSnapshotMismatch
-		}
-		result := tx.Model(&EdgeLocalQuotaLease{}).
-			Where("lease_id = ? AND status = ? AND expires_at_unix_milli > ? AND snapshot_id = ? AND snapshot_revision = ? AND pricing_revision = ? AND remaining_quota >= ?",
-				request.LeaseID, dto.EdgeLeaseStatusActiveV1, request.NowUnixMilli,
-				control.SnapshotID, control.SnapshotRevision, pricingDataset.Revision, request.Quota).
-			Updates(map[string]any{
-				"remaining_quota":       gorm.Expr("remaining_quota - ?", request.Quota),
-				"reserved_quota":        gorm.Expr("reserved_quota + ?", request.Quota),
-				"updated_at_unix_milli": request.NowUnixMilli,
-			})
-		if result.Error != nil {
-			return result.Error
-		}
-		if result.RowsAffected != 1 {
-			return diagnoseEdgeLocalLeaseReservation(tx, request.LeaseID, request.Quota, request.NowUnixMilli, control, pricingDataset.Revision)
-		}
-		var lease EdgeLocalQuotaLease
-		if err := tx.Where("lease_id = ?", request.LeaseID).First(&lease).Error; err != nil {
-			return err
-		}
-		created := &EdgeLocalQuotaReservation{
-			ReservationID: request.ReservationID, RequestID: request.RequestID, LeaseID: request.LeaseID,
-			UserID: lease.UserID, TokenID: lease.TokenID, Status: EdgeLocalReservationStatusActive,
-			ReservedQuota: request.Quota, CreatedAtUnixMilli: request.NowUnixMilli,
-			UpdatedAtUnixMilli: request.NowUnixMilli,
-		}
-		if err := tx.Create(created).Error; err != nil {
-			return err
-		}
-		reservation = created
-		return nil
-	})
-	if err != nil {
-		return nil, err
-	}
-	return reservation, nil
-}
-
-func diagnoseEdgeLocalLeaseReservation(tx *gorm.DB, leaseID string, quota, nowUnixMilli int64, control EdgeLocalControlState, pricingRevision int64) error {
-	var lease EdgeLocalQuotaLease
-	if err := tx.Where("lease_id = ?", leaseID).First(&lease).Error; err != nil {
-		if errors.Is(err, gorm.ErrRecordNotFound) {
-			return ErrEdgeLocalLeaseUnavailable
-		}
-		return err
-	}
-	if lease.Status != dto.EdgeLeaseStatusActiveV1 {
-		return ErrEdgeLocalLeaseUnavailable
-	}
-	if lease.ExpiresAtUnixMilli <= nowUnixMilli {
-		return ErrEdgeLocalLeaseExpired
-	}
-	if lease.SnapshotID != control.SnapshotID || lease.SnapshotRevision != control.SnapshotRevision || lease.PricingRevision != pricingRevision {
-		return ErrEdgeLocalSnapshotMismatch
-	}
-	if lease.RemainingQuota < quota {
-		return ErrEdgeLocalQuotaInsufficient
-	}
-	return ErrEdgeLocalLeaseUnavailable
-}
-
-func AdjustEdgeLocalReservation(db *gorm.DB, reservationID string, targetQuota, nowUnixMilli int64) (*EdgeLocalQuotaReservation, error) {
-	if db == nil || db.Dialector.Name() != "sqlite" {
-		return nil, errors.New("edge local reservation adjustment requires SQLite")
-	}
-	if err := validateEdgeLocalIdentifier(reservationID); err != nil {
-		return nil, err
-	}
-	if err := validateEdgeLocalQuota(targetQuota, true); err != nil {
-		return nil, err
-	}
-	if nowUnixMilli <= 0 {
-		return nil, errors.New("reservation adjustment time must be positive")
-	}
-	var adjusted *EdgeLocalQuotaReservation
-	err := db.Transaction(func(tx *gorm.DB) error {
-		var reservation EdgeLocalQuotaReservation
-		if err := tx.Where("reservation_id = ?", reservationID).First(&reservation).Error; err != nil {
-			return err
-		}
-		if reservation.Status != EdgeLocalReservationStatusActive {
-			return ErrEdgeLocalReservationFinalized
-		}
-		delta := targetQuota - reservation.ReservedQuota
-		if delta == 0 {
-			adjusted = &reservation
-			return nil
-		}
-		staged, err := edgeLocalReservationSettlementStaged(reservation)
-		if err != nil {
-			return err
-		}
-		if staged {
-			return ErrEdgeLocalSettlementStaged
-		}
-		if delta > 0 {
-			var control EdgeLocalControlState
-			if err := tx.First(&control, edgeLocalControlStateID).Error; err != nil {
-				return err
-			}
-			if control.SnapshotExpiresAtUnixMilli <= nowUnixMilli {
-				return ErrEdgeLocalSnapshotExpired
-			}
-			var pricingDataset EdgeLocalDatasetState
-			if err := tx.Where("dataset = ?", dto.EdgeSnapshotDatasetPricingV1).First(&pricingDataset).Error; err != nil {
-				return ErrEdgeLocalSnapshotMismatch
-			}
-			result := tx.Model(&EdgeLocalQuotaLease{}).
-				Where("lease_id = ? AND status = ? AND expires_at_unix_milli > ? AND snapshot_id = ? AND snapshot_revision = ? AND pricing_revision = ? AND remaining_quota >= ?",
-					reservation.LeaseID, dto.EdgeLeaseStatusActiveV1, nowUnixMilli,
-					control.SnapshotID, control.SnapshotRevision, pricingDataset.Revision, delta).
-				Updates(map[string]any{
-					"remaining_quota":       gorm.Expr("remaining_quota - ?", delta),
-					"reserved_quota":        gorm.Expr("reserved_quota + ?", delta),
-					"updated_at_unix_milli": nowUnixMilli,
-				})
-			if result.Error != nil {
-				return result.Error
-			}
-			if result.RowsAffected != 1 {
-				return diagnoseEdgeLocalLeaseReservation(tx, reservation.LeaseID, delta, nowUnixMilli, control, pricingDataset.Revision)
-			}
-		} else {
-			release := -delta
-			result := tx.Model(&EdgeLocalQuotaLease{}).
-				Where("lease_id = ? AND reserved_quota >= ?", reservation.LeaseID, release).
-				Updates(map[string]any{
-					"remaining_quota":       gorm.Expr("remaining_quota + ?", release),
-					"reserved_quota":        gorm.Expr("reserved_quota - ?", release),
-					"updated_at_unix_milli": nowUnixMilli,
-				})
-			if result.Error != nil {
-				return result.Error
-			}
-			if result.RowsAffected != 1 {
-				return ErrEdgeLocalAccountingCorruption
-			}
-		}
-		reservation.ReservedQuota = targetQuota
-		reservation.UpdatedAtUnixMilli = nowUnixMilli
-		result := tx.Model(&EdgeLocalQuotaReservation{}).Where("reservation_id = ? AND status = ?", reservationID, EdgeLocalReservationStatusActive).
-			Updates(map[string]any{"reserved_quota": targetQuota, "updated_at_unix_milli": nowUnixMilli})
-		if result.Error != nil {
-			return result.Error
-		}
-		if result.RowsAffected != 1 {
-			return ErrEdgeLocalReservationConflict
-		}
-		adjusted = &reservation
-		return nil
-	})
-	if err != nil {
-		return nil, err
-	}
-	return adjusted, nil
 }
 
 func RefundEdgeLocalReservation(db *gorm.DB, reservationID string, nowUnixMilli int64) error {
@@ -1592,20 +1234,10 @@ func RefundEdgeLocalReservation(db *gorm.DB, reservationID string, nowUnixMilli 
 		default:
 			return ErrEdgeLocalAccountingCorruption
 		}
-		result := tx.Model(&EdgeLocalQuotaLease{}).
-			Where("lease_id = ? AND reserved_quota >= ?", reservation.LeaseID, reservation.ReservedQuota).
-			Updates(map[string]any{
-				"remaining_quota":       gorm.Expr("remaining_quota + ?", reservation.ReservedQuota),
-				"reserved_quota":        gorm.Expr("reserved_quota - ?", reservation.ReservedQuota),
-				"updated_at_unix_milli": nowUnixMilli,
-			})
-		if result.Error != nil {
-			return result.Error
+		if err := refundEdgeLocalBalanceReservationTx(tx, reservation, nowUnixMilli); err != nil {
+			return err
 		}
-		if result.RowsAffected != 1 {
-			return ErrEdgeLocalAccountingCorruption
-		}
-		result = tx.Model(&EdgeLocalQuotaReservation{}).
+		result := tx.Model(&EdgeLocalQuotaReservation{}).
 			Where("reservation_id = ? AND status = ?", reservationID, EdgeLocalReservationStatusActive).
 			Updates(map[string]any{
 				"status": EdgeLocalReservationStatusRefunded, "updated_at_unix_milli": nowUnixMilli,

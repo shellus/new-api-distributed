@@ -344,24 +344,17 @@ func getRetryChannel(c *gin.Context, info *relaycommon.RelayInfo, retryParam *se
 }
 
 func validateEdgeRetrySnapshot(info *relaycommon.RelayInfo) error {
-	if info == nil || info.EdgeLeaseSnapshotID == "" || info.EdgeLeaseSnapshotRevision <= 0 || info.EdgeLeasePricingRevision <= 0 {
-		return errors.New("edge retry has no pinned lease snapshot")
+	if info == nil || info.EdgeSnapshotID == "" || info.EdgeSnapshotRevision <= 0 || info.EdgePricingRevision <= 0 {
+		return errors.New("edge retry has no pinned balance snapshot")
 	}
 	if model.DB == nil {
 		return errors.New("edge policy is not ready for retry")
-	}
-	expiresAt, err := model.GetEdgeLocalSnapshotExpiry(model.DB)
-	if err != nil {
-		return fmt.Errorf("load edge retry snapshot expiry: %w", err)
-	}
-	if expiresAt <= time.Now().UnixMilli() {
-		return errors.New("edge policy expired while the request was in flight; retry is denied")
 	}
 	state, err := model.GetEdgeLocalSnapshotState(model.DB)
 	if err != nil {
 		return fmt.Errorf("load edge retry snapshot: %w", err)
 	}
-	if state.SnapshotID != info.EdgeLeaseSnapshotID || state.Revision != info.EdgeLeaseSnapshotRevision {
+	if state.SnapshotID != info.EdgeSnapshotID || state.Revision != info.EdgeSnapshotRevision {
 		return errors.New("edge policy changed while the request was in flight; cross-snapshot retry is denied")
 	}
 	pricingRevision := int64(0)
@@ -371,7 +364,7 @@ func validateEdgeRetrySnapshot(info *relaycommon.RelayInfo) error {
 			break
 		}
 	}
-	if pricingRevision != info.EdgeLeasePricingRevision {
+	if pricingRevision != info.EdgePricingRevision {
 		return errors.New("edge pricing changed while the request was in flight; cross-snapshot retry is denied")
 	}
 	return nil

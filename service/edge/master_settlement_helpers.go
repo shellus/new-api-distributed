@@ -1,7 +1,6 @@
 package edge
 
 import (
-	"crypto/rand"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -16,28 +15,6 @@ import (
 	"github.com/shopspring/decimal"
 	"gorm.io/gorm"
 )
-
-func normalizeMasterLeasePolicy(policy MasterLeasePolicy) (MasterLeasePolicy, error) {
-	if policy.TTL == 0 {
-		policy.TTL = defaultMasterLeaseTTL
-	}
-	if policy.MaxLeaseQuota == 0 {
-		policy.MaxLeaseQuota = int64(common.MaxQuota)
-	}
-	if policy.RenewDivisor == 0 {
-		policy.RenewDivisor = defaultMasterLeaseRenewDivisor
-	}
-	if policy.TTL <= 0 || policy.TTL > maxMasterLeaseTTL {
-		return MasterLeasePolicy{}, errors.New("edge lease TTL is out of range")
-	}
-	if policy.MaxLeaseQuota <= 0 || policy.MaxLeaseQuota > int64(common.MaxQuota) {
-		return MasterLeasePolicy{}, errors.New("edge lease maximum quota is out of range")
-	}
-	if policy.RenewDivisor < 2 || policy.RenewDivisor > 1000 {
-		return MasterLeasePolicy{}, errors.New("edge lease renew divisor is out of range")
-	}
-	return policy, nil
-}
 
 func validateMasterRequestHash(value string) error {
 	value = strings.TrimSpace(value)
@@ -66,128 +43,6 @@ func lockMasterControlIdentityTx(tx *gorm.DB, identity *model.EdgeControlIdentit
 	return locked, nil
 }
 
-func edgeNodeOutstandingQuotaTx(tx *gorm.DB, nodeID int64, generation int64) (int64, error) {
-	var leases []model.EdgeQuotaLease
-	if err := tx.Where("node_id = ? AND node_generation = ? AND status IN ?", nodeID, generation,
-		[]model.EdgeQuotaLeaseStatus{
-			model.EdgeQuotaLeaseStatusActive,
-			model.EdgeQuotaLeaseStatusClosing,
-			model.EdgeQuotaLeaseStatusRevoked,
-		}).Find(&leases).Error; err != nil {
-		return 0, err
-	}
-	var outstanding int64
-	for i := range leases {
-		remaining := leases[i].RemainingQuota()
-		if remaining > 0 && outstanding > math.MaxInt64-remaining {
-			return 0, model.ErrEdgeLeaseQuotaCounterOverflow
-		}
-		outstanding += remaining
-	}
-	return outstanding, nil
-}
-
-func selectMasterLeaseFundingTx(tx *gorm.DB, user *model.User, desiredQuota int64, minimumQuota int64, now int64) (*selectedMasterLeaseFunding, error) {
-	if tx == nil || user == nil || desiredQuota <= 0 || minimumQuota <= 0 || desiredQuota < minimumQuota {
-		return nil, ErrMasterLeaseUnavailable
-	}
-	wallet := func() *selectedMasterLeaseFunding {
-		quota := desiredQuota
-		if int64(user.Quota) < quota {
-			quota = int64(user.Quota)
-		}
-		if quota < minimumQuota {
-			return nil
-		}
-		return &selectedMasterLeaseFunding{source: model.EdgeLeaseFundingSourceWallet, quota: quota}
-	}
-
-	var subscriptions []model.UserSubscription
-	subscriptionsLoaded := false
-	loadSubscriptions := func() error {
-		if subscriptionsLoaded {
-			return nil
-		}
-		var err error
-		subscriptions, err = model.LockEdgeLeaseSubscriptionsTx(tx, user.Id, now)
-		subscriptionsLoaded = true
-		return err
-	}
-	subscription := func() (*selectedMasterLeaseFunding, error) {
-		if err := loadSubscriptions(); err != nil {
-			return nil, err
-		}
-		var selected *selectedMasterLeaseFunding
-		for i := range subscriptions {
-			available := model.EdgeLeaseSubscriptionAvailableQuota(&subscriptions[i])
-			quota := desiredQuota
-			if available < quota {
-				quota = available
-			}
-			if quota >= minimumQuota && (selected == nil || quota > selected.quota) {
-				selected = &selectedMasterLeaseFunding{
-					source: model.EdgeLeaseFundingSourceSubscription, quota: quota, subscriptionID: subscriptions[i].Id,
-				}
-				if quota == desiredQuota {
-					break
-				}
-			}
-		}
-		return selected, nil
-	}
-
-	preference := common.NormalizeBillingPreference(user.GetSetting().BillingPreference)
-	switch preference {
-	case "wallet_only":
-		if selected := wallet(); selected != nil {
-			return selected, nil
-		}
-	case "subscription_only":
-		selected, err := subscription()
-		if err != nil {
-			return nil, err
-		}
-		if selected != nil {
-			return selected, nil
-		}
-	case "wallet_first":
-		if selected := wallet(); selected != nil {
-			return selected, nil
-		}
-		selected, err := subscription()
-		if err != nil {
-			return nil, err
-		}
-		if selected != nil {
-			return selected, nil
-		}
-	case "subscription_first":
-		selected, err := subscription()
-		if err != nil {
-			return nil, err
-		}
-		if selected != nil {
-			return selected, nil
-		}
-		allowWalletOverflow := len(subscriptions) == 0
-		if len(subscriptions) > 0 {
-			allowWalletOverflow = true
-			for i := range subscriptions {
-				if !subscriptions[i].AllowWalletOverflow {
-					allowWalletOverflow = false
-					break
-				}
-			}
-		}
-		if allowWalletOverflow {
-			if selected := wallet(); selected != nil {
-				return selected, nil
-			}
-		}
-	}
-	return nil, ErrMasterLeaseUnavailable
-}
-
 func loadMasterSnapshotPoliciesTx(tx *gorm.DB, snapshotID int64, includePricing bool) (*masterSnapshotPolicies, error) {
 	policies := &masterSnapshotPolicies{
 		authentication: make(map[int64]dto.EdgeTokenAuthRecordV1),
@@ -210,6 +65,13 @@ func loadMasterSnapshotPoliciesTx(tx *gorm.DB, snapshotID int64, includePricing 
 		)
 	}
 	for _, dataset := range datasets {
+		if dataset == dto.EdgeSnapshotDatasetPricingV1 {
+			var stored model.EdgeCompiledSnapshotDataset
+			if err := tx.Where("snapshot_id = ? AND dataset = ?", snapshotID, dataset).First(&stored).Error; err != nil {
+				return nil, err
+			}
+			policies.pricingRevision = stored.Revision
+		}
 		pages, err := model.GetEdgeCompiledSnapshotDatasetPagesTx(tx, snapshotID, dataset)
 		if err != nil {
 			return nil, err
@@ -275,61 +137,6 @@ func loadMasterSnapshotPoliciesTx(tx *gorm.DB, snapshotID int64, includePricing 
 	return policies, nil
 }
 
-func validateMasterLeaseSubject(user *model.User, token *model.Token, policies *masterSnapshotPolicies, now time.Time, allowDepletedQuota bool) error {
-	if user == nil || token == nil || policies == nil {
-		return ErrMasterLeaseUnavailable
-	}
-	if user.Status != common.UserStatusEnabled || token.Status != common.TokenStatusEnabled || token.UserId != user.Id {
-		return ErrMasterLeaseUnavailable
-	}
-	if token.ExpiredTime != -1 && token.ExpiredTime < now.Unix() {
-		return ErrMasterLeaseUnavailable
-	}
-	if !allowDepletedQuota && !token.UnlimitedQuota && token.RemainQuota <= 0 {
-		return ErrMasterLeaseUnavailable
-	}
-	auth, exists := policies.authentication[int64(token.Id)]
-	if !exists || !auth.Enabled || auth.UserID != int64(user.Id) {
-		return ErrMasterLeaseUnavailable
-	}
-	if auth.ExpiresAtUnixMilli != nil && now.UnixMilli() >= *auth.ExpiresAtUnixMilli {
-		return ErrMasterLeaseUnavailable
-	}
-	userPolicy, exists := policies.users[int64(user.Id)]
-	if !exists || !userPolicy.Enabled || userPolicy.DefaultGroup != user.Group {
-		return ErrMasterLeaseUnavailable
-	}
-	if auth.Group != token.Group {
-		return ErrMasterLeaseUnavailable
-	}
-	groupPolicy, exists := policies.groups[userPolicy.DefaultGroup]
-	if !exists {
-		return ErrMasterLeaseUnavailable
-	}
-	usable := false
-	for _, usingGroup := range groupPolicy.UsingGroups {
-		if !usingGroup.Enabled {
-			continue
-		}
-		if auth.Group == "" || auth.Group == usingGroup.Group {
-			usable = true
-			break
-		}
-	}
-	if !usable {
-		return ErrMasterLeaseUnavailable
-	}
-	return nil
-}
-
-func newMasterLeaseUID() (string, error) {
-	random := make([]byte, 16)
-	if _, err := rand.Read(random); err != nil {
-		return "", fmt.Errorf("generate edge lease ID: %w", err)
-	}
-	return "lease-" + hex.EncodeToString(random), nil
-}
-
 func findMasterSettlementReplayTx(tx *gorm.DB, node *model.EdgeNode, command MasterSettlementCommand) (*dto.EdgeSettlementAckV1, error) {
 	var byBlock model.EdgeSettlementBlock
 	query := tx.Where("node_id = ? AND node_generation = ? AND block_uid = ?", node.ID, node.Generation, command.Request.BlockID).
@@ -380,26 +187,19 @@ func validateMasterSettlementChainTx(tx *gorm.DB, node *model.EdgeNode, request 
 	return nil
 }
 
-func validateMasterSettlementLeaseEvent(lease *model.EdgeQuotaLease, event *dto.EdgeUsageEventV1) error {
-	if lease == nil || event == nil || lease.LeaseUID != event.LeaseID ||
-		int64(lease.UserID) != event.UserID || int64(lease.TokenID) != event.TokenID {
+func validateMasterSettlementSubject(policies *masterSnapshotPolicies, event *dto.EdgeUsageEventV1) error {
+	if policies == nil || event == nil {
 		return ErrMasterSettlementConflict
 	}
-	switch lease.Status {
-	case model.EdgeQuotaLeaseStatusActive:
-	case model.EdgeQuotaLeaseStatusClosing, model.EdgeQuotaLeaseStatusRevoked:
-		if lease.CloseAfterEventSequence == 0 || event.Sequence > lease.CloseAfterEventSequence {
-			return ErrMasterSettlementConflict
-		}
-	default:
+	auth, exists := policies.authentication[event.TokenID]
+	if !exists || !auth.Enabled || auth.UserID != event.UserID || auth.TokenID != event.TokenID {
 		return ErrMasterSettlementConflict
 	}
-	// The request starts before pre-consume. On the first request for a subject,
-	// pre-consume may synchronously acquire the lease, so the request timestamp
-	// can legitimately precede lease issuance. The upstream call cannot finish
-	// before the lease is issued because admission reserves quota first.
-	if event.FinishedAtUnixMilli < lease.IssuedAtUnixMilli || event.StartedAtUnixMilli > lease.ExpiresAtUnixMilli ||
-		event.Billing.ReservedQuota > lease.GrantedQuota {
+	user, exists := policies.users[event.UserID]
+	if !exists || !user.Enabled {
+		return ErrMasterSettlementConflict
+	}
+	if _, exists := policies.groups[user.DefaultGroup]; !exists {
 		return ErrMasterSettlementConflict
 	}
 	return nil
@@ -673,103 +473,4 @@ func masterUsageTokenTotals(usage *dto.Usage) (int, int) {
 		return 0, 0
 	}
 	return usage.PromptTokens, usage.CompletionTokens
-}
-
-func finalizeMasterClosableLeasesTx(tx *gorm.DB, node *model.EdgeNode, now time.Time) error {
-	var leases []model.EdgeQuotaLease
-	if err := tx.Where("node_id = ? AND node_generation = ? AND status IN ? AND close_after_event_sequence <= ?",
-		node.ID, node.Generation,
-		[]model.EdgeQuotaLeaseStatus{model.EdgeQuotaLeaseStatusClosing, model.EdgeQuotaLeaseStatusRevoked},
-		node.LastEventSeq,
-	).Order("id asc").Find(&leases).Error; err != nil {
-		return err
-	}
-	for i := range leases {
-		lease, err := model.LockEdgeQuotaLeaseByUIDTx(tx, node.ID, node.Generation, leases[i].LeaseUID)
-		if err != nil {
-			return err
-		}
-		if err := finalizeMasterLeaseTx(tx, lease, now, false); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-func finalizeMasterLeaseTx(tx *gorm.DB, lease *model.EdgeQuotaLease, now time.Time, force bool) error {
-	if lease == nil {
-		return errors.New("edge quota lease is nil")
-	}
-	if lease.Status.Terminal() {
-		return nil
-	}
-	if !force && lease.Status != model.EdgeQuotaLeaseStatusClosing && lease.Status != model.EdgeQuotaLeaseStatusRevoked {
-		return model.ErrInvalidEdgeQuotaLeaseTransition
-	}
-	funding, err := model.LockEdgeLeaseFundingTx(tx, lease.ID)
-	if err != nil {
-		return err
-	}
-	if funding.Source != lease.FundingSource || funding.UserID != lease.UserID ||
-		funding.ReservedQuota != lease.GrantedQuota || funding.ConsumedQuota != lease.ConsumedQuota ||
-		funding.Status != model.EdgeLeaseFundingStatusReserved {
-		return ErrMasterLeaseConflict
-	}
-	remaining := lease.RemainingQuota()
-	if force {
-		if err := model.AddEdgeLeaseForfeitureStatsTx(tx, lease.UserID, lease.TokenID, remaining, now.Unix()); err != nil {
-			return err
-		}
-		lease.ForfeitedQuota += remaining
-		funding.ForfeitedQuota += remaining
-		lease.Status = model.EdgeQuotaLeaseStatusForceClosed
-		funding.Status = model.EdgeLeaseFundingStatusForfeited
-	} else {
-		switch funding.Source {
-		case model.EdgeLeaseFundingSourceWallet:
-			if err := model.RefundEdgeLeaseWalletTx(tx, funding.UserID, remaining); err != nil {
-				return err
-			}
-		case model.EdgeLeaseFundingSourceSubscription:
-			if err := model.RefundEdgeLeaseSubscriptionTx(tx, funding.UserSubscriptionID, remaining); err != nil {
-				return err
-			}
-		default:
-			return model.ErrInvalidEdgeLeaseFundingSource
-		}
-		if err := model.RefundEdgeLeaseTokenTx(tx, lease.TokenID, remaining, lease.TokenUnlimited); err != nil {
-			return err
-		}
-		lease.ReturnedQuota += remaining
-		funding.ReturnedQuota += remaining
-		lease.Status = model.EdgeQuotaLeaseStatusClosed
-		funding.Status = model.EdgeLeaseFundingStatusReleased
-	}
-	lease.ClosedAtUnixMilli = now.UnixMilli()
-	lease.Version++
-	lease.UpdatedAt = now.Unix()
-	funding.UpdatedAt = now.Unix()
-	if err := tx.Save(funding).Error; err != nil {
-		return err
-	}
-	return tx.Save(lease).Error
-}
-
-func masterLeaseCloseResponse(lease *model.EdgeQuotaLease) *dto.EdgeLeaseCloseResponseV1 {
-	if lease == nil {
-		return &dto.EdgeLeaseCloseResponseV1{}
-	}
-	status := dto.EdgeLeaseStatusV1(lease.Status)
-	if lease.Status == model.EdgeQuotaLeaseStatusRevoked && !lease.Status.Terminal() {
-		status = dto.EdgeLeaseStatusClosingV1
-	}
-	accepted := lease.ConsumedQuota
-	if lease.Status == model.EdgeQuotaLeaseStatusForceClosed {
-		accepted += lease.ForfeitedQuota
-	}
-	return &dto.EdgeLeaseCloseResponseV1{
-		LeaseID: lease.LeaseUID, LeaseVersion: lease.Version, Status: status,
-		GrantedQuota: lease.GrantedQuota, AcceptedQuota: accepted, ReturnedQuota: lease.ReturnedQuota,
-		CloseAfterEventSequence: lease.CloseAfterEventSequence,
-	}
 }
