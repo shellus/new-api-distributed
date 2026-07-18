@@ -269,3 +269,7 @@ go build ./cmd/newapi-edge
 ## 回滚
 
 默认 master 入口必须始终能够在关闭分布式功能后按上游方式运行。当前 v1 回滚仍要求 edge 停止接收新请求、发送剩余 outbox 并关闭 lease。进入 v2 后，回滚必须先停止 admission、完成 staged recovery、上传并确认全部 settlement，再保存或迁移余额账本；master 未确认前不得删除 edge 本地状态。含 v2 余额消费的节点不能直接降级到已删除租约代码的 v1 edge。
+
+## 后续维护
+
+- master consume-log outbox 空轮询当前会让 GORM 每两秒记录一次预期内的 `record not found`。后续应把 `gorm.ErrRecordNotFound` 作为正常空闲结果处理并抑制对应数据库错误日志，同时保留真实查询错误和 worker 重试日志。

@@ -270,6 +270,9 @@ func migrateDB() error {
 	if err := migrateRemovedEdgeLeaseSchema(); err != nil {
 		return err
 	}
+	if err := migrateLegacyEdgeBalanceSchema(); err != nil {
+		return err
+	}
 	// Migrate price_amount column from float/double to decimal for existing tables
 	migrateSubscriptionPlanPriceAmount()
 	// Migrate model_limits column from varchar to text for existing tables
@@ -344,6 +347,9 @@ func migrateDBFast() error {
 		return err
 	}
 	if err := migrateRemovedEdgeLeaseSchema(); err != nil {
+		return err
+	}
+	if err := migrateLegacyEdgeBalanceSchema(); err != nil {
 		return err
 	}
 
@@ -475,6 +481,112 @@ func migrateRemovedEdgeLeaseSchema() error {
 		if tx.Migrator().HasTable(legacyNode) && tx.Migrator().HasColumn(legacyNode, "MaxOutstandingQuota") {
 			if err := tx.Migrator().DropColumn(legacyNode, "MaxOutstandingQuota"); err != nil {
 				return fmt.Errorf("drop edge node max outstanding quota: %w", err)
+			}
+		}
+		return nil
+	})
+}
+
+const legacyEdgeUsageFundingSource = "legacy_lease"
+
+type legacyEdgeNodeBalanceMigration struct {
+	SettlementCircuitOpen     *bool   `gorm:"column:settlement_circuit_open"`
+	SettlementCircuitOpenedAt *int64  `gorm:"column:settlement_circuit_opened_at;type:bigint"`
+	SettlementCircuitReason   *string `gorm:"column:settlement_circuit_reason;type:text"`
+	SettlementCircuitEpoch    *int64  `gorm:"column:settlement_circuit_epoch;type:bigint"`
+}
+
+func (legacyEdgeNodeBalanceMigration) TableName() string { return "edge_nodes" }
+
+type legacyEdgeHeartbeatBalanceMigration struct {
+	BalanceRevision *int64 `gorm:"column:balance_revision;type:bigint"`
+}
+
+func (legacyEdgeHeartbeatBalanceMigration) TableName() string { return "edge_node_heartbeats" }
+
+type legacyEdgeUsageBalanceMigration struct {
+	SnapshotID          *int64  `gorm:"column:snapshot_id;type:bigint"`
+	SnapshotRevision    *int64  `gorm:"column:snapshot_revision;type:bigint"`
+	PricingRevision     *int64  `gorm:"column:pricing_revision;type:bigint"`
+	BalanceRevision     *int64  `gorm:"column:balance_revision;type:bigint"`
+	FundingSource       *string `gorm:"column:funding_source;type:varchar(32)"`
+	UserSubscriptionID  *int64  `gorm:"column:user_subscription_id;type:bigint"`
+	TokenUnlimitedQuota *bool   `gorm:"column:token_unlimited_quota"`
+}
+
+func (legacyEdgeUsageBalanceMigration) TableName() string { return "edge_usage_events" }
+
+type legacyEdgeBalanceMigrationField struct {
+	name   string
+	column string
+	value  any
+}
+
+func migrateLegacyEdgeBalanceSchema() error {
+	if DB == nil {
+		return nil
+	}
+	return DB.Transaction(func(tx *gorm.DB) error {
+		legacyUsage := &legacyEdgeUsageBalanceMigration{}
+		if tx.Migrator().HasTable(legacyUsage) && tx.Migrator().HasColumn(legacyUsage, "lease_id") {
+			if tx.Migrator().HasTable("edge_consume_log_outboxes") {
+				var unpublished int64
+				if err := tx.Table("edge_consume_log_outboxes").Where("status <> ?", EdgeConsumeLogOutboxStatusPublished).Count(&unpublished).Error; err != nil {
+					return fmt.Errorf("inspect legacy edge consume log outboxes before balance migration: %w", err)
+				}
+				if unpublished != 0 {
+					return errors.New("balance replication migration requires all legacy edge consume log outboxes to be published")
+				}
+			}
+		}
+
+		migrations := []struct {
+			model  any
+			table  string
+			fields []legacyEdgeBalanceMigrationField
+		}{
+			{
+				model: &legacyEdgeNodeBalanceMigration{}, table: "edge_nodes",
+				fields: []legacyEdgeBalanceMigrationField{
+					{name: "SettlementCircuitOpen", column: "settlement_circuit_open", value: false},
+					{name: "SettlementCircuitOpenedAt", column: "settlement_circuit_opened_at", value: int64(0)},
+					{name: "SettlementCircuitReason", column: "settlement_circuit_reason", value: ""},
+					{name: "SettlementCircuitEpoch", column: "settlement_circuit_epoch", value: int64(0)},
+				},
+			},
+			{
+				model: &legacyEdgeHeartbeatBalanceMigration{}, table: "edge_node_heartbeats",
+				fields: []legacyEdgeBalanceMigrationField{
+					{name: "BalanceRevision", column: "balance_revision", value: int64(0)},
+				},
+			},
+			{
+				model: legacyUsage, table: "edge_usage_events",
+				fields: []legacyEdgeBalanceMigrationField{
+					{name: "SnapshotID", column: "snapshot_id", value: int64(0)},
+					{name: "SnapshotRevision", column: "snapshot_revision", value: int64(0)},
+					{name: "PricingRevision", column: "pricing_revision", value: int64(0)},
+					{name: "BalanceRevision", column: "balance_revision", value: int64(0)},
+					{name: "FundingSource", column: "funding_source", value: legacyEdgeUsageFundingSource},
+					{name: "UserSubscriptionID", column: "user_subscription_id", value: int64(0)},
+					{name: "TokenUnlimitedQuota", column: "token_unlimited_quota", value: false},
+				},
+			},
+		}
+
+		for _, migration := range migrations {
+			if !tx.Migrator().HasTable(migration.model) {
+				continue
+			}
+			for _, field := range migration.fields {
+				if !tx.Migrator().HasColumn(migration.model, field.name) {
+					if err := tx.Migrator().AddColumn(migration.model, field.name); err != nil {
+						return fmt.Errorf("add legacy edge balance column %s.%s: %w", migration.table, field.column, err)
+					}
+				}
+				if err := tx.Table(migration.table).Where(field.column+" IS NULL").Update(field.column, field.value).Error; err != nil {
+					return fmt.Errorf("backfill legacy edge balance column %s.%s: %w", migration.table, field.column, err)
+				}
 			}
 		}
 		return nil
