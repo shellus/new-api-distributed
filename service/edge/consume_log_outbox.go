@@ -10,8 +10,6 @@ import (
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/dto"
 	"github.com/QuantumNous/new-api/model"
-
-	"gorm.io/gorm"
 )
 
 const (
@@ -86,11 +84,11 @@ func PublishMasterConsumeLogOutboxBatch(ctx context.Context, now time.Time, batc
 			claimNow = time.Now()
 		}
 		claim, err := model.ClaimEdgeConsumeLogOutbox(ctx, claimNow, consumeLogOutboxClaimTTL)
-		if errors.Is(err, gorm.ErrRecordNotFound) {
-			break
-		}
 		if err != nil {
 			publishErrors = append(publishErrors, err)
+			break
+		}
+		if claim == nil {
 			break
 		}
 		processed++

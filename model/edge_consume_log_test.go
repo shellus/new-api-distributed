@@ -10,7 +10,6 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"gorm.io/gorm"
 )
 
 func TestEdgeConsumeLogBillingEventKeyScopesRawEventIDs(t *testing.T) {
@@ -68,6 +67,24 @@ func TestCreateEdgeConsumeLogOnceRejectsConflictingReplay(t *testing.T) {
 	assert.Equal(t, int64(1), count)
 }
 
+func TestClaimEdgeConsumeLogOutboxReturnsNilForEmptyQueue(t *testing.T) {
+	db, err := OpenEdgeSQLite(filepath.Join(t.TempDir(), "empty-master-outbox.db"))
+	require.NoError(t, err)
+	require.NoError(t, db.AutoMigrate(&EdgeConsumeLogOutbox{}))
+	previousDB := DB
+	DB = db
+	t.Cleanup(func() {
+		DB = previousDB
+		if sqlDB, sqlErr := db.DB(); sqlErr == nil {
+			_ = sqlDB.Close()
+		}
+	})
+
+	claim, err := ClaimEdgeConsumeLogOutbox(context.Background(), time.Now(), time.Second)
+	require.NoError(t, err)
+	assert.Nil(t, claim)
+}
+
 func TestClaimEdgeConsumeLogOutboxConcurrentCASAndFencing(t *testing.T) {
 	db, err := OpenEdgeSQLite(filepath.Join(t.TempDir(), "master-outbox.db"))
 	require.NoError(t, err)
@@ -101,7 +118,9 @@ func TestClaimEdgeConsumeLogOutboxConcurrentCASAndFencing(t *testing.T) {
 				errs <- claimErr
 				return
 			}
-			claims <- claim
+			if claim != nil {
+				claims <- claim
+			}
 		}()
 	}
 	wait.Wait()
@@ -114,7 +133,7 @@ func TestClaimEdgeConsumeLogOutboxConcurrentCASAndFencing(t *testing.T) {
 	}
 	assert.Len(t, claimed, 1)
 	for claimErr := range errs {
-		assert.True(t, errors.Is(claimErr, gorm.ErrRecordNotFound), claimErr)
+		require.NoError(t, claimErr)
 	}
 
 	first := claimed[0]

@@ -747,7 +747,7 @@ func (s *edgeControlTestStore) InstallRoutingPolicy(context.Context) error {
 }
 
 func (s *edgeControlTestStore) PendingSettlementBlock(context.Context) (*dto.EdgeSettlementBlockRequestV1, error) {
-	return nil, model.ErrEdgeLocalNoPendingUsageEvents
+	return nil, nil
 }
 
 func (s *edgeControlTestStore) BuildSettlementBlock(context.Context, dto.EdgeControlRequestMetaV1, string, int, int64, int64) (*dto.EdgeSettlementBlockRequestV1, error) {

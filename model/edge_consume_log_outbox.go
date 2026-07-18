@@ -13,9 +13,9 @@ var ErrEdgeConsumeLogOutboxClaimLost = errors.New("edge consume-log outbox claim
 const maxEdgeConsumeLogOutboxClaimAttempts = 16
 
 // ClaimEdgeConsumeLogOutbox leases one ready row using a compare-and-swap on
-// the existing status/attempt/available tuple. Keeping the lease in
-// AvailableAt avoids a separate process-local ownership flag and lets another
-// master recover the row after a publisher crash.
+// the existing status/attempt/available tuple. It returns nil, nil when no row
+// is ready. Keeping the lease in AvailableAt avoids a separate process-local
+// ownership flag and lets another master recover the row after a publisher crash.
 func ClaimEdgeConsumeLogOutbox(ctx context.Context, now time.Time, leaseDuration time.Duration) (*EdgeConsumeLogOutbox, error) {
 	if DB == nil {
 		return nil, errors.New("database is nil")
@@ -41,12 +41,15 @@ func ClaimEdgeConsumeLogOutbox(ctx context.Context, now time.Time, leaseDuration
 
 	for attempt := 0; attempt < maxEdgeConsumeLogOutboxClaimAttempts; attempt++ {
 		var candidate EdgeConsumeLogOutbox
-		err := db.Where("status IN ? AND available_at <= ?", []EdgeConsumeLogOutboxStatus{
+		query := db.Where("status IN ? AND available_at <= ?", []EdgeConsumeLogOutboxStatus{
 			EdgeConsumeLogOutboxStatusPending,
 			EdgeConsumeLogOutboxStatusFailed,
-		}, nowUnix).Order("id ASC").First(&candidate).Error
-		if err != nil {
-			return nil, err
+		}, nowUnix).Order("id ASC").Limit(1).Find(&candidate)
+		if query.Error != nil {
+			return nil, query.Error
+		}
+		if query.RowsAffected == 0 {
+			return nil, nil
 		}
 
 		result := db.Model(&EdgeConsumeLogOutbox{}).

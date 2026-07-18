@@ -49,6 +49,14 @@ func TestOpenEdgeSQLiteUsesDedicatedDurableSchema(t *testing.T) {
 	assert.False(t, rows.Next())
 }
 
+func TestGetEdgeLocalPendingSettlementBlockReturnsNilForEmptyQueue(t *testing.T) {
+	db := openEdgeLocalTestDB(t, "empty-settlement-queue.db")
+
+	block, err := GetEdgeLocalPendingSettlementBlock(db)
+	require.NoError(t, err)
+	assert.Nil(t, block)
+}
+
 func TestInitEdgeDBIgnoresMasterDSNAndDisablesSharedCaches(t *testing.T) {
 	previousDB := DB
 	previousLogDB := LOG_DB

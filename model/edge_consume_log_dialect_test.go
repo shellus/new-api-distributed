@@ -2,7 +2,6 @@ package model
 
 import (
 	"context"
-	"errors"
 	"os"
 	"sync"
 	"sync/atomic"
@@ -60,6 +59,9 @@ func TestEdgeConsumeLogSQLOutboxDialectIntegration(t *testing.T) {
 				LOG_DB = previousLogDB
 				common.SetDatabaseTypes(previousMainType, previousLogType)
 			})
+			emptyClaim, err := ClaimEdgeConsumeLogOutbox(context.Background(), time.Now(), time.Minute)
+			require.NoError(t, err)
+			assert.Nil(t, emptyClaim)
 
 			// All supported SQL databases must permit multiple ordinary logs with
 			// a NULL billing key while enforcing uniqueness for edge logs.
@@ -124,7 +126,9 @@ func TestEdgeConsumeLogSQLOutboxDialectIntegration(t *testing.T) {
 						claimErrors <- claimErr
 						return
 					}
-					claims <- claim
+					if claim != nil {
+						claims <- claim
+					}
 				}()
 			}
 			close(start)
@@ -137,7 +141,7 @@ func TestEdgeConsumeLogSQLOutboxDialectIntegration(t *testing.T) {
 			}
 			assert.Equal(t, 1, claimCount)
 			for claimErr := range claimErrors {
-				assert.True(t, errors.Is(claimErr, gorm.ErrRecordNotFound), claimErr)
+				require.NoError(t, claimErr)
 			}
 		})
 	}

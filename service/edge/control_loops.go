@@ -36,6 +36,7 @@ var (
 // EdgeControlLocalStore is the durable edge-local boundary used by the
 // control loop. Implementations must apply a complete snapshot atomically and
 // preserve the exact pending settlement request across retries and restarts.
+// PendingSettlementBlock returns nil, nil when no durable block exists yet.
 type EdgeControlLocalStore interface {
 	SnapshotState(context.Context) (*dto.EdgeSnapshotStateV1, error)
 	SnapshotExpiry(context.Context) (int64, error)
@@ -440,7 +441,13 @@ func (r *edgeControlLoop) flushSettlement(ctx context.Context, control dto.EdgeN
 	edgeSettlementUploadMu.Lock()
 	defer edgeSettlementUploadMu.Unlock()
 	block, err := r.store.PendingSettlementBlock(ctx)
-	if errors.Is(err, gorm.ErrRecordNotFound) {
+	if errors.Is(err, model.ErrEdgeLocalNoPendingUsageEvents) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if block == nil {
 		meta, metaErr := r.client.NewRequestMeta("settlement")
 		if metaErr != nil {
 			return metaErr

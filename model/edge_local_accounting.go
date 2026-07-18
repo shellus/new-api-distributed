@@ -627,13 +627,19 @@ func AcknowledgeEdgeLocalSettlementBlock(db *gorm.DB, ack dto.EdgeSettlementAckV
 	})
 }
 
+// GetEdgeLocalPendingSettlementBlock returns nil, nil when the queue is empty.
 func GetEdgeLocalPendingSettlementBlock(db *gorm.DB) (*dto.EdgeSettlementBlockRequestV1, error) {
 	if db == nil || db.Dialector.Name() != "sqlite" {
 		return nil, errors.New("edge local settlement query requires SQLite")
 	}
 	var block EdgeLocalSettlementBlock
-	if err := db.Where("status = ?", EdgeLocalSettlementBlockStatusPending).Order("first_sequence asc").First(&block).Error; err != nil {
-		return nil, err
+	result := db.Where("status = ?", EdgeLocalSettlementBlockStatusPending).
+		Order("first_sequence asc").Limit(1).Find(&block)
+	if result.Error != nil {
+		return nil, result.Error
+	}
+	if result.RowsAffected == 0 {
+		return nil, nil
 	}
 	var request dto.EdgeSettlementBlockRequestV1
 	if err := common.Unmarshal([]byte(block.Payload), &request); err != nil {

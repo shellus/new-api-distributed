@@ -8,7 +8,6 @@ import (
 	"github.com/QuantumNous/new-api/model"
 
 	"github.com/google/uuid"
-	"gorm.io/gorm"
 )
 
 // DrainEdgeControl uploads every durable usage event. Balance replication has
@@ -53,7 +52,10 @@ func flushAllEdgeSettlements(ctx context.Context, client *EdgeControlClient, max
 			return err
 		}
 		block, err := model.GetEdgeLocalPendingSettlementBlock(model.DB.WithContext(ctx))
-		if errors.Is(err, gorm.ErrRecordNotFound) {
+		if err != nil {
+			return err
+		}
+		if block == nil {
 			meta, metaErr := client.NewRequestMeta("settlement")
 			if metaErr != nil {
 				return metaErr
