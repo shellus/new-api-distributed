@@ -12,6 +12,14 @@ import (
 
 var ErrEdgeSettlementCounterOverflow = errors.New("edge settlement counter would overflow")
 
+type EdgeSettlementChargeResult struct {
+	SubscriptionID        int
+	SubscriptionPlanID    int
+	SubscriptionPlanTitle string
+	SubscriptionTotal     int64
+	SubscriptionUsed      int64
+}
+
 func ApplyEdgeSettlementChargeTx(
 	tx *gorm.DB,
 	userID int,
@@ -20,41 +28,51 @@ func ApplyEdgeSettlementChargeTx(
 	userSubscriptionID int,
 	tokenUnlimitedQuota bool,
 	quota int64,
-) error {
+) (*EdgeSettlementChargeResult, error) {
 	if tx == nil {
-		return errors.New("database is nil")
+		return nil, errors.New("database is nil")
 	}
 	if userID <= 0 || tokenID <= 0 || quota < 0 || quota > int64(common.MaxQuota) {
-		return errors.New("invalid edge settlement charge")
+		return nil, errors.New("invalid edge settlement charge")
 	}
 	var user User
 	if err := lockForUpdate(tx.Unscoped()).First(&user, userID).Error; err != nil {
-		return err
+		return nil, err
 	}
 	var token Token
 	if err := lockForUpdate(tx.Unscoped()).Where("id = ? AND user_id = ?", tokenID, userID).First(&token).Error; err != nil {
-		return err
+		return nil, err
 	}
 	if token.UnlimitedQuota != tokenUnlimitedQuota {
-		return errors.New("edge settlement token quota mode conflicts with authoritative state")
+		return nil, errors.New("edge settlement token quota mode conflicts with authoritative state")
 	}
+	result := &EdgeSettlementChargeResult{SubscriptionID: userSubscriptionID}
 	var subscription *UserSubscription
 	switch fundingSource {
 	case "wallet":
 		if userSubscriptionID != 0 {
-			return errors.New("wallet edge settlement contains a subscription ID")
+			return nil, errors.New("wallet edge settlement contains a subscription ID")
 		}
 	case "subscription":
 		if userSubscriptionID <= 0 {
-			return errors.New("subscription edge settlement is missing its subscription ID")
+			return nil, errors.New("subscription edge settlement is missing its subscription ID")
 		}
 		stored := &UserSubscription{}
 		if err := lockForUpdate(tx).Where("id = ? AND user_id = ?", userSubscriptionID, userID).First(stored).Error; err != nil {
-			return err
+			return nil, err
 		}
 		subscription = stored
+		result.SubscriptionPlanID = stored.PlanId
+		result.SubscriptionTotal = stored.AmountTotal
+		if stored.PlanId > 0 {
+			var plan SubscriptionPlan
+			if err := tx.Select("id", "title").First(&plan, stored.PlanId).Error; err != nil {
+				return nil, err
+			}
+			result.SubscriptionPlanTitle = plan.Title
+		}
 	default:
-		return errors.New("invalid edge settlement funding source")
+		return nil, errors.New("invalid edge settlement funding source")
 	}
 
 	if quota > 0 {
@@ -62,35 +80,38 @@ func ApplyEdgeSettlementChargeTx(
 		case "wallet":
 			updated, clamp := common.QuotaFromDecimalChecked(decimal.NewFromInt(int64(user.Quota)).Sub(decimal.NewFromInt(quota)))
 			if clamp != nil {
-				return clamp
+				return nil, clamp
 			}
 			user.Quota = updated
 			if err := tx.Unscoped().Save(&user).Error; err != nil {
-				return err
+				return nil, err
 			}
 		case "subscription":
 			updated, clamp := common.QuotaFromDecimalChecked(decimal.NewFromInt(subscription.AmountUsed).Add(decimal.NewFromInt(quota)))
 			if clamp != nil {
-				return clamp
+				return nil, clamp
 			}
 			subscription.AmountUsed = int64(updated)
 			subscription.UpdatedAt = common.GetTimestamp()
 			if err := tx.Save(subscription).Error; err != nil {
-				return err
+				return nil, err
 			}
 		}
 		if !tokenUnlimitedQuota {
 			updated, clamp := common.QuotaFromDecimalChecked(decimal.NewFromInt(int64(token.RemainQuota)).Sub(decimal.NewFromInt(quota)))
 			if clamp != nil {
-				return clamp
+				return nil, clamp
 			}
 			token.RemainQuota = updated
 			if err := tx.Unscoped().Save(&token).Error; err != nil {
-				return err
+				return nil, err
 			}
 		}
 	}
-	return nil
+	if subscription != nil {
+		result.SubscriptionUsed = subscription.AmountUsed
+	}
+	return result, nil
 }
 
 // AddEdgeSettlementStatsTx updates consumption statistics after authoritative

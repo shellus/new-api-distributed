@@ -86,10 +86,15 @@ master 负责维护：
 | `EDGE_NODE_SETTLEMENT_WINDOW_QUOTA` | `50000000`，范围 `1..common.MaxQuota` | 同一节点代次在任一事件时间窗口内允许受理的最大 charge |
 | `EDGE_CONSUME_LOG_OUTBOX_INTERVAL_SECONDS` | `2`，最小 `1` | master 投影消费日志 outbox 的轮询周期 |
 | `EDGE_CONSUME_LOG_OUTBOX_BATCH_SIZE` | `100`，范围 `1..1000` | 每轮消费日志 outbox 的最大处理量 |
+| `EDGE_CONSUME_LOG_SNAPSHOT_FIELDS_ENABLED` | `false` | 向 edge 快照下发消费日志一致性所需的 token 名称、IP 记录策略和特殊分组倍率标记；仅在全部 edge 已升级到支持这些可选字段的版本后启用 |
 
 `EDGE_SNAPSHOT_COMPILE_INTERVAL_SECONDS` 应明显短于 `EDGE_SNAPSHOT_TTL_SECONDS`，建议不超过 TTL 的一半，为编译失败重试和 edge 拉取预留时间。快照 TTL 仍限制新快照的发布和应用，但最后一份已经验证并应用的策略过期后只冻结策略变化，不再关闭数据面。
 
+`EDGE_CONSUME_LOG_SNAPSHOT_FIELDS_ENABLED` 用于 master-first 滚动升级。新版 master 首次部署时保持 `false`，随后升级全部 edge；确认 edge 健康且没有待上传结算区块后，再将变量设为 `true` 并重启 master，使下一份编译快照携带新增字段。旧版 edge 使用严格 JSON 解码，混合版本期间提前启用会使其拒绝新快照。
+
 控制面下发的心跳、轮询、分页、结算、circuit 和时钟参数会通过版本化 DTO 再次校验。超出协议范围的配置不会被 edge 静默接受。
+
+控制面连接失败、超时、EOF，以及 HTTP `408`、`425`、`429`、`5xx`（包括反向代理返回的非 JSON 错误页）属于暂时不可用。edge 保留活动控制客户端和最后一份已验证策略，按 bootstrap 或既有 heartbeat、snapshot、settlement 周期继续重试，master 恢复后无需重启 edge。TLS 身份校验、签名或摘要错误，2xx 成功响应的非 JSON/严格 DTO 错误，以及身份、代次和结算完整性冲突仍按 fail closed 处理并关闭 readiness。
 
 ## Edge 本地部署配置
 

@@ -403,25 +403,11 @@ func PostTextConsumeQuota(ctx *gin.Context, relayInfo *relaycommon.RelayInfo, us
 		model.UpdateUserUsedQuotaAndRequestCount(relayInfo.UserId, summary.Quota)
 		model.UpdateChannelUsedQuota(relayInfo.ChannelId, summary.Quota)
 	}
+	logSnapshot := buildTextConsumeLogSnapshot(ctx, relayInfo, summary, originUsage, billingUsage, extraContent, adminRejectReason, tieredBillingApplied, tieredResult)
+	relayInfo.EdgeConsumeLogSnapshot = logSnapshot
 
 	if common.IsEdgeMode() {
-		if originUsage != nil && originUsage.BillingUsage != nil {
-			relayInfo.SettlementUsage = dto.CloneBillingUsage(originUsage.BillingUsage)
-		} else {
-			settlementUsage := billingUsage
-			if settlementUsage == nil {
-				settlementUsage = &dto.Usage{
-					PromptTokens:     summary.PromptTokens,
-					CompletionTokens: summary.CompletionTokens,
-					TotalTokens:      summary.TotalTokens,
-				}
-			}
-			if strings.HasPrefix(relayInfo.RequestURLPath, "/v1/responses") {
-				relayInfo.SettlementUsage = dto.NewOpenAIResponsesBillingUsage(settlementUsage)
-			} else {
-				relayInfo.SettlementUsage = dto.NewOpenAIChatBillingUsage(settlementUsage)
-			}
-		}
+		relayInfo.SettlementUsage = buildEdgeTextSettlementUsage(relayInfo, originUsage, billingUsage, summary)
 	}
 
 	if err := SettleBilling(ctx, relayInfo, summary.Quota); err != nil {
@@ -431,107 +417,30 @@ func PostTextConsumeQuota(ctx *gin.Context, relayInfo *relaycommon.RelayInfo, us
 		return
 	}
 
-	logModel := summary.ModelName
-	if strings.HasPrefix(logModel, "gpt-4-gizmo") {
-		logModel = "gpt-4-gizmo-*"
-		extraContent = append(extraContent, fmt.Sprintf("模型 %s", summary.ModelName))
+	finalSnapshot, err := FinalizeTextConsumeLogSnapshot(logSnapshot, TextConsumeLogSettlementFactsFromRelayInfo(relayInfo))
+	if err != nil {
+		logger.LogError(ctx, "finalize text consume log snapshot: "+err.Error())
+		finalSnapshot = logSnapshot
 	}
-	if strings.HasPrefix(logModel, "gpt-4o-gizmo") {
-		logModel = "gpt-4o-gizmo-*"
-		extraContent = append(extraContent, fmt.Sprintf("模型 %s", summary.ModelName))
+	useTimeSeconds := 0
+	if finalSnapshot.UseTimeSeconds != nil {
+		useTimeSeconds = int(*finalSnapshot.UseTimeSeconds)
 	}
-
-	logContent := strings.Join(extraContent, ", ")
-	var other map[string]interface{}
-	if summary.IsClaudeUsageSemantic {
-		other = GenerateClaudeOtherInfo(ctx, relayInfo,
-			summary.ModelRatio, summary.GroupRatio, summary.CompletionRatio,
-			summary.CacheTokens, summary.CacheRatio,
-			summary.CacheCreationTokens, summary.CacheCreationRatio,
-			summary.CacheCreationTokens5m, summary.CacheCreationRatio5m,
-			summary.CacheCreationTokens1h, summary.CacheCreationRatio1h,
-			summary.ModelPrice, relayInfo.PriceData.GroupRatioInfo.GroupSpecialRatio)
-		other["usage_semantic"] = "anthropic"
-	} else {
-		other = GenerateTextOtherInfo(ctx, relayInfo, summary.ModelRatio, summary.GroupRatio, summary.CompletionRatio, summary.CacheTokens, summary.CacheRatio, summary.ModelPrice, relayInfo.PriceData.GroupRatioInfo.GroupSpecialRatio)
-	}
-	appendUsageBillingPathForLog(other, common.GetContextKeyBool(ctx, constant.ContextKeyLocalCountTokens), originUsage)
-	if adminRejectReason != "" {
-		other["reject_reason"] = adminRejectReason
-	}
-	if summary.ImageTokens != 0 {
-		other["image"] = true
-		other["image_ratio"] = summary.ImageRatio
-		other["image_output"] = summary.ImageTokens
-	}
-	if summary.WebSearchCallCount > 0 {
-		other["web_search"] = true
-		other["web_search_call_count"] = summary.WebSearchCallCount
-		other["web_search_price"] = summary.WebSearchPrice
-	} else if summary.ClaudeWebSearchCallCount > 0 {
-		other["web_search"] = true
-		other["web_search_call_count"] = summary.ClaudeWebSearchCallCount
-		other["web_search_price"] = summary.ClaudeWebSearchPrice
-	}
-	if summary.FileSearchCallCount > 0 {
-		other["file_search"] = true
-		other["file_search_call_count"] = summary.FileSearchCallCount
-		other["file_search_price"] = summary.FileSearchPrice
-	}
-	if summary.AudioInputPrice > 0 && summary.AudioTokens > 0 {
-		other["audio_input_seperate_price"] = true
-		other["audio_input_token_count"] = summary.AudioTokens
-		other["audio_input_price"] = summary.AudioInputPrice
-	}
-	if summary.ImageGenerationCallPrice > 0 {
-		other["image_generation_call"] = true
-		other["image_generation_call_price"] = summary.ImageGenerationCallPrice
-	}
-	if summary.CacheCreationTokens > 0 {
-		other["cache_creation_tokens"] = summary.CacheCreationTokens
-		other["cache_creation_ratio"] = summary.CacheCreationRatio
-	}
-	if summary.CacheCreationTokens5m > 0 {
-		other["cache_creation_tokens_5m"] = summary.CacheCreationTokens5m
-		other["cache_creation_ratio_5m"] = summary.CacheCreationRatio5m
-	}
-	if summary.CacheCreationTokens1h > 0 {
-		other["cache_creation_tokens_1h"] = summary.CacheCreationTokens1h
-		other["cache_creation_ratio_1h"] = summary.CacheCreationRatio1h
-	}
-	cacheWriteTokens := cacheWriteTokensTotal(summary)
-	if cacheWriteTokens > 0 {
-		// cache_write_tokens: normalized cache creation total for UI display.
-		// If split 5m/1h values are present, this is their sum; otherwise it falls back
-		// to cache_creation_tokens.
-		other["cache_write_tokens"] = cacheWriteTokens
-	}
-	if relayInfo.GetFinalRequestRelayFormat() != types.RelayFormatClaude && billingUsage != nil && billingUsage.UsageSource != "" && billingUsage.InputTokens > 0 {
-		// input_tokens_total: explicit normalized total input used by the usage log UI.
-		// Only write this field when upstream/current conversion has already provided a
-		// reliable total input value and tagged the usage source. Do not infer it from
-		// prompt/cache fields here, otherwise old upstream payloads may be double-counted.
-		other["input_tokens_total"] = billingUsage.InputTokens
-	}
-	if tieredBillingApplied {
-		InjectTieredBillingInfo(other, relayInfo, tieredResult)
-	}
-
-	attachQuotaSaturation(ctx, relayInfo, other)
 
 	model.RecordConsumeLog(ctx, relayInfo.UserId, model.RecordConsumeLogParams{
 		ChannelId:        relayInfo.ChannelId,
 		PromptTokens:     summary.PromptTokens,
 		CompletionTokens: summary.CompletionTokens,
-		ModelName:        logModel,
-		TokenName:        summary.TokenName,
+		ModelName:        finalSnapshot.ModelName,
+		TokenName:        finalSnapshot.TokenName,
 		Quota:            summary.Quota,
-		Content:          logContent,
+		Content:          finalSnapshot.Content,
 		TokenId:          relayInfo.TokenId,
-		UseTimeSeconds:   int(summary.UseTimeSeconds),
+		UseTimeSeconds:   useTimeSeconds,
 		IsStream:         relayInfo.IsStream,
 		Group:            relayInfo.UsingGroup,
-		Other:            other,
+		Other:            finalSnapshot.Other,
+		RequestSnapshot:  finalSnapshot,
 	})
 	gopool.Go(func() {
 		perfmetrics.RecordRelaySample(relayInfo, true, int64(summary.CompletionTokens))

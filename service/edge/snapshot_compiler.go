@@ -106,14 +106,17 @@ type edgeSnapshotProjection struct {
 }
 
 type edgeSnapshotPricingInput struct {
-	Mode               string
-	Expression         string
-	ModelPrice         *float64
-	ModelRatio         *float64
-	CompletionRatio    *float64
-	CacheReadRatio     *float64
-	CacheCreationRatio *float64
-	QuotaPerUnit       float64
+	Mode                           string
+	Expression                     string
+	ModelPrice                     *float64
+	ModelRatio                     *float64
+	CompletionRatio                *float64
+	CacheReadRatio                 *float64
+	CacheCreationRatio             *float64
+	ImageRatioConfigured           bool
+	AudioRatioConfigured           bool
+	AudioCompletionRatioConfigured bool
+	QuotaPerUnit                   float64
 }
 
 type edgeSnapshotPageBuild struct {
@@ -357,6 +360,7 @@ func projectEdgeSnapshotDatabaseState(state *edgeSnapshotDatabaseState) (*edgeSn
 		return nil, errors.New("edge snapshot database state is nil")
 	}
 	projection := &edgeSnapshotProjection{}
+	consumeLogSnapshotFieldsEnabled := edgeConsumeLogSnapshotFieldsEnabled()
 
 	usersByID := make(map[int]model.User, len(state.Users))
 	for i := range state.Users {
@@ -414,6 +418,9 @@ func projectEdgeSnapshotDatabaseState(state *edgeSnapshotDatabaseState) (*edgeSn
 			AllowedCIDRs:      allowedCIDRs,
 			CrossGroupRetry:   token.CrossGroupRetry,
 		}
+		if consumeLogSnapshotFieldsEnabled {
+			record.TokenName = token.Name
+		}
 		if token.ExpiredTime != -1 {
 			if token.ExpiredTime > math.MaxInt64/1000-1 {
 				return nil, fmt.Errorf("token %d expiry overflows Unix milliseconds", token.Id)
@@ -438,16 +445,20 @@ func projectEdgeSnapshotDatabaseState(state *edgeSnapshotDatabaseState) (*edgeSn
 				return nil, fmt.Errorf("user %d setting: %w", user.Id, err)
 			}
 		}
+		setting := dto.EdgeUserSettingV1{
+			AcceptUnsetRatioModel: userSetting.AcceptUnsetRatioModel,
+			Language:              strings.ToLower(strings.TrimSpace(userSetting.Language)),
+			BillingPreference:     common.NormalizeBillingPreference(userSetting.BillingPreference),
+		}
+		if consumeLogSnapshotFieldsEnabled {
+			setting.RecordIpLog = userSetting.RecordIpLog
+		}
 		projection.Users = append(projection.Users, dto.EdgeUserPolicyV1{
 			UserID:       int64(user.Id),
 			Enabled:      true,
 			Username:     user.Username,
 			DefaultGroup: user.Group,
-			Setting: dto.EdgeUserSettingV1{
-				AcceptUnsetRatioModel: userSetting.AcceptUnsetRatioModel,
-				Language:              strings.ToLower(strings.TrimSpace(userSetting.Language)),
-				BillingPreference:     common.NormalizeBillingPreference(userSetting.BillingPreference),
-			},
+			Setting:      setting,
 		})
 	}
 	sort.Slice(projection.Users, func(i, j int) bool { return projection.Users[i].UserID < projection.Users[j].UserID })
@@ -719,9 +730,10 @@ func captureEdgeSnapshotSettings(projection *edgeSnapshotProjection) error {
 				ratio = coreservice.GetUserGroupRatio(userGroup, usingGroup)
 			}
 			policy.UsingGroups = append(policy.UsingGroups, dto.EdgeUsingGroupPolicyV1{
-				Group:   usingGroup,
-				Enabled: true,
-				Ratio:   ratio,
+				Group:        usingGroup,
+				Enabled:      true,
+				Ratio:        ratio,
+				SpecialRatio: hasSpecialRatio && edgeConsumeLogSnapshotFieldsEnabled(),
 			})
 		}
 		if err := (dto.EdgeSnapshotPagePayloadV1{Groups: []dto.EdgeGroupPolicyV1{policy}}).
@@ -755,6 +767,9 @@ func captureEdgeSnapshotSettings(projection *edgeSnapshotProjection) error {
 		input.CacheReadRatio = floatPointer(cacheRead)
 		cacheCreation, _ := ratio_setting.GetCreateCacheRatio(modelName)
 		input.CacheCreationRatio = floatPointer(cacheCreation)
+		_, input.ImageRatioConfigured = ratio_setting.GetImageRatio(modelName)
+		input.AudioRatioConfigured = ratio_setting.ContainsAudioRatio(modelName)
+		input.AudioCompletionRatioConfigured = ratio_setting.ContainsAudioCompletionRatio(modelName)
 
 		policy, err := projectEdgeSnapshotPricing(modelName, input)
 		if err != nil {
@@ -780,6 +795,10 @@ func captureEdgeSnapshotSettings(projection *edgeSnapshotProjection) error {
 	}
 	projection.Routing = []dto.EdgeRoutingPolicyV1{routing}
 	return nil
+}
+
+func edgeConsumeLogSnapshotFieldsEnabled() bool {
+	return common.GetEnvOrDefaultBool("EDGE_CONSUME_LOG_SNAPSHOT_FIELDS_ENABLED", false)
 }
 
 func filterEdgeSnapshotModelsByPricing(projection *edgeSnapshotProjection, billableModels map[string]struct{}) {
@@ -916,6 +935,9 @@ func projectEdgeSnapshotPricing(modelName string, input edgeSnapshotPricingInput
 	} else {
 		if input.ModelRatio == nil {
 			return dto.EdgePricingPolicyV1{}, fmt.Errorf("model %q has no ratio or fixed price", modelName)
+		}
+		if input.ImageRatioConfigured || input.AudioRatioConfigured || input.AudioCompletionRatioConfigured {
+			return dto.EdgePricingPolicyV1{}, fmt.Errorf("%w: model %q uses text media token ratios unsupported by edge settlement v1", ErrEdgeSnapshotUnrepresentable, modelName)
 		}
 		policy.BillingMode = dto.EdgeBillingModeRatioV1
 		policy.ModelRatio = floatPointer(*input.ModelRatio)

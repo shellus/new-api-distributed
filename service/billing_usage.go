@@ -1,10 +1,27 @@
 package service
 
 import (
+	"fmt"
 	"strings"
 
 	"github.com/QuantumNous/new-api/dto"
 )
+
+// NormalizeBillingUsage converts one durable billing-usage variant into the
+// same normalized Usage representation consumed by the direct text billing
+// path. Distributed settlement must call this instead of maintaining a second
+// protocol-specific normalizer.
+func NormalizeBillingUsage(billingUsage *dto.BillingUsage) (*dto.Usage, error) {
+	if billingUsage == nil {
+		return &dto.Usage{}, nil
+	}
+	usage, ok := usageFromBillingUsage(&dto.Usage{BillingUsage: dto.CloneBillingUsage(billingUsage)})
+	if !ok || usage == nil {
+		return nil, fmt.Errorf("billing usage source or semantic is unsupported")
+	}
+	usage.BillingUsage = nil
+	return usage, nil
+}
 
 const (
 	usageBillingPathLocal              = "local"

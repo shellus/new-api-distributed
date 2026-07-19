@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"math"
+	"net"
 	"net/url"
 	"regexp"
 	"strings"
@@ -57,6 +58,10 @@ const (
 	EdgeControlMaxAffinityEntriesV1             = 10_000_000
 	EdgeControlMaxAffinityTTLSecondsV1          = int64(31_536_000)
 	EdgeControlMaxBalanceItemsV2                = 100_000
+	EdgeControlMaxConsumeLogSnapshotBytesV1     = 64 * 1024
+	EdgeControlMaxConsumeLogOtherBytesV1        = 48 * 1024
+	EdgeControlMaxConsumeLogContentLengthV1     = 16 * 1024
+	EdgeControlMaxConsumeLogUpstreamIDLengthV1  = 128
 
 	edgeControlMinUnixMilliV1 = int64(946684800000)    // 2000-01-01T00:00:00Z
 	edgeControlMaxUnixMilliV1 = int64(253402300799999) // 9999-12-31T23:59:59.999Z
@@ -304,6 +309,7 @@ type EdgeTokenAuthRecordV1 struct {
 	TokenFingerprint   string   `json:"token_fingerprint"`
 	TokenID            int64    `json:"token_id"`
 	UserID             int64    `json:"user_id"`
+	TokenName          string   `json:"token_name,omitempty"`
 	Enabled            bool     `json:"enabled"`
 	ExpiresAtUnixMilli *int64   `json:"expires_at_unix_milli,omitempty"`
 	Group              string   `json:"group,omitempty"`
@@ -320,6 +326,7 @@ type EdgeUserSettingV1 struct {
 	AcceptUnsetRatioModel bool   `json:"accept_unset_ratio_model"`
 	Language              string `json:"language,omitempty"`
 	BillingPreference     string `json:"billing_preference"`
+	RecordIpLog           bool   `json:"record_ip_log,omitempty"`
 }
 
 // EdgeUserPolicyV1 is the non-secret user context required by local token
@@ -335,9 +342,10 @@ type EdgeUserPolicyV1 struct {
 }
 
 type EdgeUsingGroupPolicyV1 struct {
-	Group   string  `json:"group"`
-	Enabled bool    `json:"enabled"`
-	Ratio   float64 `json:"ratio"`
+	Group        string  `json:"group"`
+	Enabled      bool    `json:"enabled"`
+	Ratio        float64 `json:"ratio"`
+	SpecialRatio bool    `json:"special_ratio,omitempty"`
 }
 
 type EdgeGroupPolicyV1 struct {
@@ -484,36 +492,116 @@ type EdgeUsageBillingV1 struct {
 	ChargedQuota          int64              `json:"charged_quota"`
 }
 
-// EdgeUsageEventV1 contains accounting facts plus optional observability
-// passenger fields. It carries no request body, plaintext user token, upstream
-// credential or response content.
+// EdgeConsumeLogSnapshotV1 is an optional, request-time display snapshot used
+// to materialize the same consume log after asynchronous edge settlement. The
+// authoritative accounting dimensions and amounts remain on EdgeUsageEventV1;
+// this snapshot cannot override them.
+type EdgeConsumeLogSnapshotV1 struct {
+	Username          string                 `json:"username,omitempty"`
+	TokenName         string                 `json:"token_name,omitempty"`
+	ModelName         string                 `json:"model_name,omitempty"`
+	Content           string                 `json:"content,omitempty"`
+	UseTimeSeconds    *int64                 `json:"use_time_seconds,omitempty"`
+	IP                string                 `json:"ip,omitempty"`
+	RequestID         string                 `json:"request_id,omitempty"`
+	UpstreamRequestID string                 `json:"upstream_request_id,omitempty"`
+	Other             map[string]interface{} `json:"other,omitempty"`
+}
+
+func (s EdgeConsumeLogSnapshotV1) Validate() error {
+	for _, field := range []struct {
+		name  string
+		value string
+		limit int
+	}{
+		{name: "consume_log_snapshot.username", value: s.Username, limit: EdgeControlMaxNodeNameLengthV1},
+		{name: "consume_log_snapshot.token_name", value: s.TokenName, limit: EdgeControlMaxNodeNameLengthV1},
+		{name: "consume_log_snapshot.model_name", value: s.ModelName, limit: EdgeControlMaxModelLengthV1},
+		{name: "consume_log_snapshot.content", value: s.Content, limit: EdgeControlMaxConsumeLogContentLengthV1},
+		{name: "consume_log_snapshot.request_id", value: s.RequestID, limit: EdgeControlMaxIdentifierLengthV1},
+		{name: "consume_log_snapshot.upstream_request_id", value: s.UpstreamRequestID, limit: EdgeControlMaxConsumeLogUpstreamIDLengthV1},
+	} {
+		if field.value == "" {
+			continue
+		}
+		if err := validateEdgeControlTextV1(field.name, field.value, field.limit, false); err != nil {
+			return err
+		}
+	}
+	if s.UseTimeSeconds != nil && (*s.UseTimeSeconds < 0 || *s.UseTimeSeconds > math.MaxInt32) {
+		return fmt.Errorf("consume_log_snapshot.use_time_seconds must be between 0 and %d", math.MaxInt32)
+	}
+	if s.IP != "" && net.ParseIP(s.IP) == nil {
+		return fmt.Errorf("consume_log_snapshot.ip must be a valid IP address")
+	}
+	if s.Other == nil {
+		return fmt.Errorf("consume_log_snapshot.other must be a JSON object")
+	}
+	if _, exists := s.Other["frt"]; exists {
+		return fmt.Errorf("consume_log_snapshot.other must not contain frt")
+	}
+	otherJSON, err := common.Marshal(s.Other)
+	if err != nil {
+		return fmt.Errorf("consume_log_snapshot.other: %w", err)
+	}
+	if len(otherJSON) > EdgeControlMaxConsumeLogOtherBytesV1 {
+		return fmt.Errorf("consume_log_snapshot.other exceeds %d bytes", EdgeControlMaxConsumeLogOtherBytesV1)
+	}
+	payload, err := common.Marshal(s)
+	if err != nil {
+		return fmt.Errorf("consume_log_snapshot: %w", err)
+	}
+	if len(payload) > EdgeControlMaxConsumeLogSnapshotBytesV1 {
+		return fmt.Errorf("consume_log_snapshot exceeds %d bytes", EdgeControlMaxConsumeLogSnapshotBytesV1)
+	}
+	return nil
+}
+
+func CloneEdgeConsumeLogSnapshotV1(snapshot *EdgeConsumeLogSnapshotV1) (*EdgeConsumeLogSnapshotV1, error) {
+	if snapshot == nil {
+		return nil, nil
+	}
+	payload, err := common.Marshal(snapshot)
+	if err != nil {
+		return nil, err
+	}
+	var clone EdgeConsumeLogSnapshotV1
+	if err := common.Unmarshal(payload, &clone); err != nil {
+		return nil, err
+	}
+	return &clone, nil
+}
+
+// EdgeUsageEventV1 contains accounting facts plus optional durable log evidence.
+// It carries no request body, plaintext user token or upstream credential.
 type EdgeUsageEventV1 struct {
-	EventID                  string             `json:"event_id"`
-	Sequence                 int64              `json:"sequence"`
-	ReservationID            string             `json:"reservation_id"`
-	RequestID                string             `json:"request_id"`
-	UserID                   int64              `json:"user_id"`
-	TokenID                  int64              `json:"token_id"`
-	SnapshotID               string             `json:"snapshot_id,omitempty"`
-	SnapshotRevision         int64              `json:"snapshot_revision,omitempty"`
-	PricingRevision          int64              `json:"pricing_revision,omitempty"`
-	BalanceRevision          int64              `json:"balance_revision,omitempty"`
-	FundingSource            string             `json:"funding_source,omitempty"`
-	UserSubscriptionID       int64              `json:"user_subscription_id,omitempty"`
-	TokenUnlimitedQuota      bool               `json:"token_unlimited_quota,omitempty"`
-	ChannelID                int64              `json:"channel_id"`
-	Endpoint                 EdgeEndpointV1     `json:"endpoint"`
-	Streaming                bool               `json:"streaming"`
-	Model                    string             `json:"model"`
-	Group                    string             `json:"group"`
-	StartedAtUnixMilli       int64              `json:"started_at_unix_milli"`
-	FirstResponseAtUnixMilli *int64             `json:"first_response_at_unix_milli,omitempty"`
-	FinishedAtUnixMilli      int64              `json:"finished_at_unix_milli"`
-	Outcome                  EdgeUsageOutcomeV1 `json:"outcome"`
-	HTTPStatus               *int               `json:"http_status,omitempty"`
-	ErrorCode                string             `json:"error_code,omitempty"`
-	Usage                    *BillingUsage      `json:"usage,omitempty"`
-	Billing                  EdgeUsageBillingV1 `json:"billing"`
+	EventID                  string                    `json:"event_id"`
+	Sequence                 int64                     `json:"sequence"`
+	ReservationID            string                    `json:"reservation_id"`
+	RequestID                string                    `json:"request_id"`
+	UserID                   int64                     `json:"user_id"`
+	TokenID                  int64                     `json:"token_id"`
+	SnapshotID               string                    `json:"snapshot_id,omitempty"`
+	SnapshotRevision         int64                     `json:"snapshot_revision,omitempty"`
+	PricingRevision          int64                     `json:"pricing_revision,omitempty"`
+	BalanceRevision          int64                     `json:"balance_revision,omitempty"`
+	FundingSource            string                    `json:"funding_source,omitempty"`
+	UserSubscriptionID       int64                     `json:"user_subscription_id,omitempty"`
+	TokenUnlimitedQuota      bool                      `json:"token_unlimited_quota,omitempty"`
+	ChannelID                int64                     `json:"channel_id"`
+	Endpoint                 EdgeEndpointV1            `json:"endpoint"`
+	Streaming                bool                      `json:"streaming"`
+	Model                    string                    `json:"model"`
+	Group                    string                    `json:"group"`
+	StartedAtUnixMilli       int64                     `json:"started_at_unix_milli"`
+	FirstResponseAtUnixMilli *int64                    `json:"first_response_at_unix_milli,omitempty"`
+	FinishedAtUnixMilli      int64                     `json:"finished_at_unix_milli"`
+	Outcome                  EdgeUsageOutcomeV1        `json:"outcome"`
+	HTTPStatus               *int                      `json:"http_status,omitempty"`
+	ErrorCode                string                    `json:"error_code,omitempty"`
+	Usage                    *BillingUsage             `json:"usage,omitempty"`
+	Billing                  EdgeUsageBillingV1        `json:"billing"`
+	ConsumeLogSnapshot       *EdgeConsumeLogSnapshotV1 `json:"consume_log_snapshot,omitempty"`
 }
 
 type EdgeSettlementBlockRequestV1 struct {
@@ -1762,6 +1850,11 @@ func (e EdgeUsageEventV1) Validate() error {
 			return err
 		}
 	}
+	if e.ConsumeLogSnapshot != nil {
+		if err := e.ConsumeLogSnapshot.Validate(); err != nil {
+			return err
+		}
+	}
 	return e.Billing.Validate()
 }
 
@@ -1886,6 +1979,11 @@ func validateEdgeTokenAuthRecordV1(record EdgeTokenAuthRecordV1) error {
 	}
 	if record.TokenID <= 0 || record.UserID <= 0 {
 		return fmt.Errorf("token_id and user_id must be greater than zero")
+	}
+	if record.TokenName != "" {
+		if err := validateEdgeControlTextV1("token_name", record.TokenName, EdgeControlMaxNodeNameLengthV1, false); err != nil {
+			return err
+		}
 	}
 	if record.ExpiresAtUnixMilli != nil {
 		if err := validateEdgeControlUnixMilliV1("expires_at_unix_milli", *record.ExpiresAtUnixMilli, false); err != nil {

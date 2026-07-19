@@ -5,11 +5,13 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/sha256"
+	"crypto/x509"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -178,6 +180,207 @@ func TestEdgeControlRestoresPersistedSnapshotDuringBootstrapRetry(t *testing.T) 
 		},
 	})
 	require.NoError(t, err)
+}
+
+func TestEdgeControlLoopRecoversAfterTransientProxyHTMLHeartbeat(t *testing.T) {
+	fixture := newEdgeControlTransportFixture(t)
+	fixture.control.SnapshotPollIntervalSeconds = 3600
+	fixture.control.SettlementMaxDelaySeconds = 3600
+	require.NoError(t, fixture.control.Validate())
+	handler := &edgeControlTestHandler{
+		t: t, fixture: fixture, transientHeartbeatAt: 2,
+		heartbeatTransient: make(chan struct{}, 1), heartbeatRecovered: make(chan struct{}, 1),
+	}
+	server := httptest.NewServer(handler)
+	defer server.Close()
+	client := newEdgeControlTestClient(t, fixture, server.URL)
+	store := newEdgeControlTestStore()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- RunEdgeControlLoopsWithDependencies(ctx, EdgeControlLoopDependencies{
+			Client: client, Store: store, Now: func() time.Time { return fixture.now },
+		})
+	}()
+
+	select {
+	case <-handler.heartbeatTransient:
+	case err := <-errCh:
+		require.NoError(t, err)
+		t.Fatal("control loop stopped before observing the transient heartbeat response")
+	case <-time.After(4 * time.Second):
+		t.Fatal("timed out waiting for transient heartbeat response")
+	}
+	select {
+	case <-handler.heartbeatRecovered:
+	case err := <-errCh:
+		require.NoError(t, err)
+		t.Fatal("control loop stopped instead of retrying the transient heartbeat failure")
+	case <-time.After(4 * time.Second):
+		t.Fatal("timed out waiting for heartbeat recovery")
+	}
+	active, ok := ActiveEdgeControlClient()
+	assert.True(t, ok)
+	assert.Same(t, client, active)
+	assert.True(t, EdgeControlReady())
+
+	cancel()
+	require.NoError(t, <-errCh)
+}
+
+func TestEdgeControlTransportRetriesTransientHTTPResponsesAcrossControlKinds(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		path   string
+		status int
+	}{
+		{name: "heartbeat request timeout", path: "/control/v1/heartbeat", status: http.StatusRequestTimeout},
+		{name: "snapshot too early", path: "/control/v1/snapshot/manifest", status: http.StatusTooEarly},
+		{name: "heartbeat bad gateway", path: "/control/v1/heartbeat", status: http.StatusBadGateway},
+		{name: "snapshot service unavailable", path: "/control/v1/snapshot/manifest", status: http.StatusServiceUnavailable},
+		{name: "settlement gateway timeout", path: "/control/v1/settlement/block", status: http.StatusGatewayTimeout},
+		{name: "rate limited", path: "/control/v1/heartbeat", status: http.StatusTooManyRequests},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			calls := 0
+			client := newEdgeRuntimeTestControlClient(t, edgeRuntimeRoundTripper(func(*http.Request) (*http.Response, error) {
+				calls++
+				if calls == 1 {
+					return &http.Response{
+						StatusCode: tc.status,
+						Header:     http.Header{"Content-Type": []string{"text/html; charset=utf-8"}},
+						Body:       io.NopCloser(strings.NewReader("<html>temporary proxy response</html>")),
+					}, nil
+				}
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Header:     http.Header{"Content-Type": []string{"application/json"}},
+					Body:       io.NopCloser(strings.NewReader(`{}`)),
+				}, nil
+			}))
+			requestID := "retry-" + strings.ReplaceAll(tc.name, " ", "-")
+			var response map[string]interface{}
+			err := client.doJSON(context.Background(), tc.path, requestID, map[string]interface{}{}, &response)
+			require.Error(t, err)
+			assert.False(t, edgeControlFatalError(err), "transient HTTP status must not terminate control loops")
+			require.NoError(t, client.doJSON(context.Background(), tc.path, requestID, map[string]interface{}{}, &response))
+			assert.Equal(t, 2, calls)
+		})
+	}
+}
+
+func TestEdgeControlErrorClassificationFailsClosedOnIntegrityAndProtocolErrors(t *testing.T) {
+	remote := func(code dto.EdgeControlErrorCodeV1, retryable bool) error {
+		return &EdgeControlRemoteError{StatusCode: http.StatusConflict, Response: dto.EdgeControlErrorResponseV1{
+			Error: dto.EdgeControlErrorV1{Code: code, Message: "classified", Retryable: retryable},
+		}}
+	}
+	for _, err := range []error{
+		ErrEdgeControlProtocolViolation,
+		ErrEdgeControlNodeDisabled,
+		remote(dto.EdgeControlErrorCodeInvalidRequestV1, false),
+		remote(dto.EdgeControlErrorCodeUnsupportedProtocolV1, false),
+		remote(dto.EdgeControlErrorCodeAuthenticationFailedV1, true),
+		remote(dto.EdgeControlErrorCodeInvalidSignatureV1, false),
+		remote(dto.EdgeControlErrorCodeReplayDetectedV1, false),
+		remote(dto.EdgeControlErrorCodeNodeDisabledV1, false),
+		remote(dto.EdgeControlErrorCodeIdempotencyConflictV1, false),
+		remote(dto.EdgeControlErrorCodeSettlementOutOfOrderV1, false),
+		remote(dto.EdgeControlErrorCodeSettlementConflictV1, false),
+	} {
+		assert.True(t, edgeControlFatalError(err), "%v must fail closed", err)
+	}
+	for _, err := range []error{
+		remote(dto.EdgeControlErrorCodeSnapshotNotFoundV1, false),
+		remote(dto.EdgeControlErrorCodeSnapshotCursorStaleV1, false),
+		remote(dto.EdgeControlErrorCodeTemporarilyUnavailableV1, true),
+		remote(dto.EdgeControlErrorCodeRateLimitedV1, false),
+		remote(dto.EdgeControlErrorCodeReplayDetectedV1, true),
+		remote(dto.EdgeControlErrorCodeInternalV1, true),
+	} {
+		assert.False(t, edgeControlFatalError(err), "%v must remain retryable", err)
+	}
+}
+
+func TestEdgeControlTransportKeepsSuccessfulNonJSONResponseFatal(t *testing.T) {
+	client := newEdgeRuntimeTestControlClient(t, edgeRuntimeRoundTripper(func(*http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"text/html"}},
+			Body:       io.NopCloser(strings.NewReader("<html>unexpected success response</html>")),
+		}, nil
+	}))
+	var response map[string]interface{}
+	err := client.doJSON(context.Background(), "/control/v1/heartbeat", "fatal-success-html", map[string]interface{}{}, &response)
+	require.Error(t, err)
+	assert.True(t, edgeControlFatalError(err))
+	assert.ErrorIs(t, err, ErrEdgeControlProtocolViolation)
+}
+
+func TestEdgeControlTransportClassifiesNetworkAndTLSFailures(t *testing.T) {
+	for _, err := range []error{io.EOF, io.ErrUnexpectedEOF, context.DeadlineExceeded} {
+		classified := edgeControlTransportFailure(context.Background(), err)
+		assert.ErrorIs(t, classified, ErrEdgeControlUnavailable)
+		assert.False(t, edgeControlFatalError(classified))
+	}
+	tlsIdentityError := x509.HostnameError{Certificate: &x509.Certificate{DNSNames: []string{"master.example"}}, Host: "proxy.example"}
+	classified := edgeControlTransportFailure(context.Background(), &url.Error{Op: "Post", URL: "https://master.example/control/v1/heartbeat", Err: tlsIdentityError})
+	assert.ErrorIs(t, classified, ErrEdgeControlProtocolViolation)
+	assert.True(t, edgeControlFatalError(classified))
+}
+
+func TestEdgeSnapshotPollRetriesTransientProxyResponse(t *testing.T) {
+	fixture := newEdgeControlTransportFixture(t)
+	handler := &edgeControlTestHandler{t: t, fixture: fixture, transientManifestAt: 1}
+	server := httptest.NewServer(handler)
+	defer server.Close()
+	runner := edgeControlLoop{client: newEdgeControlTestClient(t, fixture, server.URL), store: newEdgeControlTestStore(), now: func() time.Time { return fixture.now }}
+	previousReady := edgeControlReady.Swap(true)
+	t.Cleanup(func() { edgeControlReady.Store(previousReady) })
+
+	err := runner.pollSnapshot(context.Background(), fixture.control)
+	require.Error(t, err)
+	assert.False(t, edgeControlFatalError(err))
+	require.NoError(t, runner.pollSnapshot(context.Background(), fixture.control))
+}
+
+func TestEdgeSettlementFlushRetriesTransientProxyResponse(t *testing.T) {
+	db, now := newEdgeRuntimeTestDB(t, "")
+	settled := settleEdgeRuntimeUsage(t, db, "reservation-control-retry", "request-control-retry", 100, 100, now)
+	calls := 0
+	client := newEdgeRuntimeTestControlClient(t, edgeRuntimeRoundTripper(func(request *http.Request) (*http.Response, error) {
+		calls++
+		if calls == 1 {
+			return &http.Response{
+				StatusCode: http.StatusBadGateway,
+				Header:     http.Header{"Content-Type": []string{"text/html"}},
+				Body:       io.NopCloser(strings.NewReader("<html>temporary settlement proxy failure</html>")),
+			}, nil
+		}
+		var block dto.EdgeSettlementBlockRequestV1
+		decodeEdgeRuntimeRequest(t, request, &block)
+		return edgeRuntimeJSONResponse(t, http.StatusOK, dto.EdgeSettlementBlockResponseV1{
+			Meta: edgeRuntimeResponseMeta(block.Meta.RequestID),
+			Ack: dto.EdgeSettlementAckV1{
+				Status: dto.EdgeSettlementAckAcceptedV1, NodeID: edgeRuntimeTestNodeID,
+				NodeGeneration: edgeRuntimeTestNodeGeneration, BlockID: block.BlockID,
+				AckedThroughSequence: block.LastSequence, NextExpectedSequence: block.LastSequence + 1,
+				AcceptedEventCount: len(block.Events), AcknowledgedAtUnixMilli: now.UnixMilli(),
+			},
+		}), nil
+	}))
+	runner := edgeControlLoop{client: client, store: &edgeControlGormStore{db: db}, now: func() time.Time { return now }}
+	control := dto.EdgeNodeControlConfigV1{SettlementMaxEvents: 100}
+
+	err := runner.flushSettlement(context.Background(), control)
+	require.Error(t, err)
+	assert.False(t, edgeControlFatalError(err))
+	require.NoError(t, runner.flushSettlement(context.Background(), control))
+	state, err := model.GetEdgeLocalSettlementState(db)
+	require.NoError(t, err)
+	assert.Equal(t, settled.Sequence, state.LastAckedSequence)
+	assert.Equal(t, 2, calls)
 }
 
 func TestEdgeControlBootstrapReusesAlreadyAppliedSnapshot(t *testing.T) {
@@ -491,6 +694,12 @@ type edgeControlTestHandler struct {
 	firstPageNonces          []string
 	userCursors              []string
 	heartbeatCPA             [][]dto.EdgeCPAStatusV1
+	heartbeatCalls           int
+	transientHeartbeatAt     int
+	heartbeatTransient       chan struct{}
+	heartbeatRecovered       chan struct{}
+	manifestCalls            int
+	transientManifestAt      int
 }
 
 func (h *edgeControlTestHandler) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
@@ -596,6 +805,25 @@ func (h *edgeControlTestHandler) ServeHTTP(writer http.ResponseWriter, request *
 			NextCursor: nextCursor, ItemCount: edgeControlTestPayloadCount(pageRequest.Dataset, payload),
 			Digest: digest, Payload: payload,
 		})
+	case "/control/v1/snapshot/manifest":
+		var manifestRequest dto.EdgeSnapshotManifestRequestV1
+		if err := common.DecodeJsonStrict(bytes.NewReader(body), &manifestRequest); err != nil {
+			h.fail(writer, err)
+			return
+		}
+		h.mu.Lock()
+		h.manifestCalls++
+		manifestCall := h.manifestCalls
+		h.mu.Unlock()
+		if manifestCall == h.transientManifestAt {
+			writer.Header().Set("Content-Type", "text/html")
+			writer.WriteHeader(http.StatusServiceUnavailable)
+			_, _ = writer.Write([]byte("<html>temporary snapshot proxy failure</html>"))
+			return
+		}
+		h.writeJSON(writer, dto.EdgeSnapshotManifestResponseV1{
+			Meta: h.responseMeta(envelope.Meta.RequestID), Changed: false,
+		})
 	case "/control/v1/heartbeat":
 		var heartbeatRequest dto.EdgeHeartbeatRequestV1
 		if err := common.DecodeJsonStrict(bytes.NewReader(body), &heartbeatRequest); err != nil {
@@ -603,8 +831,25 @@ func (h *edgeControlTestHandler) ServeHTTP(writer http.ResponseWriter, request *
 			return
 		}
 		h.mu.Lock()
+		h.heartbeatCalls++
+		heartbeatCall := h.heartbeatCalls
 		h.heartbeatCPA = append(h.heartbeatCPA, append([]dto.EdgeCPAStatusV1(nil), heartbeatRequest.CPA...))
 		h.mu.Unlock()
+		if heartbeatCall == h.transientHeartbeatAt {
+			if h.heartbeatTransient != nil {
+				h.heartbeatTransient <- struct{}{}
+			}
+			writer.Header().Set("Content-Type", "text/html; charset=utf-8")
+			writer.WriteHeader(http.StatusBadGateway)
+			_, _ = writer.Write([]byte("<html><body>temporary proxy failure</body></html>"))
+			return
+		}
+		if h.transientHeartbeatAt > 0 && heartbeatCall > h.transientHeartbeatAt && h.heartbeatRecovered != nil {
+			select {
+			case h.heartbeatRecovered <- struct{}{}:
+			default:
+			}
+		}
 		h.writeJSON(writer, dto.EdgeHeartbeatResponseV1{
 			Meta: h.responseMeta(envelope.Meta.RequestID), Control: h.fixture.control,
 			BalanceDelta: func() *dto.EdgeBalanceDeltaV2 {

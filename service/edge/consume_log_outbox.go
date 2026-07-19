@@ -10,6 +10,7 @@ import (
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/dto"
 	"github.com/QuantumNous/new-api/model"
+	coreservice "github.com/QuantumNous/new-api/service"
 )
 
 const (
@@ -150,6 +151,14 @@ func publishMasterConsumeLogClaim(ctx context.Context, claim *model.EdgeConsumeL
 	if err := common.UnmarshalJsonStr(stored.BillingPayload, &billing); err != nil {
 		return fmt.Errorf("decode stored edge billing: %w", err)
 	}
+	var consumeLogSnapshot *dto.EdgeConsumeLogSnapshotV1
+	if stored.ConsumeLogSnapshotPayload != nil {
+		var decoded dto.EdgeConsumeLogSnapshotV1
+		if err := common.UnmarshalJsonStr(*stored.ConsumeLogSnapshotPayload, &decoded); err != nil {
+			return fmt.Errorf("decode stored edge consume-log snapshot: %w", err)
+		}
+		consumeLogSnapshot = &decoded
+	}
 	httpStatus := (*int)(nil)
 	if stored.HTTPStatus != 0 {
 		status := stored.HTTPStatus
@@ -168,6 +177,7 @@ func publishMasterConsumeLogClaim(ctx context.Context, claim *model.EdgeConsumeL
 		FirstResponseAtUnixMilli: stored.FirstResponseAtUnixMilli,
 		FinishedAtUnixMilli:      stored.FinishedAtUnixMilli, Outcome: dto.EdgeUsageOutcomeV1(stored.Outcome),
 		HTTPStatus: httpStatus, ErrorCode: stored.ErrorCode, Usage: usage, Billing: billing,
+		ConsumeLogSnapshot: consumeLogSnapshot,
 	}
 	if err := event.Validate(); err != nil {
 		return fmt.Errorf("validate stored edge usage event: %w", err)
@@ -176,67 +186,100 @@ func publishMasterConsumeLogClaim(ctx context.Context, claim *model.EdgeConsumeL
 		return nil
 	}
 
-	username := ""
-	if err := db.Unscoped().Model(&model.User{}).Select("username").Where("id = ?", stored.UserID).Scan(&username).Error; err != nil {
-		return fmt.Errorf("load edge usage username: %w", err)
-	}
-	tokenName := ""
-	if err := db.Unscoped().Model(&model.Token{}).Select("name").Where("id = ? AND user_id = ?", stored.TokenID, stored.UserID).Scan(&tokenName).Error; err != nil {
-		return fmt.Errorf("load edge usage token name: %w", err)
-	}
 	requestPath := "/v1/chat/completions"
 	if event.Endpoint == dto.EdgeEndpointOpenAIResponsesV1 {
 		requestPath = "/v1/responses"
 	}
-	adminInfo := map[string]interface{}{
-		"edge_event_id":        event.EventID,
-		"edge_node_id":         payload.NodeID,
-		"edge_node_generation": payload.NodeGeneration,
-		"edge_funding_source":  event.FundingSource,
-		"edge_outcome":         event.Outcome,
-		"edge_endpoint":        event.Endpoint,
+	if consumeLogSnapshot == nil {
+		durationSeconds := (event.FinishedAtUnixMilli - event.StartedAtUnixMilli) / 1000
+		if durationSeconds > math.MaxInt32 {
+			durationSeconds = math.MaxInt32
+		}
+		consumeLogSnapshot = &dto.EdgeConsumeLogSnapshotV1{
+			ModelName: stored.Model, Content: "Edge settlement usage", UseTimeSeconds: &durationSeconds,
+			RequestID: stored.RequestUID,
+			Other: map[string]interface{}{
+				"request_path": requestPath, "billing_mode": billing.BillingMode, "group_ratio": billing.GroupRatio,
+			},
+		}
 	}
-	if event.HTTPStatus != nil {
-		adminInfo["edge_http_status"] = *event.HTTPStatus
+	if consumeLogSnapshot.Username == "" {
+		if err := db.Unscoped().Model(&model.User{}).Select("username").Where("id = ?", stored.UserID).Scan(&consumeLogSnapshot.Username).Error; err != nil {
+			return fmt.Errorf("load edge usage username: %w", err)
+		}
 	}
-	if event.ErrorCode != "" {
-		adminInfo["edge_error_code"] = event.ErrorCode
+	if consumeLogSnapshot.TokenName == "" {
+		if err := db.Unscoped().Model(&model.Token{}).Select("name").Where("id = ? AND user_id = ?", stored.TokenID, stored.UserID).Scan(&consumeLogSnapshot.TokenName).Error; err != nil {
+			return fmt.Errorf("load edge usage token name: %w", err)
+		}
 	}
-	if event.Usage != nil {
-		adminInfo["edge_usage"] = event.Usage
+	if consumeLogSnapshot.ModelName == "" {
+		consumeLogSnapshot.ModelName = stored.Model
 	}
-	other := map[string]interface{}{
-		"request_path":           requestPath,
+	if consumeLogSnapshot.RequestID == "" {
+		consumeLogSnapshot.RequestID = stored.RequestUID
+	}
+	settlementFacts := coreservice.TextConsumeLogSettlementFacts{}
+	if stored.ConsumeLogSettlementPayload != nil {
+		if err := common.UnmarshalJsonStr(*stored.ConsumeLogSettlementPayload, &settlementFacts); err != nil {
+			return fmt.Errorf("decode stored edge consume-log settlement: %w", err)
+		}
+	}
+	finalSnapshot, err := coreservice.FinalizeTextConsumeLogSnapshot(consumeLogSnapshot, settlementFacts)
+	if err != nil {
+		return fmt.Errorf("finalize edge consume-log snapshot: %w", err)
+	}
+	adminInfo, _ := finalSnapshot.Other["admin_info"].(map[string]interface{})
+	if adminInfo == nil {
+		adminInfo = make(map[string]interface{})
+	}
+	edgeAdminInfo := map[string]interface{}{
+		"edge_event_id":          event.EventID,
+		"edge_node_id":           payload.NodeID,
+		"edge_node_generation":   payload.NodeGeneration,
+		"edge_funding_source":    event.FundingSource,
+		"edge_outcome":           event.Outcome,
+		"edge_endpoint":          event.Endpoint,
 		"edge_settlement":        true,
 		"pricing_policy_id":      billing.PricingPolicyID,
 		"pricing_policy_version": billing.PricingPolicyVersion,
 		"billing_mode":           billing.BillingMode,
-		"group_ratio":            billing.GroupRatio,
 		"applied_ratios":         billing.AppliedRatios,
-		"admin_info":             adminInfo,
 	}
+	if event.HTTPStatus != nil {
+		edgeAdminInfo["edge_http_status"] = *event.HTTPStatus
+	}
+	if event.ErrorCode != "" {
+		edgeAdminInfo["edge_error_code"] = event.ErrorCode
+	}
+	if event.Usage != nil {
+		edgeAdminInfo["edge_usage"] = event.Usage
+	}
+	adminInfo["edge_settlement"] = edgeAdminInfo
+	finalSnapshot.Other["admin_info"] = adminInfo
 	if event.FirstResponseAtUnixMilli != nil {
-		other["frt"] = float64(*event.FirstResponseAtUnixMilli - event.StartedAtUnixMilli)
+		finalSnapshot.Other["frt"] = float64(*event.FirstResponseAtUnixMilli - event.StartedAtUnixMilli)
 	}
-	durationSeconds := (event.FinishedAtUnixMilli - event.StartedAtUnixMilli) / 1000
-	if durationSeconds > math.MaxInt32 {
-		durationSeconds = math.MaxInt32
+	useTime := 0
+	if finalSnapshot.UseTimeSeconds != nil {
+		useTime = int(*finalSnapshot.UseTimeSeconds)
 	}
 	log := &model.Log{
-		UserId: stored.UserID, Username: username, CreatedAt: event.FinishedAtUnixMilli / 1000,
-		Type: model.LogTypeConsume, Content: "Edge settlement usage",
+		UserId: stored.UserID, Username: finalSnapshot.Username, CreatedAt: event.FinishedAtUnixMilli / 1000,
+		Type: model.LogTypeConsume, Content: finalSnapshot.Content,
 		PromptTokens: stored.PromptTokens, CompletionTokens: stored.CompletionTokens,
-		TokenName: tokenName, ModelName: stored.Model, Quota: int(stored.ChargedQuota),
-		ChannelId: stored.ChannelID, TokenId: stored.TokenID, UseTime: int(durationSeconds),
-		IsStream: stored.Streaming, Group: stored.Group, RequestId: stored.RequestUID,
-		Other: common.MapToJsonStr(other),
+		TokenName: finalSnapshot.TokenName, ModelName: finalSnapshot.ModelName, Quota: int(stored.ChargedQuota),
+		ChannelId: stored.ChannelID, TokenId: stored.TokenID, UseTime: useTime,
+		IsStream: stored.Streaming, Group: stored.Group, Ip: finalSnapshot.IP,
+		RequestId: finalSnapshot.RequestID, UpstreamRequestId: finalSnapshot.UpstreamRequestID,
+		Other: common.MapToJsonStr(finalSnapshot.Other),
 	}
 	if _, err = model.CreateEdgeConsumeLogOnce(ctx, log, billingEventKey); err != nil {
 		return err
 	}
 	if common.DataExportEnabled {
 		_, err = model.RecordEdgeQuotaDataOnce(ctx, billingEventKey, model.QuotaDataLogParams{
-			UserID: stored.UserID, Username: username, ModelName: stored.Model,
+			UserID: stored.UserID, Username: finalSnapshot.Username, ModelName: finalSnapshot.ModelName,
 			Quota: int(stored.ChargedQuota), CreatedAt: event.FinishedAtUnixMilli / 1000,
 			TokenUsed: stored.PromptTokens + stored.CompletionTokens, UseGroup: stored.Group,
 			TokenID: stored.TokenID, ChannelID: stored.ChannelID, NodeName: node.NodeUID,

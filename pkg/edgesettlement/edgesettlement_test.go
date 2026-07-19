@@ -63,6 +63,26 @@ func TestDigestBlockV1ExcludesFirstResponseTime(t *testing.T) {
 	assert.Equal(t, withoutDigest, withDigest)
 }
 
+func TestDigestBlockV1BindsConsumeLogSnapshot(t *testing.T) {
+	left := settlementDigestRequestForTest()
+	left.Events[0].ConsumeLogSnapshot = &dto.EdgeConsumeLogSnapshotV1{
+		Username: "request-user",
+		Other:    map[string]interface{}{"model_ratio": float64(1)},
+	}
+	leftDigest, err := DigestBlockV1("edge.digest", 1, left)
+	require.NoError(t, err)
+
+	right := settlementDigestRequestForTest()
+	right.Events[0].ConsumeLogSnapshot = &dto.EdgeConsumeLogSnapshotV1{
+		Username: "renamed-user",
+		Other:    map[string]interface{}{"model_ratio": float64(1)},
+	}
+	rightDigest, err := DigestBlockV1("edge.digest", 1, right)
+	require.NoError(t, err)
+
+	assert.NotEqual(t, leftDigest, rightDigest)
+}
+
 func settlementDigestRequestForTest() dto.EdgeSettlementBlockRequestV1 {
 	status := 200
 	return dto.EdgeSettlementBlockRequestV1{

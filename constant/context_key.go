@@ -72,6 +72,9 @@ const (
 	// ContextKeyEdgeGroupRatio pins the effective group ratio selected from the
 	// atomically applied edge snapshot for the lifetime of one relay request.
 	ContextKeyEdgeGroupRatio ContextKey = "edge_group_ratio"
+	// ContextKeyEdgeGroupSpecialRatio preserves whether the effective ratio came
+	// from a user-group-specific override, so logs keep the same display meaning.
+	ContextKeyEdgeGroupSpecialRatio ContextKey = "edge_group_special_ratio"
 
 	// ContextKeyAuditLogged marks that the current request has already recorded
 	// a manage/operation audit log inside the handler. When set, the admin-audit

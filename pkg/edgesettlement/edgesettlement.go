@@ -23,12 +23,12 @@ const (
 
 var ErrInvalidInput = errors.New("edgesettlement: invalid input")
 
-// canonicalBlockV1 deliberately excludes request_id, transport idempotency,
-// nonce, timestamp, signature, block_digest and optional observability passenger
-// fields. Those values may change on an HTTP retry or do not participate in
-// accounting identity. Node identity and generation are included to prevent
-// transplanting an otherwise valid chain to another edge or replacement
-// generation.
+// canonicalBlockV1 deliberately excludes transport request identity,
+// idempotency metadata, nonce, signature, block_digest and the independently
+// transported first-response timestamp. The consume-log snapshot remains in
+// Events and therefore participates in the digest as immutable durable log
+// evidence. Node identity and generation prevent transplanting an otherwise
+// valid chain to another edge or replacement generation.
 type canonicalBlockV1 struct {
 	ProtocolVersion     string                 `json:"protocol_version"`
 	NodeID              string                 `json:"node_id"`

@@ -11,6 +11,7 @@ import (
 	"github.com/QuantumNous/new-api/model"
 	"github.com/QuantumNous/new-api/pkg/edgeauth"
 	"github.com/QuantumNous/new-api/pkg/edgesettlement"
+	coreservice "github.com/QuantumNous/new-api/service"
 
 	"gorm.io/gorm"
 )
@@ -92,10 +93,11 @@ type edgeConsumeLogOutboxPayload struct {
 }
 
 type masterSettlementCharge struct {
-	event           *dto.EdgeUsageEventV1
-	snapshotID      int64
-	chargedQuota    int64
-	normalizedUsage *dto.Usage
+	event             *dto.EdgeUsageEventV1
+	snapshotID        int64
+	chargedQuota      int64
+	normalizedUsage   *dto.Usage
+	billingPreference string
 }
 
 // SettleMasterUsageBlockTx accepts one contiguous block exactly once. It
@@ -196,6 +198,7 @@ func SettleMasterUsageBlockTx(tx *gorm.DB, identity *model.EdgeControlIdentity, 
 		}
 		charges = append(charges, masterSettlementCharge{
 			event: event, snapshotID: snapshotID, chargedQuota: chargedQuota, normalizedUsage: normalizedUsage,
+			billingPreference: policies.users[event.UserID].Setting.BillingPreference,
 		})
 	}
 	windowSeconds, windowQuota, err := masterSettlementWindowConfig()
@@ -241,10 +244,11 @@ func SettleMasterUsageBlockTx(tx *gorm.DB, identity *model.EdgeControlIdentity, 
 
 	for _, charge := range charges {
 		event := charge.event
-		if err := model.ApplyEdgeSettlementChargeTx(
+		chargeResult, err := model.ApplyEdgeSettlementChargeTx(
 			tx, int(event.UserID), int(event.TokenID), event.FundingSource, int(event.UserSubscriptionID),
 			event.TokenUnlimitedQuota, charge.chargedQuota,
-		); err != nil {
+		)
+		if err != nil {
 			return nil, err
 		}
 		promptTokens, completionTokens := masterUsageTokenTotals(charge.normalizedUsage)
@@ -256,6 +260,32 @@ func SettleMasterUsageBlockTx(tx *gorm.DB, identity *model.EdgeControlIdentity, 
 		if err != nil {
 			return nil, err
 		}
+		var consumeLogSnapshotPayload *string
+		if event.ConsumeLogSnapshot != nil {
+			payload, err := common.Marshal(event.ConsumeLogSnapshot)
+			if err != nil {
+				return nil, err
+			}
+			value := string(payload)
+			consumeLogSnapshotPayload = &value
+		}
+		settlementFacts := coreservice.TextConsumeLogSettlementFacts{
+			BillingSource: event.FundingSource, BillingPreference: charge.billingPreference,
+		}
+		if event.FundingSource == coreservice.BillingSourceSubscription {
+			settlementFacts.SubscriptionID = chargeResult.SubscriptionID
+			settlementFacts.SubscriptionPreConsumed = event.Billing.ReservedQuota
+			settlementFacts.SubscriptionPostDelta = charge.chargedQuota - event.Billing.ReservedQuota
+			settlementFacts.SubscriptionPlanID = chargeResult.SubscriptionPlanID
+			settlementFacts.SubscriptionPlanTitle = chargeResult.SubscriptionPlanTitle
+			settlementFacts.SubscriptionTotal = chargeResult.SubscriptionTotal
+			settlementFacts.SubscriptionUsed = chargeResult.SubscriptionUsed
+		}
+		settlementPayload, err := common.Marshal(settlementFacts)
+		if err != nil {
+			return nil, err
+		}
+		settlementValue := string(settlementPayload)
 		httpStatus := 0
 		if event.HTTPStatus != nil {
 			httpStatus = *event.HTTPStatus
@@ -277,12 +307,16 @@ func SettleMasterUsageBlockTx(tx *gorm.DB, identity *model.EdgeControlIdentity, 
 			ChargedQuota: charge.chargedQuota, PricingPolicyID: event.Billing.PricingPolicyID,
 			PricingPolicyVersion: event.Billing.PricingPolicyVersion,
 			UsagePayload:         string(usagePayload), BillingPayload: string(billingPayload),
+			ConsumeLogSnapshotPayload:   consumeLogSnapshotPayload,
+			ConsumeLogSettlementPayload: &settlementValue,
 		}
 		if err := tx.Create(storedEvent).Error; err != nil {
 			return nil, err
 		}
-		if err := model.AddEdgeSettlementStatsTx(tx, int(event.UserID), int(event.TokenID), int(event.ChannelID), charge.chargedQuota, event.FinishedAtUnixMilli/1000); err != nil {
-			return nil, err
+		if promptTokens+completionTokens > 0 {
+			if err := model.AddEdgeSettlementStatsTx(tx, int(event.UserID), int(event.TokenID), int(event.ChannelID), charge.chargedQuota, event.FinishedAtUnixMilli/1000); err != nil {
+				return nil, err
+			}
 		}
 		outboxPayload, err := common.Marshal(edgeConsumeLogOutboxPayload{
 			EventID: event.EventID, NodeID: node.NodeUID, NodeGeneration: node.Generation,

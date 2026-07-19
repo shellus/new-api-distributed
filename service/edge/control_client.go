@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"crypto/ed25519"
+	"crypto/tls"
+	"crypto/x509"
 	"errors"
 	"fmt"
 	"io"
@@ -42,6 +44,7 @@ const (
 var (
 	ErrEdgeControlNodeDisabled      = errors.New("edge control node is disabled")
 	ErrEdgeControlProtocolViolation = errors.New("edge control protocol violation")
+	ErrEdgeControlUnavailable       = errors.New("edge control temporarily unavailable")
 )
 
 type EdgeControlClientConfig struct {
@@ -278,11 +281,11 @@ func (c *EdgeControlClient) prepareMeta(meta dto.EdgeControlRequestMetaV1, kind 
 func (c *EdgeControlClient) Bootstrap(ctx context.Context, request dto.EdgeBootstrapRequestV1) (*dto.EdgeBootstrapResponseV1, error) {
 	meta, err := c.prepareMeta(request.Meta, "bootstrap")
 	if err != nil {
-		return nil, err
+		return nil, edgeControlInvalidRequest("bootstrap metadata", err)
 	}
 	request.Meta = meta
 	if err := request.Validate(); err != nil {
-		return nil, err
+		return nil, edgeControlInvalidRequest("bootstrap request", err)
 	}
 	response := &dto.EdgeBootstrapResponseV1{}
 	if err := c.doJSON(ctx, "/control/v1/bootstrap", request.Meta.RequestID, request, response); err != nil {
@@ -308,11 +311,11 @@ func (c *EdgeControlClient) Bootstrap(ctx context.Context, request dto.EdgeBoots
 func (c *EdgeControlClient) Heartbeat(ctx context.Context, request dto.EdgeHeartbeatRequestV1) (*dto.EdgeHeartbeatResponseV1, error) {
 	meta, err := c.prepareMeta(request.Meta, "heartbeat")
 	if err != nil {
-		return nil, err
+		return nil, edgeControlInvalidRequest("heartbeat metadata", err)
 	}
 	request.Meta = meta
 	if err := request.Validate(); err != nil {
-		return nil, err
+		return nil, edgeControlInvalidRequest("heartbeat request", err)
 	}
 	response := &dto.EdgeHeartbeatResponseV1{}
 	if err := c.doJSON(ctx, "/control/v1/heartbeat", request.Meta.RequestID, request, response); err != nil {
@@ -345,11 +348,11 @@ func (c *EdgeControlClient) Heartbeat(ctx context.Context, request dto.EdgeHeart
 func (c *EdgeControlClient) SnapshotManifest(ctx context.Context, request dto.EdgeSnapshotManifestRequestV1) (*dto.EdgeSnapshotManifestResponseV1, error) {
 	meta, err := c.prepareMeta(request.Meta, "snapshot-manifest")
 	if err != nil {
-		return nil, err
+		return nil, edgeControlInvalidRequest("snapshot manifest metadata", err)
 	}
 	request.Meta = meta
 	if err := request.Validate(); err != nil {
-		return nil, err
+		return nil, edgeControlInvalidRequest("snapshot manifest request", err)
 	}
 	response := &dto.EdgeSnapshotManifestResponseV1{}
 	if err := c.doJSON(ctx, "/control/v1/snapshot/manifest", request.Meta.RequestID, request, response); err != nil {
@@ -367,11 +370,11 @@ func (c *EdgeControlClient) SnapshotManifest(ctx context.Context, request dto.Ed
 func (c *EdgeControlClient) SnapshotPage(ctx context.Context, request dto.EdgeSnapshotPageRequestV1) (*dto.EdgeSnapshotPageResponseV1, error) {
 	meta, err := c.prepareMeta(request.Meta, "snapshot-page")
 	if err != nil {
-		return nil, err
+		return nil, edgeControlInvalidRequest("snapshot page metadata", err)
 	}
 	request.Meta = meta
 	if err := request.Validate(); err != nil {
-		return nil, err
+		return nil, edgeControlInvalidRequest("snapshot page request", err)
 	}
 	response := &dto.EdgeSnapshotPageResponseV1{}
 	if err := c.doJSON(ctx, "/control/v1/snapshot/page", request.Meta.RequestID, request, response); err != nil {
@@ -389,11 +392,11 @@ func (c *EdgeControlClient) SnapshotPage(ctx context.Context, request dto.EdgeSn
 func (c *EdgeControlClient) SubmitSettlement(ctx context.Context, request dto.EdgeSettlementBlockRequestV1) (*dto.EdgeSettlementBlockResponseV1, error) {
 	meta, err := c.prepareMeta(request.Meta, "settlement")
 	if err != nil {
-		return nil, err
+		return nil, edgeControlInvalidRequest("settlement metadata", err)
 	}
 	request.Meta = meta
 	if err := request.Validate(); err != nil {
-		return nil, err
+		return nil, edgeControlInvalidRequest("settlement request", err)
 	}
 	response := &dto.EdgeSettlementBlockResponseV1{}
 	if err := c.doJSON(ctx, "/control/v1/settlement/block", request.Meta.RequestID, request, response); err != nil {
@@ -454,10 +457,71 @@ func edgeControlInvalidResponse(component string, err error) error {
 	return fmt.Errorf("%w: invalid %s: %v", ErrEdgeControlProtocolViolation, component, err)
 }
 
+func edgeControlInvalidRequest(component string, err error) error {
+	return fmt.Errorf("%w: invalid outgoing %s: %v", ErrEdgeControlProtocolViolation, component, err)
+}
+
+func edgeControlRetryableHTTPStatus(statusCode int) bool {
+	return statusCode == http.StatusRequestTimeout ||
+		statusCode == http.StatusTooEarly ||
+		statusCode == http.StatusTooManyRequests ||
+		(statusCode >= http.StatusInternalServerError && statusCode <= 599)
+}
+
+func edgeControlErrorCodeValid(code dto.EdgeControlErrorCodeV1) bool {
+	switch code {
+	case dto.EdgeControlErrorCodeInvalidRequestV1,
+		dto.EdgeControlErrorCodeUnsupportedProtocolV1,
+		dto.EdgeControlErrorCodeAuthenticationFailedV1,
+		dto.EdgeControlErrorCodeInvalidSignatureV1,
+		dto.EdgeControlErrorCodeReplayDetectedV1,
+		dto.EdgeControlErrorCodeNodeDisabledV1,
+		dto.EdgeControlErrorCodeIdempotencyConflictV1,
+		dto.EdgeControlErrorCodeSnapshotNotFoundV1,
+		dto.EdgeControlErrorCodeSnapshotCursorStaleV1,
+		dto.EdgeControlErrorCodeSettlementOutOfOrderV1,
+		dto.EdgeControlErrorCodeSettlementConflictV1,
+		dto.EdgeControlErrorCodeRateLimitedV1,
+		dto.EdgeControlErrorCodeTemporarilyUnavailableV1,
+		dto.EdgeControlErrorCodeInternalV1:
+		return true
+	default:
+		return false
+	}
+}
+
+func edgeControlTransportFailure(ctx context.Context, err error) error {
+	if err == nil {
+		return nil
+	}
+	if ctx != nil && ctx.Err() != nil {
+		return ctx.Err()
+	}
+	var certificateVerificationError *tls.CertificateVerificationError
+	var unknownAuthorityError x509.UnknownAuthorityError
+	var hostnameError x509.HostnameError
+	var certificateInvalidError x509.CertificateInvalidError
+	var systemRootsError x509.SystemRootsError
+	var recordHeaderError tls.RecordHeaderError
+	if errors.As(err, &certificateVerificationError) || errors.As(err, &unknownAuthorityError) ||
+		errors.As(err, &hostnameError) || errors.As(err, &certificateInvalidError) ||
+		errors.As(err, &systemRootsError) || errors.As(err, &recordHeaderError) {
+		return fmt.Errorf("%w: TLS peer verification failed: %v", ErrEdgeControlProtocolViolation, err)
+	}
+	return fmt.Errorf("%w: %v", ErrEdgeControlUnavailable, err)
+}
+
+func edgeControlUnavailableResponse(statusCode int, detail string) error {
+	if detail == "" {
+		return fmt.Errorf("%w: HTTP %d", ErrEdgeControlUnavailable, statusCode)
+	}
+	return fmt.Errorf("%w: HTTP %d: %s", ErrEdgeControlUnavailable, statusCode, detail)
+}
+
 func (c *EdgeControlClient) doJSON(ctx context.Context, path string, requestID string, request any, response any) error {
 	body, err := common.Marshal(request)
 	if err != nil {
-		return err
+		return edgeControlInvalidRequest("JSON body", err)
 	}
 	target := *c.masterURL
 	target.Path = path
@@ -467,14 +531,14 @@ func (c *EdgeControlClient) doJSON(ctx context.Context, path string, requestID s
 	defer cancel()
 	httpRequest, err := http.NewRequestWithContext(requestContext, http.MethodPost, target.String(), bytes.NewReader(body))
 	if err != nil {
-		return err
+		return edgeControlInvalidRequest("HTTP request", err)
 	}
 	httpRequest.Header.Set("Content-Type", "application/json")
 	httpRequest.Header.Set("Accept", "application/json")
 	httpRequest.Header.Set("Accept-Encoding", "identity")
 	nonce, err := edgeauth.NewNonce()
 	if err != nil {
-		return err
+		return fmt.Errorf("%w: generate request nonce: %v", ErrEdgeControlProtocolViolation, err)
 	}
 	metadata := edgeauth.Metadata{
 		Version: edgeauth.VersionV1, NodeID: c.nodeID, Generation: c.nodeGeneration,
@@ -482,23 +546,37 @@ func (c *EdgeControlClient) doJSON(ctx context.Context, path string, requestID s
 		IdempotencyKey: requestID,
 	}
 	if err := edgeauth.SignHTTPRequest(httpRequest, body, c.credentialKey, metadata); err != nil {
-		return err
+		return fmt.Errorf("%w: sign request: %v", ErrEdgeControlProtocolViolation, err)
 	}
 	httpResponse, err := c.httpClient.Do(httpRequest)
 	if err != nil {
-		return err
+		return edgeControlTransportFailure(ctx, err)
 	}
 	defer httpResponse.Body.Close()
+	retryableStatus := edgeControlRetryableHTTPStatus(httpResponse.StatusCode)
 	if encoding := strings.TrimSpace(httpResponse.Header.Get("Content-Encoding")); encoding != "" && !strings.EqualFold(encoding, "identity") {
+		if retryableStatus {
+			return edgeControlUnavailableResponse(httpResponse.StatusCode, fmt.Sprintf("unsupported response content encoding %q", encoding))
+		}
 		return fmt.Errorf("%w: unsupported response content encoding %q", ErrEdgeControlProtocolViolation, encoding)
 	}
 	limited := io.LimitReader(httpResponse.Body, c.maxResponseBytes+1)
 	responseBody, err := io.ReadAll(limited)
 	if err != nil {
-		return err
+		return edgeControlTransportFailure(ctx, err)
 	}
 	if int64(len(responseBody)) > c.maxResponseBytes {
+		if retryableStatus {
+			return edgeControlUnavailableResponse(httpResponse.StatusCode, "response exceeds the configured size limit")
+		}
 		return fmt.Errorf("%w: response exceeds %d bytes", ErrEdgeControlProtocolViolation, c.maxResponseBytes)
+	}
+	if retryableStatus {
+		contentType := strings.TrimSpace(httpResponse.Header.Get("Content-Type"))
+		if contentType == "" {
+			return edgeControlUnavailableResponse(httpResponse.StatusCode, "response has no content type")
+		}
+		return edgeControlUnavailableResponse(httpResponse.StatusCode, "response content type is "+contentType)
 	}
 	contentType := strings.TrimSpace(httpResponse.Header.Get("Content-Type"))
 	mediaType, _, parseErr := mime.ParseMediaType(contentType)
@@ -513,7 +591,7 @@ func (c *EdgeControlClient) doJSON(ctx context.Context, path string, requestID s
 		if err := c.validateResponseMeta(remote.Meta, requestID); err != nil {
 			return err
 		}
-		if remote.Error.Code == "" || strings.TrimSpace(remote.Error.Message) == "" {
+		if !edgeControlErrorCodeValid(remote.Error.Code) || strings.TrimSpace(remote.Error.Message) == "" {
 			return fmt.Errorf("%w: structured error is incomplete", ErrEdgeControlProtocolViolation)
 		}
 		return &EdgeControlRemoteError{StatusCode: httpResponse.StatusCode, Response: remote}

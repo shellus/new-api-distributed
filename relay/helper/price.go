@@ -50,8 +50,10 @@ func HandleGroupRatio(ctx *gin.Context, relayInfo *relaycommon.RelayInfo) types.
 	if common.IsEdgeMode() {
 		if ratio, ok := common.GetContextKeyType[float64](ctx, constant.ContextKeyEdgeGroupRatio); ok {
 			groupRatioInfo.GroupRatio = ratio
-			groupRatioInfo.GroupSpecialRatio = ratio
-			groupRatioInfo.HasSpecialRatio = true
+			if common.GetContextKeyBool(ctx, constant.ContextKeyEdgeGroupSpecialRatio) {
+				groupRatioInfo.GroupSpecialRatio = ratio
+				groupRatioInfo.HasSpecialRatio = true
+			}
 		} else {
 			// Missing signed group policy must fail closed. ModelPriceHelper returns
 			// a concrete error before relay; retries retain a zero ratio here.

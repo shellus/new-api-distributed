@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/QuantumNous/new-api/common"
+	"github.com/QuantumNous/new-api/dto"
 	"github.com/QuantumNous/new-api/logger"
 	"github.com/QuantumNous/new-api/types"
 
@@ -331,18 +332,19 @@ func RecordErrorLog(c *gin.Context, userId int, channelId int, modelName string,
 }
 
 type RecordConsumeLogParams struct {
-	ChannelId        int                    `json:"channel_id"`
-	PromptTokens     int                    `json:"prompt_tokens"`
-	CompletionTokens int                    `json:"completion_tokens"`
-	ModelName        string                 `json:"model_name"`
-	TokenName        string                 `json:"token_name"`
-	Quota            int                    `json:"quota"`
-	Content          string                 `json:"content"`
-	TokenId          int                    `json:"token_id"`
-	UseTimeSeconds   int                    `json:"use_time_seconds"`
-	IsStream         bool                   `json:"is_stream"`
-	Group            string                 `json:"group"`
-	Other            map[string]interface{} `json:"other"`
+	ChannelId        int                           `json:"channel_id"`
+	PromptTokens     int                           `json:"prompt_tokens"`
+	CompletionTokens int                           `json:"completion_tokens"`
+	ModelName        string                        `json:"model_name"`
+	TokenName        string                        `json:"token_name"`
+	Quota            int                           `json:"quota"`
+	Content          string                        `json:"content"`
+	TokenId          int                           `json:"token_id"`
+	UseTimeSeconds   int                           `json:"use_time_seconds"`
+	IsStream         bool                          `json:"is_stream"`
+	Group            string                        `json:"group"`
+	Other            map[string]interface{}        `json:"other"`
+	RequestSnapshot  *dto.EdgeConsumeLogSnapshotV1 `json:"-"`
 }
 
 func RecordConsumeLog(c *gin.Context, userId int, params RecordConsumeLogParams) {
@@ -354,36 +356,45 @@ func RecordConsumeLog(c *gin.Context, userId int, params RecordConsumeLogParams)
 	requestId := c.GetString(common.RequestIdKey)
 	upstreamRequestId := c.GetString(common.UpstreamRequestIdKey)
 	createdAt := common.GetTimestamp()
-	otherStr := common.MapToJsonStr(params.Other)
+	other := params.Other
 	// 判断是否需要记录 IP
-	needRecordIp := false
-	if settingMap, err := GetUserSetting(userId, false); err == nil {
-		if settingMap.RecordIpLog {
-			needRecordIp = true
+	ip := ""
+	if params.RequestSnapshot == nil {
+		if settingMap, err := GetUserSetting(userId, false); err == nil && settingMap.RecordIpLog {
+			ip = c.ClientIP()
 		}
+	} else {
+		snapshot := params.RequestSnapshot
+		username = snapshot.Username
+		params.TokenName = snapshot.TokenName
+		params.ModelName = snapshot.ModelName
+		params.Content = snapshot.Content
+		if snapshot.UseTimeSeconds != nil {
+			params.UseTimeSeconds = int(*snapshot.UseTimeSeconds)
+		}
+		ip = snapshot.IP
+		requestId = snapshot.RequestID
+		upstreamRequestId = snapshot.UpstreamRequestID
+		other = snapshot.Other
 	}
+	otherStr := common.MapToJsonStr(other)
 	log := &Log{
-		UserId:           userId,
-		Username:         username,
-		CreatedAt:        createdAt,
-		Type:             LogTypeConsume,
-		Content:          params.Content,
-		PromptTokens:     params.PromptTokens,
-		CompletionTokens: params.CompletionTokens,
-		TokenName:        params.TokenName,
-		ModelName:        params.ModelName,
-		Quota:            params.Quota,
-		ChannelId:        params.ChannelId,
-		TokenId:          params.TokenId,
-		UseTime:          params.UseTimeSeconds,
-		IsStream:         params.IsStream,
-		Group:            params.Group,
-		Ip: func() string {
-			if needRecordIp {
-				return c.ClientIP()
-			}
-			return ""
-		}(),
+		UserId:            userId,
+		Username:          username,
+		CreatedAt:         createdAt,
+		Type:              LogTypeConsume,
+		Content:           params.Content,
+		PromptTokens:      params.PromptTokens,
+		CompletionTokens:  params.CompletionTokens,
+		TokenName:         params.TokenName,
+		ModelName:         params.ModelName,
+		Quota:             params.Quota,
+		ChannelId:         params.ChannelId,
+		TokenId:           params.TokenId,
+		UseTime:           params.UseTimeSeconds,
+		IsStream:          params.IsStream,
+		Group:             params.Group,
+		Ip:                ip,
 		RequestId:         requestId,
 		UpstreamRequestId: upstreamRequestId,
 		Other:             otherStr,

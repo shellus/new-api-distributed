@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/QuantumNous/new-api/common"
+	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/dto"
 	"github.com/QuantumNous/new-api/model"
 	"github.com/QuantumNous/new-api/pkg/edgeauth"
@@ -68,6 +69,143 @@ func TestMasterSettlementChargesSubscriptionAndAllowsActualAboveReserve(t *testi
 	var stored model.UserSubscription
 	require.NoError(t, fixture.db.First(&stored, subscription.Id).Error)
 	assert.Equal(t, int64(220), stored.AmountUsed)
+}
+
+func TestMasterSettlementZeroUsageCreatesEventWithoutConsumptionStatistics(t *testing.T) {
+	fixture := newMasterSettlementTestFixture(t, "zero-usage-log", 5_000, 5_000)
+	request := masterSettlementBlockForTest(t, fixture, 1, "wallet", 0, false)
+	request.Events[0].Usage = &dto.BillingUsage{
+		Source: dto.BillingUsageSourceOAIChat, Semantic: dto.BillingUsageSemanticOpenAI,
+		OpenAIUsage: &dto.Usage{},
+	}
+	request.Events[0].Billing.ReservedQuota = 0
+	request.Events[0].Billing.ChargedQuota = 0
+	useTime := int64(1)
+	request.Events[0].ConsumeLogSnapshot = &dto.EdgeConsumeLogSnapshotV1{
+		Username: fixture.user.Username, TokenName: fixture.token.Name, ModelName: "gpt-test",
+		UseTimeSeconds: &useTime, RequestID: "zero-visible", Other: map[string]interface{}{"request_path": "/v1/chat/completions"},
+	}
+	require.NoError(t, edgesettlement.SetBlockDigestV1(fixture.node.NodeUID, fixture.node.Generation, &request))
+
+	settleMasterBlockForTest(t, fixture, request, "settlement-zero-usage-log")
+	assertMasterSettlementBalances(t, fixture, 5_000, 0, 5_000, 0, 0)
+	var user model.User
+	require.NoError(t, fixture.db.First(&user, fixture.user.Id).Error)
+	assert.Zero(t, user.RequestCount)
+	for _, target := range []any{&model.EdgeUsageEvent{}, &model.EdgeConsumeLogOutbox{}} {
+		var count int64
+		require.NoError(t, fixture.db.Model(target).Count(&count).Error)
+		assert.Equal(t, int64(1), count)
+	}
+}
+
+func TestMasterSettlementUsesSharedGeminiCompletionFallback(t *testing.T) {
+	fixture := newMasterSettlementTestFixture(t, "gemini-normalization", 5_000, 5_000)
+	request := masterSettlementBlockForTest(t, fixture, 1, "wallet", 0, false)
+	request.Events[0].Usage = dto.NewGeminiChatBillingUsage(&dto.GeminiUsageMetadata{
+		PromptTokenCount: 100, TotalTokenCount: 110,
+	})
+	request.Events[0].Billing.ReservedQuota = 120
+	request.Events[0].Billing.ChargedQuota = 120
+	require.NoError(t, edgesettlement.SetBlockDigestV1(fixture.node.NodeUID, fixture.node.Generation, &request))
+
+	settleMasterBlockForTest(t, fixture, request, "settlement-gemini-normalization")
+	var stored model.EdgeUsageEvent
+	require.NoError(t, fixture.db.First(&stored).Error)
+	assert.Equal(t, 100, stored.PromptTokens)
+	assert.Equal(t, 10, stored.CompletionTokens)
+}
+
+func TestRecomputeMasterUsageQuotaAcceptsNormalizedOpenRouterClaudeUsage(t *testing.T) {
+	modelRatio := 1.0
+	completionRatio := 1.0
+	cacheRatio := 0.1
+	policies := &masterSnapshotPolicies{
+		users: map[int64]dto.EdgeUserPolicyV1{7: {UserID: 7, Enabled: true, DefaultGroup: "default"}},
+		groups: map[string]dto.EdgeGroupPolicyV1{"default": {
+			UserGroup: "default", UsingGroups: []dto.EdgeUsingGroupPolicyV1{{Group: "default", Enabled: true, Ratio: 1}},
+		}},
+		models: map[string]dto.EdgeModelPolicyV1{"anthropic/claude-test": {
+			Model: "anthropic/claude-test", Enabled: true, Endpoints: []dto.EdgeEndpointV1{dto.EdgeEndpointOpenAIChatCompletionsV1}, ChannelIDs: []int64{31},
+		}},
+		channels: map[int64]dto.EdgeChannelProjectionV1{31: {
+			ChannelID: 31, Type: constant.ChannelTypeOpenRouter, Enabled: true, Groups: []string{"default"}, Models: []string{"anthropic/claude-test"},
+		}},
+		pricing: map[string]dto.EdgePricingPolicyV1{
+			masterPricingKey("claude-policy", "v1", "anthropic/claude-test"): {
+				PolicyID: "claude-policy", Version: "v1", Model: "anthropic/claude-test", BillingMode: dto.EdgeBillingModeRatioV1,
+				ModelRatio: &modelRatio, CompletionRatio: &completionRatio, CacheReadRatio: &cacheRatio,
+				CacheCreationRatio: &modelRatio, CacheCreation1hRatio: &modelRatio, QuotaPerUnit: 1,
+			},
+		},
+	}
+	event := &dto.EdgeUsageEventV1{
+		UserID: 7, ChannelID: 31, Endpoint: dto.EdgeEndpointOpenAIChatCompletionsV1,
+		Model: "anthropic/claude-test", Group: "default", Outcome: dto.EdgeUsageOutcomeSuccessV1,
+		Usage: &dto.BillingUsage{
+			Source: dto.BillingUsageSourceClaudeMessages, Semantic: dto.BillingUsageSemanticAnthropic,
+			ClaudeUsage: &dto.ClaudeUsage{InputTokens: 172, OutputTokens: 383, CacheReadInputTokens: 2_432},
+		},
+		Billing: dto.EdgeUsageBillingV1{
+			PricingPolicyID: "claude-policy", PricingPolicyVersion: "v1", BillingMode: dto.EdgeBillingModeRatioV1, GroupRatio: 1,
+		},
+	}
+
+	quota, usage, err := recomputeMasterUsageQuota(policies, 7, event)
+	require.NoError(t, err)
+	assert.Equal(t, int64(798), quota)
+	assert.Equal(t, 172, usage.PromptTokens)
+	assert.Equal(t, 2_432, usage.PromptTokensDetails.CachedTokens)
+}
+
+func TestRecomputeMasterUsageQuotaUsesMasterCacheCreationDefaults(t *testing.T) {
+	modelRatio := 1.0
+	for _, tc := range []struct {
+		name                  string
+		cacheCreation1hTokens int
+		wantQuota             int64
+	}{
+		{name: "default cache creation", wantQuota: 10},
+		{name: "one hour cache creation", cacheCreation1hTokens: 8, wantQuota: 16},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			policies := &masterSnapshotPolicies{
+				users: map[int64]dto.EdgeUserPolicyV1{7: {UserID: 7, Enabled: true, DefaultGroup: "default"}},
+				groups: map[string]dto.EdgeGroupPolicyV1{"default": {
+					UserGroup: "default", UsingGroups: []dto.EdgeUsingGroupPolicyV1{{Group: "default", Enabled: true, Ratio: 1}},
+				}},
+				models: map[string]dto.EdgeModelPolicyV1{"gpt-cache-defaults": {
+					Model: "gpt-cache-defaults", Enabled: true, Endpoints: []dto.EdgeEndpointV1{dto.EdgeEndpointOpenAIChatCompletionsV1}, ChannelIDs: []int64{31},
+				}},
+				channels: map[int64]dto.EdgeChannelProjectionV1{31: {
+					ChannelID: 31, Enabled: true, Groups: []string{"default"}, Models: []string{"gpt-cache-defaults"},
+				}},
+				pricing: map[string]dto.EdgePricingPolicyV1{
+					masterPricingKey("cache-defaults", "v1", "gpt-cache-defaults"): {
+						PolicyID: "cache-defaults", Version: "v1", Model: "gpt-cache-defaults",
+						BillingMode: dto.EdgeBillingModeRatioV1, ModelRatio: &modelRatio, QuotaPerUnit: 1,
+					},
+				},
+			}
+			event := &dto.EdgeUsageEventV1{
+				UserID: 7, ChannelID: 31, Endpoint: dto.EdgeEndpointOpenAIChatCompletionsV1,
+				Model: "gpt-cache-defaults", Group: "default", Outcome: dto.EdgeUsageOutcomeSuccessV1,
+				Usage: dto.NewOpenAIChatBillingUsage(&dto.Usage{
+					PromptTokens: 8, TotalTokens: 8,
+					PromptTokensDetails:         dto.InputTokenDetails{CachedCreationTokens: 8},
+					ClaudeCacheCreation1hTokens: tc.cacheCreation1hTokens,
+				}),
+				Billing: dto.EdgeUsageBillingV1{
+					PricingPolicyID: "cache-defaults", PricingPolicyVersion: "v1",
+					BillingMode: dto.EdgeBillingModeRatioV1, GroupRatio: 1,
+				},
+			}
+
+			quota, _, err := recomputeMasterUsageQuota(policies, 7, event)
+			require.NoError(t, err)
+			assert.Equal(t, tc.wantQuota, quota)
+		})
+	}
 }
 
 func TestProcessSettlementCircuitRejectionCommitsOnlyCircuitAndReceipt(t *testing.T) {

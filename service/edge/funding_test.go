@@ -79,6 +79,35 @@ func TestEdgeBalanceFundingRefundsZeroChargeWithoutSettlementUsage(t *testing.T)
 	assert.Zero(t, usageEvents)
 }
 
+func TestEdgeBalanceFundingPersistsZeroUsageWhenConsumeLogSnapshotExists(t *testing.T) {
+	db, now := newEdgeRuntimeTestDB(t, "")
+	funding := newEdgeBalanceFundingForTest(db, now, "reservation-zero-log", "request-zero-log")
+	funding.relayInfo.SettlementUsage = &dto.BillingUsage{
+		Source: dto.BillingUsageSourceOAIChat, Semantic: dto.BillingUsageSemanticOpenAI,
+		OpenAIUsage: &dto.Usage{},
+	}
+	funding.relayInfo.EdgeConsumeLogSnapshot = &dto.EdgeConsumeLogSnapshotV1{
+		Username: "request-user",
+		Other:    map[string]interface{}{"request_path": "/v1/chat/completions"},
+	}
+
+	require.NoError(t, funding.PreConsume(100))
+	require.NoError(t, funding.Settle(-100))
+
+	reservation, err := model.GetEdgeLocalReservation(db, funding.reservationID)
+	require.NoError(t, err)
+	assert.Equal(t, model.EdgeLocalReservationStatusSettled, reservation.Status)
+	assert.Zero(t, reservation.ChargedQuota)
+	assert.NotEmpty(t, reservation.EventID)
+
+	var stored model.EdgeLocalUsageEvent
+	require.NoError(t, db.First(&stored).Error)
+	var event dto.EdgeUsageEventV1
+	require.NoError(t, common.UnmarshalJsonStr(stored.Payload, &event))
+	require.NotNil(t, event.ConsumeLogSnapshot)
+	assert.Equal(t, "request-user", event.ConsumeLogSnapshot.Username)
+}
+
 func TestEdgeBalanceFundingBuildUsageEventIncludesFirstResponseTime(t *testing.T) {
 	db, now := newEdgeRuntimeTestDB(t, "")
 	funding := newEdgeBalanceFundingForTest(db, now, "reservation-frt", "request-frt")
@@ -89,6 +118,26 @@ func TestEdgeBalanceFundingBuildUsageEventIncludesFirstResponseTime(t *testing.T
 	require.NoError(t, err)
 	require.NotNil(t, event.FirstResponseAtUnixMilli)
 	assert.Equal(t, firstResponseAt.UnixMilli(), *event.FirstResponseAtUnixMilli)
+}
+
+func TestEdgeBalanceFundingBuildUsageEventCarriesSnapshotWithoutFRT(t *testing.T) {
+	db, now := newEdgeRuntimeTestDB(t, "")
+	funding := newEdgeBalanceFundingForTest(db, now, "reservation-log-snapshot", "request-log-snapshot")
+	funding.relayInfo.EdgeConsumeLogSnapshot = &dto.EdgeConsumeLogSnapshotV1{
+		Username: "request-user",
+		Other: map[string]interface{}{
+			"frt":         float64(250),
+			"model_ratio": float64(1.5),
+		},
+	}
+
+	event, err := funding.buildUsageEvent(100)
+	require.NoError(t, err)
+	require.NotNil(t, event.ConsumeLogSnapshot)
+	assert.Equal(t, "request-user", event.ConsumeLogSnapshot.Username)
+	assert.NotContains(t, event.ConsumeLogSnapshot.Other, "frt")
+	assert.Equal(t, float64(1.5), event.ConsumeLogSnapshot.Other["model_ratio"])
+	assert.Contains(t, funding.relayInfo.EdgeConsumeLogSnapshot.Other, "frt", "event sanitization must not mutate the request snapshot")
 }
 
 func TestEdgeBalanceFundingBuildUsageEventOmitsMissingFirstResponseTime(t *testing.T) {

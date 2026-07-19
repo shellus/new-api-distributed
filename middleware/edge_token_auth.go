@@ -91,7 +91,7 @@ func EdgeTokenAuth() gin.HandlerFunc {
 		if usingGroup == "" {
 			usingGroup = user.DefaultGroup
 		}
-		groupRatio, allowed := edgeUsingGroupRatio(groupPolicy, usingGroup)
+		groupRatio, specialRatio, allowed := edgeUsingGroupRatio(groupPolicy, usingGroup)
 		if !allowed {
 			abortWithOpenAiMessage(c, http.StatusForbidden, "the token group is unavailable on this edge", types.ErrorCodeAccessDenied)
 			return
@@ -103,7 +103,7 @@ func EdgeTokenAuth() gin.HandlerFunc {
 		// Its stable fingerprint preserves per-token affinity semantics without
 		// exposing the original credential to the local runtime context.
 		c.Set("token_key", fingerprint)
-		c.Set("token_name", fmt.Sprintf("edge-token-%d", auth.TokenID))
+		c.Set("token_name", auth.TokenName)
 		c.Set("token_unlimited_quota", true)
 		if auth.ModelLimitEnabled {
 			allowedModels := make(map[string]bool, len(auth.AllowedModels))
@@ -126,20 +126,23 @@ func EdgeTokenAuth() gin.HandlerFunc {
 		common.SetContextKey(c, constant.ContextKeyUserSetting, dto.UserSetting{
 			AcceptUnsetRatioModel: user.Setting.AcceptUnsetRatioModel,
 			Language:              user.Setting.Language,
+			BillingPreference:     user.Setting.BillingPreference,
+			RecordIpLog:           user.Setting.RecordIpLog,
 		})
 		common.SetContextKey(c, constant.ContextKeyEdgeGroupRatio, groupRatio)
+		common.SetContextKey(c, constant.ContextKeyEdgeGroupSpecialRatio, specialRatio)
 		c.Next()
 	}
 }
 
-func edgeUsingGroupRatio(policy *dto.EdgeGroupPolicyV1, usingGroup string) (float64, bool) {
+func edgeUsingGroupRatio(policy *dto.EdgeGroupPolicyV1, usingGroup string) (float64, bool, bool) {
 	if policy == nil {
-		return 0, false
+		return 0, false, false
 	}
 	for _, candidate := range policy.UsingGroups {
 		if candidate.Group == usingGroup && candidate.Enabled {
-			return candidate.Ratio, true
+			return candidate.Ratio, candidate.SpecialRatio, true
 		}
 	}
-	return 0, false
+	return 0, false, false
 }

@@ -22,6 +22,7 @@ import (
 )
 
 func TestEdgeSnapshotCompilerProjectsCanonicalSafePolicy(t *testing.T) {
+	t.Setenv("EDGE_CONSUME_LOG_SNAPSHOT_FIELDS_ENABLED", "true")
 	state := edgeSnapshotCompilerTestState()
 	projection, err := projectEdgeSnapshotDatabaseState(state)
 	require.NoError(t, err)
@@ -50,6 +51,7 @@ func TestEdgeSnapshotCompilerProjectsCanonicalSafePolicy(t *testing.T) {
 	}, projection.Models[2].Endpoints)
 
 	for _, authentication := range projection.Authentication {
+		assert.NotEmpty(t, authentication.TokenName)
 		if authentication.ModelLimitEnabled {
 			assert.Equal(t, []string{"gpt-5.3-codex", "gpt-5.4"}, authentication.AllowedModels)
 		}
@@ -61,6 +63,22 @@ func TestEdgeSnapshotCompilerProjectsCanonicalSafePolicy(t *testing.T) {
 	assert.Equal(t, "zh-cn", projection.Users[1].Setting.Language)
 	assert.Equal(t, "subscription_first", projection.Users[0].Setting.BillingPreference)
 	assert.Equal(t, "wallet_only", projection.Users[1].Setting.BillingPreference)
+	assert.True(t, projection.Users[1].Setting.RecordIpLog)
+}
+
+func TestEdgeSnapshotCompilerMasterFirstOmitsNewLogFieldsByDefault(t *testing.T) {
+	t.Setenv("EDGE_CONSUME_LOG_SNAPSHOT_FIELDS_ENABLED", "false")
+	projection, err := projectEdgeSnapshotDatabaseState(edgeSnapshotCompilerTestState())
+	require.NoError(t, err)
+	payload, err := common.Marshal(dto.EdgeSnapshotPagePayloadV1{
+		Authentication: projection.Authentication,
+		Users:          projection.Users,
+		Groups:         projection.Groups,
+	})
+	require.NoError(t, err)
+	assert.NotContains(t, string(payload), `"token_name"`)
+	assert.NotContains(t, string(payload), `"record_ip_log"`)
+	assert.NotContains(t, string(payload), `"special_ratio"`)
 }
 
 func TestEdgeSnapshotCompilerExcludesNonTextModels(t *testing.T) {
@@ -418,6 +436,28 @@ func TestEdgeSnapshotCompilerAllowsZeroRatioPricing(t *testing.T) {
 	assert.Equal(t, dto.EdgeBillingModeRatioV1, pricing.BillingMode)
 }
 
+func TestEdgeSnapshotCompilerRejectsUnsupportedTextMediaRatios(t *testing.T) {
+	modelRatio := 1.0
+	for _, tc := range []struct {
+		name  string
+		apply func(*edgeSnapshotPricingInput)
+	}{
+		{name: "image ratio", apply: func(input *edgeSnapshotPricingInput) { input.ImageRatioConfigured = true }},
+		{name: "audio input ratio", apply: func(input *edgeSnapshotPricingInput) { input.AudioRatioConfigured = true }},
+		{name: "audio completion ratio", apply: func(input *edgeSnapshotPricingInput) { input.AudioCompletionRatioConfigured = true }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			input := edgeSnapshotPricingInput{
+				Mode: billing_setting.BillingModeRatio, ModelRatio: &modelRatio, QuotaPerUnit: 500_000,
+			}
+			tc.apply(&input)
+			_, err := projectEdgeSnapshotPricing("gpt-media-ratio", input)
+			require.Error(t, err)
+			assert.ErrorIs(t, err, ErrEdgeSnapshotUnrepresentable)
+		})
+	}
+}
+
 const edgeSnapshotCompilerPrivateSecret = "edge-snapshot-private-key-secret-marker"
 
 func edgeSnapshotCompilerTestState() *edgeSnapshotDatabaseState {
@@ -435,11 +475,11 @@ func edgeSnapshotCompilerTestState() *edgeSnapshotDatabaseState {
 	allowIPs := "192.168.1.1\n10.0.0.0/8"
 	return &edgeSnapshotDatabaseState{
 		Tokens: []model.Token{
-			{Id: 2, UserId: 2, Key: "tokenSecretTwo", Status: common.TokenStatusEnabled, ExpiredTime: -1, UnlimitedQuota: true, ModelLimitsEnabled: false},
-			{Id: 1, UserId: 1, Key: "tokenSecretOne", Status: common.TokenStatusEnabled, ExpiredTime: 1_900_000_000, UnlimitedQuota: true, ModelLimitsEnabled: true, ModelLimits: "gpt-5.4-openai-compact,gpt-5.4,gpt-5.3-codex,gpt-5.4", AllowIps: &allowIPs},
+			{Id: 2, UserId: 2, Name: "token-two", Key: "tokenSecretTwo", Status: common.TokenStatusEnabled, ExpiredTime: -1, UnlimitedQuota: true, ModelLimitsEnabled: false},
+			{Id: 1, UserId: 1, Name: "token-one", Key: "tokenSecretOne", Status: common.TokenStatusEnabled, ExpiredTime: 1_900_000_000, UnlimitedQuota: true, ModelLimitsEnabled: true, ModelLimits: "gpt-5.4-openai-compact,gpt-5.4,gpt-5.3-codex,gpt-5.4", AllowIps: &allowIPs},
 		},
 		Users: []model.User{
-			{Id: 2, Username: "second", Password: "user-password-secret", Status: common.UserStatusEnabled, Email: "private-user@example.invalid", Group: "vip", Setting: `{"language":"zh-CN","billing_preference":"wallet_only","webhook_url":"https://notify.invalid/secret"}`},
+			{Id: 2, Username: "second", Password: "user-password-secret", Status: common.UserStatusEnabled, Email: "private-user@example.invalid", Group: "vip", Setting: `{"language":"zh-CN","billing_preference":"wallet_only","record_ip_log":true,"webhook_url":"https://notify.invalid/secret"}`},
 			{Id: 1, Username: "first", Password: "user-password-secret", Status: common.UserStatusEnabled, Email: "private-user@example.invalid", Group: "default", Setting: `{"accept_unset_model_ratio_model":true}`},
 		},
 		Channels: channels,

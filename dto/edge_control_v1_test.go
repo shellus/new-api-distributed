@@ -136,6 +136,72 @@ func edgeTestSettlementAckV1() EdgeSettlementAckV1 {
 	}
 }
 
+func TestEdgeConsumeLogSnapshotV1Validate(t *testing.T) {
+	useTime := int64(3)
+	snapshot := EdgeConsumeLogSnapshotV1{
+		Username:          "request-user",
+		TokenName:         "request-token",
+		ModelName:         "gpt-test",
+		Content:           "cache hit",
+		UseTimeSeconds:    &useTime,
+		IP:                "203.0.113.10",
+		RequestID:         "request-visible-1",
+		UpstreamRequestID: "upstream-1",
+		Other:             map[string]interface{}{"request_path": "/v1/chat/completions"},
+	}
+	require.NoError(t, snapshot.Validate())
+
+	invalidIP := snapshot
+	invalidIP.IP = "not-an-ip"
+	require.Error(t, invalidIP.Validate())
+
+	oversized := snapshot
+	oversized.Content = strings.Repeat("x", EdgeControlMaxConsumeLogContentLengthV1+1)
+	require.Error(t, oversized.Validate())
+
+	invalidUseTime := snapshot
+	negativeUseTime := int64(-1)
+	invalidUseTime.UseTimeSeconds = &negativeUseTime
+	require.Error(t, invalidUseTime.Validate())
+
+	oversizedRequestID := snapshot
+	oversizedRequestID.RequestID = strings.Repeat("r", EdgeControlMaxIdentifierLengthV1+1)
+	require.Error(t, oversizedRequestID.Validate())
+
+	oversizedOther := snapshot
+	oversizedOther.Other = map[string]interface{}{"payload": strings.Repeat("x", EdgeControlMaxConsumeLogOtherBytesV1)}
+	require.Error(t, oversizedOther.Validate())
+
+	withFRT := snapshot
+	withFRT.Other = map[string]interface{}{"frt": float64(100)}
+	require.Error(t, withFRT.Validate())
+
+	var decoded EdgeConsumeLogSnapshotV1
+	require.Error(t, common.DecodeJsonStrict(strings.NewReader(`{"other":"not-an-object"}`), &decoded))
+}
+
+func TestEdgeUsageEventV1StrictDecodeAcceptsOptionalConsumeLogSnapshot(t *testing.T) {
+	legacy := edgeValidUsageEventV1()
+	legacyPayload, err := common.Marshal(legacy)
+	require.NoError(t, err)
+	var decodedLegacy EdgeUsageEventV1
+	require.NoError(t, common.DecodeJsonStrict(bytes.NewReader(legacyPayload), &decodedLegacy))
+	assert.Nil(t, decodedLegacy.ConsumeLogSnapshot)
+
+	useTime := int64(2)
+	current := edgeValidUsageEventV1()
+	current.ConsumeLogSnapshot = &EdgeConsumeLogSnapshotV1{
+		Username: "request-user", TokenName: "request-token", UseTimeSeconds: &useTime,
+		Other: map[string]interface{}{"request_path": "/v1/responses"},
+	}
+	currentPayload, err := common.Marshal(current)
+	require.NoError(t, err)
+	var decodedCurrent EdgeUsageEventV1
+	require.NoError(t, common.DecodeJsonStrict(bytes.NewReader(currentPayload), &decodedCurrent))
+	require.NotNil(t, decodedCurrent.ConsumeLogSnapshot)
+	assert.Equal(t, "request-user", decodedCurrent.ConsumeLogSnapshot.Username)
+}
+
 func TestEdgeControlV1ContractsRoundTripWithCommonJSON(t *testing.T) {
 	expiresAt := int64(1_700_003_600_000)
 	httpStatus := 200

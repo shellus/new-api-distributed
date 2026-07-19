@@ -12,6 +12,7 @@ import (
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/dto"
 	"github.com/QuantumNous/new-api/model"
+	coreservice "github.com/QuantumNous/new-api/service"
 
 	"github.com/shopspring/decimal"
 	"gorm.io/gorm"
@@ -409,8 +410,8 @@ func recomputeMasterUsageQuota(policies *masterSnapshotPolicies, userID int, eve
 		}
 		completionRatio := masterOptionalRatio(policy.CompletionRatio, 1)
 		cacheReadRatio := masterOptionalRatio(policy.CacheReadRatio, 1)
-		cacheCreationRatio := masterOptionalRatio(policy.CacheCreationRatio, 1)
-		cacheCreation1hRatio := masterOptionalRatio(policy.CacheCreation1hRatio, cacheCreationRatio)
+		cacheCreationRatio := masterOptionalRatio(policy.CacheCreationRatio, 1.25)
+		cacheCreation1hRatio := masterOptionalRatio(policy.CacheCreation1hRatio, cacheCreationRatio*claudeCacheCreation1hMultiplier)
 
 		promptTokens := int64(usage.PromptTokens)
 		cachedTokens := int64(usage.PromptTokensDetails.CachedTokens)
@@ -461,96 +462,11 @@ func masterOptionalRatio(value *float64, fallback float64) float64 {
 }
 
 func normalizeMasterBillingUsage(billingUsage *dto.BillingUsage) (*dto.Usage, error) {
-	if billingUsage == nil {
-		return &dto.Usage{}, nil
-	}
-	switch billingUsage.Source {
-	case dto.BillingUsageSourceOAIChat, dto.BillingUsageSourceOAIResponses:
-		if billingUsage.OpenAIUsage == nil || billingUsage.Semantic != dto.BillingUsageSemanticOpenAI {
-			return nil, ErrMasterSettlementConflict
-		}
-		usage := *billingUsage.OpenAIUsage
-		if usage.PromptTokens == 0 && usage.InputTokens > 0 {
-			usage.PromptTokens = usage.InputTokens
-		}
-		if usage.CompletionTokens == 0 && usage.OutputTokens > 0 {
-			usage.CompletionTokens = usage.OutputTokens
-		}
-		if usage.TotalTokens == 0 {
-			usage.TotalTokens = usage.PromptTokens + usage.CompletionTokens
-		}
-		usage.UsageSemantic = dto.BillingUsageSemanticOpenAI
-		usage.UsageSource = billingUsage.Source
-		usage.BillingUsage = nil
-		return &usage, nil
-	case dto.BillingUsageSourceClaudeMessages:
-		if billingUsage.ClaudeUsage == nil || billingUsage.Semantic != dto.BillingUsageSemanticAnthropic {
-			return nil, ErrMasterSettlementConflict
-		}
-		claudeUsage := billingUsage.ClaudeUsage
-		cacheCreation5m := claudeUsage.GetCacheCreation5mTokens()
-		if cacheCreation5m == 0 {
-			cacheCreation5m = claudeUsage.ClaudeCacheCreation5mTokens
-		}
-		cacheCreation1h := claudeUsage.GetCacheCreation1hTokens()
-		if cacheCreation1h == 0 {
-			cacheCreation1h = claudeUsage.ClaudeCacheCreation1hTokens
-		}
-		usage := &dto.Usage{
-			PromptTokens: claudeUsage.InputTokens, CompletionTokens: claudeUsage.OutputTokens,
-			TotalTokens:   claudeUsage.InputTokens + claudeUsage.OutputTokens,
-			UsageSemantic: dto.BillingUsageSemanticAnthropic, UsageSource: dto.BillingUsageSourceClaudeMessages,
-			ClaudeCacheCreation5mTokens: cacheCreation5m, ClaudeCacheCreation1hTokens: cacheCreation1h,
-		}
-		usage.PromptTokensDetails.CachedTokens = claudeUsage.CacheReadInputTokens
-		usage.PromptTokensDetails.CachedCreationTokens = claudeUsage.GetCacheCreationTotalTokens()
-		return usage, nil
-	case dto.BillingUsageSourceGeminiChat:
-		if billingUsage.GeminiUsageMetadata == nil || billingUsage.Semantic != dto.BillingUsageSemanticGemini {
-			return nil, ErrMasterSettlementConflict
-		}
-		metadata := billingUsage.GeminiUsageMetadata
-		usage := &dto.Usage{
-			PromptTokens:     metadata.PromptTokenCount + metadata.ToolUsePromptTokenCount,
-			CompletionTokens: metadata.CandidatesTokenCount + metadata.ThoughtsTokenCount,
-			TotalTokens:      metadata.TotalTokenCount,
-			UsageSemantic:    dto.BillingUsageSemanticGemini, UsageSource: dto.BillingUsageSourceGeminiChat,
-		}
-		usage.PromptTokensDetails.CachedTokens = metadata.CachedContentTokenCount
-		for _, detail := range metadata.PromptTokensDetails {
-			addMasterGeminiInputDetail(&usage.PromptTokensDetails, detail)
-		}
-		for _, detail := range metadata.ToolUsePromptTokensDetails {
-			addMasterGeminiInputDetail(&usage.PromptTokensDetails, detail)
-		}
-		for _, detail := range metadata.CandidatesTokensDetails {
-			switch detail.Modality {
-			case "IMAGE":
-				usage.CompletionTokenDetails.ImageTokens += detail.TokenCount
-			case "AUDIO":
-				usage.CompletionTokenDetails.AudioTokens += detail.TokenCount
-			case "TEXT":
-				usage.CompletionTokenDetails.TextTokens += detail.TokenCount
-			}
-		}
-		if usage.TotalTokens == 0 {
-			usage.TotalTokens = usage.PromptTokens + usage.CompletionTokens
-		}
-		return usage, nil
-	default:
+	usage, err := coreservice.NormalizeBillingUsage(billingUsage)
+	if err != nil {
 		return nil, ErrMasterSettlementConflict
 	}
-}
-
-func addMasterGeminiInputDetail(details *dto.InputTokenDetails, detail dto.GeminiPromptTokensDetails) {
-	switch detail.Modality {
-	case "AUDIO":
-		details.AudioTokens += detail.TokenCount
-	case "IMAGE":
-		details.ImageTokens += detail.TokenCount
-	case "TEXT":
-		details.TextTokens += detail.TokenCount
-	}
+	return usage, nil
 }
 
 func masterUsageTokenTotals(usage *dto.Usage) (int, int) {

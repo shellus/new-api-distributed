@@ -243,13 +243,20 @@ func (f *EdgeBalanceFunding) buildUsageEvent(actualQuota int64) (*dto.EdgeUsageE
 			firstResponseAtUnixMilli = &firstResponseAt
 		}
 	}
+	consumeLogSnapshot, err := dto.CloneEdgeConsumeLogSnapshotV1(f.relayInfo.EdgeConsumeLogSnapshot)
+	if err != nil {
+		return nil, fmt.Errorf("clone edge consume-log snapshot: %w", err)
+	}
+	if consumeLogSnapshot != nil && consumeLogSnapshot.Other != nil {
+		delete(consumeLogSnapshot.Other, "frt")
+	}
 	return &dto.EdgeUsageEventV1{
 		EventID: "event-" + uuid.NewString(), ChannelID: int64(f.relayInfo.ChannelId),
 		Endpoint: endpoint, Streaming: f.relayInfo.IsStream, Model: f.relayInfo.OriginModelName,
 		Group: f.relayInfo.UsingGroup, StartedAtUnixMilli: startedAt,
 		FirstResponseAtUnixMilli: firstResponseAtUnixMilli, FinishedAtUnixMilli: finishedAt,
 		Outcome: dto.EdgeUsageOutcomeSuccessV1, HTTPStatus: &status,
-		Usage: dto.CloneBillingUsage(f.relayInfo.SettlementUsage),
+		Usage: dto.CloneBillingUsage(f.relayInfo.SettlementUsage), ConsumeLogSnapshot: consumeLogSnapshot,
 		Billing: dto.EdgeUsageBillingV1{
 			PricingPolicyID: f.pricing.PolicyID, PricingPolicyVersion: f.pricing.Version,
 			BillingMode: f.pricing.BillingMode, GroupRatio: f.relayInfo.PriceData.GroupRatioInfo.GroupRatio,

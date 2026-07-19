@@ -43,9 +43,14 @@ func edgeModelPriceHelper(c *gin.Context, info *relaycommon.RelayInfo, promptTok
 	if meta == nil {
 		meta = &types.TokenCountMeta{}
 	}
+	if meta.ImagePriceRatio != 0 || len(meta.BillingRatios) != 0 {
+		return types.PriceData{}, errors.New("request-specific billing multipliers are not supported by edge settlement v1")
+	}
 
-	groupInfo := types.GroupRatioInfo{
-		GroupRatio: groupRatio, GroupSpecialRatio: groupRatio, HasSpecialRatio: true,
+	groupInfo := types.GroupRatioInfo{GroupRatio: groupRatio, GroupSpecialRatio: -1}
+	if common.GetContextKeyBool(c, constant.ContextKeyEdgeGroupSpecialRatio) {
+		groupInfo.GroupSpecialRatio = groupRatio
+		groupInfo.HasSpecialRatio = true
 	}
 	priceData := types.PriceData{GroupRatioInfo: groupInfo}
 	switch policy.BillingMode {
@@ -65,12 +70,16 @@ func edgeModelPriceHelper(c *gin.Context, info *relaycommon.RelayInfo, promptTok
 		if policy.ModelRatio == nil {
 			return types.PriceData{}, errors.New("edge ratio policy has no model ratio")
 		}
+		priceData.ModelPrice = -1
 		priceData.ModelRatio = *policy.ModelRatio
 		priceData.CompletionRatio = edgeOptionalRatio(policy.CompletionRatio, 1)
 		priceData.CacheRatio = edgeOptionalRatio(policy.CacheReadRatio, 1)
-		priceData.CacheCreationRatio = edgeOptionalRatio(policy.CacheCreationRatio, 1)
+		priceData.CacheCreationRatio = edgeOptionalRatio(policy.CacheCreationRatio, 1.25)
 		priceData.CacheCreation5mRatio = priceData.CacheCreationRatio
-		priceData.CacheCreation1hRatio = edgeOptionalRatio(policy.CacheCreation1hRatio, priceData.CacheCreationRatio)
+		priceData.CacheCreation1hRatio = edgeOptionalRatio(policy.CacheCreation1hRatio, priceData.CacheCreationRatio*claudeCacheCreation1hMultiplier)
+		priceData.ImageRatio = 1
+		priceData.AudioRatio = 1
+		priceData.AudioCompletionRatio = 1
 		preConsumedTokens := common.Max(promptTokens, common.PreConsumedQuota)
 		if meta.MaxTokens > 0 {
 			if preConsumedTokens > common.MaxQuota-meta.MaxTokens {

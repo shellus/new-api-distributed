@@ -177,6 +177,10 @@ type RelayInfo struct {
 	// funding ignores it; edge balance funding persists it with the reservation
 	// and durable usage outbox in the same local transaction.
 	SettlementUsage *dto.BillingUsage
+	// EdgeConsumeLogSnapshot captures the request-time display and relay facts
+	// that cannot be reconstructed after asynchronous settlement. Accounting
+	// dimensions and amounts remain authoritative on the usage event itself.
+	EdgeConsumeLogSnapshot *dto.EdgeConsumeLogSnapshotV1
 	// EdgePricingPolicy pins the signed pricing projection used for both local
 	// quota calculation and authoritative settlement verification.
 	EdgePricingPolicy *dto.EdgePricingPolicyV1

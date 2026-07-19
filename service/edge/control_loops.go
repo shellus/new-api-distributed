@@ -776,6 +776,9 @@ func edgeControlFatalError(err error) bool {
 	if err == nil {
 		return false
 	}
+	if errors.Is(err, ErrEdgeControlUnavailable) || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return false
+	}
 	if errors.Is(err, ErrEdgeControlNodeDisabled) || errors.Is(err, ErrEdgeControlProtocolViolation) {
 		return true
 	}
@@ -784,14 +787,25 @@ func edgeControlFatalError(err error) bool {
 		return false
 	}
 	switch remote.Response.Error.Code {
-	case dto.EdgeControlErrorCodeUnsupportedProtocolV1,
+	case dto.EdgeControlErrorCodeInvalidRequestV1,
+		dto.EdgeControlErrorCodeUnsupportedProtocolV1,
 		dto.EdgeControlErrorCodeAuthenticationFailedV1,
 		dto.EdgeControlErrorCodeInvalidSignatureV1,
 		dto.EdgeControlErrorCodeNodeDisabledV1,
-		dto.EdgeControlErrorCodeIdempotencyConflictV1:
+		dto.EdgeControlErrorCodeIdempotencyConflictV1,
+		dto.EdgeControlErrorCodeSettlementOutOfOrderV1,
+		dto.EdgeControlErrorCodeSettlementConflictV1:
 		return true
-	default:
+	case dto.EdgeControlErrorCodeReplayDetectedV1,
+		dto.EdgeControlErrorCodeInternalV1:
+		return !remote.Retryable()
+	case dto.EdgeControlErrorCodeSnapshotNotFoundV1,
+		dto.EdgeControlErrorCodeSnapshotCursorStaleV1,
+		dto.EdgeControlErrorCodeRateLimitedV1,
+		dto.EdgeControlErrorCodeTemporarilyUnavailableV1:
 		return false
+	default:
+		return true
 	}
 }
 
