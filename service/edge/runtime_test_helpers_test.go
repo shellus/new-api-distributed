@@ -192,7 +192,7 @@ func settleEdgeRuntimeUsage(
 	t.Helper()
 	_, err := model.ReserveEdgeLocalBalance(db, model.EdgeLocalBalanceReservationRequest{
 		ReservationID: reservationID, RequestID: requestID, UserID: 7, TokenID: 11,
-		Quota: reservedQuota, NegativeFloorQuota: -10_000_000, NowUnixMilli: now.UnixMilli(),
+		Quota: reservedQuota, SettlementFloorQuota: -10_000_000, NowUnixMilli: now.UnixMilli(),
 	})
 	require.NoError(t, err)
 	status := http.StatusOK

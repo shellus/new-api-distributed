@@ -173,13 +173,13 @@ edge 不实现协议适配、流式转发、OAuth 凭证调度或第二套计费
 |------|------|
 | 形成第二套网关 | 协议、relay、计费和鉴权上下文直接复用同仓库 package |
 | 上游合并困难 | 默认入口保持兼容，新增业务集中在 edge package 和少量启动分支 |
-| 多节点超卖 | 每节点负余额下限、master 滑动窗口和 settlement circuit 限制风险敞口 |
+| 多节点超卖 | 新 reservation 必须保持本地有限账户非负；余额 revision、master 滑动窗口和 settlement circuit 限制不同节点使用陈旧正余额的风险 |
 | edge 本地结算失败丢账 | 精确 usage 先 staged；余额 overlay、usage event 和 outbox 再原子提交；失败时 accounting fail closed 并从 staged payload 恢复 |
 | edge 硬中断留下不确定 reservation | 同步请求保持 fail closed；异步任务 reservation 绑定任务所有权并按终态恢复，保留 SQLite 供核查 |
 | 重复结算 | 节点代次、连续序号、持久化请求 receipt 和 master 唯一约束 |
 | 日志或统计重复投影 | durable master outbox、全局 billing event key、consume log 唯一键和 `quota_data` 事件标记 |
 | 首次请求依赖 master 鉴权 | 全量同步安全令牌指纹，鉴权始终本地完成 |
-| master 失联停服 | 用户请求不访问 master，在最后余额投影、有效订阅/token 和本地负下限内继续工作 |
+| master 失联停服 | 用户请求不访问 master，在最后余额投影和有效订阅/token 的正余额内继续工作；Settlement Floor 只完成已执行请求的最终补扣 |
 | CPA 故障仍接流量 | 真实请求失败进入共享重试/渠道错误路径；缺少本地执行配置的渠道保持禁用 |
 | 快照切换与在途请求混用策略 | 数据面策略读写锁；reservation 固定快照、价格和余额版本，跨快照重试被拒绝 |
 
@@ -218,12 +218,12 @@ go build ./cmd/newapi-edge
 
 ## 当前 v2 实施状态（Phase A-E 已实现）
 
-本节替代现有租约方向，设计依据见 [ADR 0004](./adr/0004-replicated-balances-and-bounded-oversell.md)、[ADR 0005](./adr/0005-complete-edge-data-plane.md) 与 [分布式余额复制设计](./distributed-balance-replication.md)。第一至第五阶段保留为 v1 历史验收基线，不代表租约继续作为 v2 回退路径。Phase A-E 已完成代码与针对性后端验证；Phase F 的完整合并门、部署、真实链路和线上验收尚未执行。
+本节替代现有租约方向，设计依据见 [ADR 0004](./adr/0004-replicated-balances-and-bounded-oversell.md)、[ADR 0005](./adr/0005-complete-edge-data-plane.md)、[ADR 0006](./adr/0006-zero-admission-and-bounded-settlement.md) 与 [分布式余额复制设计](./distributed-balance-replication.md)。第一至第五阶段保留为 v1 历史验收基线，不代表租约继续作为 v2 回退路径。Phase A-E 已完成代码与针对性后端验证；Phase F 的完整合并门、部署、真实链路和线上验收尚未执行。
 
 ### Phase A：设计与审阅门禁（已审阅通过）
 
 1. 新增 ADR 0004，显式替代 ADR 0002。
-2. 固定余额向量、每节点 revision、心跳 diff、本地 overlay、结算回冲、负下限和节点熔断语义。
+2. 固定余额向量、每节点 revision、心跳 diff、本地 overlay、结算回冲、零余额 admission、Settlement Floor 和节点熔断语义。
 3. 技术负责人已裁决 batch update 双花窗口、settlement block 保留范围和受限 committed rejection 语义，允许进入 Phase B。
 
 ### Phase B：Master 余额数据集与协议 v2（已实现）
@@ -238,13 +238,13 @@ go build ./cmd/newapi-edge
 ### Phase C：Edge 本地账本、overlay 与租约拆除（已实现）
 
 1. 新增本地 balance account 表及 control revision 字段，第一次 v2 heartbeat 必须 full 初始化；余额与鉴权索引未同时就绪时 admission 关闭。
-2. 把 `EdgeLeaseFunding` 替换为 `EdgeBalanceFunding`，在同一 SQLite 事务预占资金账户和有限 token 账户；实现钱包/订阅优先级、unlimited 表示和 `EDGE_BALANCE_NEGATIVE_FLOOR_QUOTA`。
+2. 把 `EdgeLeaseFunding` 替换为 `EdgeBalanceFunding`，在同一 SQLite 事务预占资金账户和有限 token 账户；实现钱包/订阅优先级、unlimited 表示、零余额 admission 和独立 Settlement Floor。
 3. reservation 固定 funding source、订阅 ID、token 维度、策略 revision 和 balance revision；staged settlement、usage event、outbox 和连续序号保持 durable。
 4. 应用 balance delta 时使用 `settlement_applied_through_sequence` 清除已回冲的 unsettled overlay，保留较新消费与 active reservation，避免绝对余额覆盖本地新消费。
 5. 删除 lease acquire/renew/close 的 DTO、路由、client、service、model、后台循环、环境变量和本地表；把仍需保留的 settlement/usage/outbox 代码迁到无 lease 命名的文件。
 6. readiness 不再检查策略快照 TTL；最后一份已验证策略过期后只冻结变化。显式 token 到期、节点禁用、accounting 故障和未初始化余额仍 fail closed。
 7. 提供旧 `edge.db` 清洁迁移检查；存在 active/staged/pending 账务时拒绝升级。
-8. TDD 覆盖断网持续扣减、负下限、退款、实际 charge 超预占、overlay 收敛、重启恢复和策略 TTL 过期继续服务；测试通过并经用户确认后才提交。
+8. TDD 覆盖断网持续扣减到零、禁止主动透支、退款、实际 charge 超预占、结算变负后拒绝下一次正额度请求、overlay 收敛、重启恢复和策略 TTL 过期继续服务；测试通过并经用户确认后才提交。
 
 ### Phase D：Master 权威扣账与安全熔断（已实现）
 
@@ -268,9 +268,9 @@ go build ./cmd/newapi-edge
 1. 执行本计划“验证”中的全量后端、race、vet、build 和两套前端构建门；额外验证 SQLite、MySQL、PostgreSQL 的余额 diff 与 master 扣账事务。
 2. 升级前停止旧 edge admission，恢复 staged settlement，上传全部 outbox，关闭全部 v1 lease 并确认 master 没有非终态租约；未满足时禁止切换。
 3. 验证单次预扣超过 500,000 quota 的请求不再受租约上限阻断。
-4. 停止 master 不超过 5 分钟，验证 edge 在最后策略快照过期后仍可继续服务，本地钱包/订阅和有限 token 持续递减，直至余额负下限。
+4. 停止 master 不超过 5 分钟，验证 edge 在最后策略快照过期后仍可继续服务，本地钱包/订阅和有限 token 持续递减到零，下一次正额度请求在访问 CPA 前失败。
 5. 恢复 master，验证 settlement 回放只扣一次权威账，后续 heartbeat diff 清除 unsettled overlay，edge 与 master 收敛。
-6. 双节点同时消费同一低余额账户，验证允许超卖、权威余额可为负、master 普通鉴权阻止继续消费，并验证负下限与节点滑动窗口熔断。
+6. 双节点同时消费同一低余额账户，验证只有陈旧正余额窗口会产生超卖；任一节点同步到非正余额后停止新 admission，已执行请求仍可在 Settlement Floor 内落账，并验证节点滑动窗口熔断。
 7. 验证旧 v1 edge 无余额 full dataset 时明确失败，不静默回退租约。
 8. Phase F 前不操作生产容器或远程节点；部署和真实链路验收仍需用户单独授权。
 

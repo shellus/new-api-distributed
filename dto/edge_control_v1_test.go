@@ -1313,6 +1313,10 @@ func edgeFloat64PtrV1(value float64) *float64 {
 	return &value
 }
 
+func edgeIntPtrV1(value int) *int {
+	return &value
+}
+
 func edgeValidPricingPolicyV1(mode EdgeBillingModeV1) EdgePricingPolicyV1 {
 	policy := EdgePricingPolicyV1{
 		PolicyID:             "pricing-policy-1",
@@ -1771,6 +1775,8 @@ func TestEdgePricingPolicyV1ValidateAndDetectDynamicDependencies(t *testing.T) {
 		{name: "infinite completion ratio", mutate: func(value *EdgePricingPolicyV1) { value.CompletionRatio = edgeFloat64PtrV1(math.Inf(1)) }},
 		{name: "negative cache ratio", mutate: func(value *EdgePricingPolicyV1) { value.CacheReadRatio = edgeFloat64PtrV1(-0.1) }},
 		{name: "zero quota per unit", mutate: func(value *EdgePricingPolicyV1) { value.QuotaPerUnit = 0 }},
+		{name: "negative pre-consumed quota", mutate: func(value *EdgePricingPolicyV1) { value.PreConsumedQuota = edgeIntPtrV1(-1) }},
+		{name: "oversized pre-consumed quota", mutate: func(value *EdgePricingPolicyV1) { value.PreConsumedQuota = edgeIntPtrV1(common.MaxQuota + 1) }},
 		{name: "missing expression", mutate: func(value *EdgePricingPolicyV1) { value.BillingExpression = "" }},
 		{name: "hash mismatch", mutate: func(value *EdgePricingPolicyV1) { value.BillingExpressionHash = edgeTestDigestV1("a") }},
 		{name: "unknown expression version", mutate: func(value *EdgePricingPolicyV1) {

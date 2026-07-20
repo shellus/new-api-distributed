@@ -21,7 +21,11 @@ import (
 	"gorm.io/gorm"
 )
 
-const defaultEdgeBalanceNegativeFloorQuota = -10_000_000
+const (
+	defaultEdgeBalanceSettlementFloorQuota = -10_000_000
+	edgeBalanceSettlementFloorQuotaEnv     = "EDGE_BALANCE_SETTLEMENT_FLOOR_QUOTA"
+	legacyEdgeBalanceNegativeFloorQuotaEnv = "EDGE_BALANCE_NEGATIVE_FLOOR_QUOTA"
+)
 
 // BillingSessionFactory connects the shared BillingSession to the durable
 // edge-local replicated balance ledger. It never contacts master on the user
@@ -39,7 +43,7 @@ func BillingSessionFactory(c *gin.Context, preConsumedQuota int, relayInfo *rela
 	if relayInfo.EdgePricingPolicy == nil {
 		return nil, edgeFundingAPIError(errors.New("edge pricing policy is not pinned"), http.StatusServiceUnavailable)
 	}
-	floor, err := edgeBalanceNegativeFloorQuota()
+	floor, err := edgeBalanceSettlementFloorQuota()
 	if err != nil {
 		return nil, edgeFundingAPIError(err, http.StatusServiceUnavailable)
 	}
@@ -48,7 +52,7 @@ func BillingSessionFactory(c *gin.Context, preConsumedQuota int, relayInfo *rela
 		db: model.DB, responseStatus: func() int { return c.Writer.Status() },
 		relayInfo: relayInfo, pricing: *relayInfo.EdgePricingPolicy,
 		reservationID: reservationID, requestID: edgeUsageRequestID(relayInfo.RequestId, reservationID),
-		negativeFloorQuota: floor,
+		settlementFloorQuota: floor,
 	}
 	session, apiErr := coreservice.NewBillingSessionWithFunding(c, relayInfo, preConsumedQuota, funding, coreservice.NoopTokenQuotaAccounting{})
 	if apiErr == nil {
@@ -58,10 +62,11 @@ func BillingSessionFactory(c *gin.Context, preConsumedQuota int, relayInfo *rela
 	return session, apiErr
 }
 
-func edgeBalanceNegativeFloorQuota() (int64, error) {
-	value := int64(common.GetEnvOrDefault("EDGE_BALANCE_NEGATIVE_FLOOR_QUOTA", defaultEdgeBalanceNegativeFloorQuota))
+func edgeBalanceSettlementFloorQuota() (int64, error) {
+	legacyValue := common.GetEnvOrDefault(legacyEdgeBalanceNegativeFloorQuotaEnv, defaultEdgeBalanceSettlementFloorQuota)
+	value := int64(common.GetEnvOrDefault(edgeBalanceSettlementFloorQuotaEnv, legacyValue))
 	if value < -int64(common.MaxQuota) || value > 0 {
-		return 0, errors.New("EDGE_BALANCE_NEGATIVE_FLOOR_QUOTA must be between -common.MaxQuota and 0")
+		return 0, errors.New("EDGE_BALANCE_SETTLEMENT_FLOOR_QUOTA must be between -common.MaxQuota and 0")
 	}
 	return value, nil
 }
@@ -72,17 +77,17 @@ func edgeUsageRequestID(sourceRequestID, reservationID string) string {
 }
 
 type EdgeBalanceFunding struct {
-	db                 *gorm.DB
-	responseStatus     func() int
-	relayInfo          *relaycommon.RelayInfo
-	pricing            dto.EdgePricingPolicyV1
-	reservationID      string
-	requestID          string
-	negativeFloorQuota int64
-	reservation        *model.EdgeLocalQuotaReservation
-	reservedQuota      int64
-	hasReservation     bool
-	settledEvent       *dto.EdgeUsageEventV1
+	db                   *gorm.DB
+	responseStatus       func() int
+	relayInfo            *relaycommon.RelayInfo
+	pricing              dto.EdgePricingPolicyV1
+	reservationID        string
+	requestID            string
+	settlementFloorQuota int64
+	reservation          *model.EdgeLocalQuotaReservation
+	reservedQuota        int64
+	hasReservation       bool
+	settledEvent         *dto.EdgeUsageEventV1
 }
 
 func (f *EdgeBalanceFunding) Source() string { return coreservice.BillingSourceEdgeBalance }
@@ -122,7 +127,7 @@ func (f *EdgeBalanceFunding) PreConsume(amount int) error {
 	reservation, err := model.ReserveEdgeLocalBalance(f.db, model.EdgeLocalBalanceReservationRequest{
 		ReservationID: f.reservationID, RequestID: f.requestID,
 		UserID: int64(f.relayInfo.UserId), TokenID: int64(f.relayInfo.TokenId), Quota: int64(amount),
-		NegativeFloorQuota: f.negativeFloorQuota, NowUnixMilli: time.Now().UnixMilli(),
+		SettlementFloorQuota: f.settlementFloorQuota, NowUnixMilli: time.Now().UnixMilli(),
 	})
 	if err != nil {
 		return edgeFundingAPIError(err, edgeFundingStatus(err))

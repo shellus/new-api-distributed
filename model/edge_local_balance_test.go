@@ -23,7 +23,7 @@ func TestEdgeLocalBalanceReservationSettlementAndOverlayConverge(t *testing.T) {
 		Revision:     1,
 		Full:         true,
 		Wallets:      []dto.EdgeWalletBalanceV2{{UserID: 7, RemainQuota: 100}},
-		Tokens:       []dto.EdgeTokenBalanceV2{{TokenID: 11, UserID: 7, RemainQuota: 60}},
+		Tokens:       []dto.EdgeTokenBalanceV2{{TokenID: 11, UserID: 7, RemainQuota: 80}},
 		Subscriptions: []dto.EdgeSubscriptionBalanceV2{{
 			SubscriptionID: 21, UserID: 7, TotalQuota: 100, RemainQuota: 80,
 			ExpiresAtUnixMilli: now.Add(time.Hour).UnixMilli(), AllowWalletOverflow: true,
@@ -33,7 +33,7 @@ func TestEdgeLocalBalanceReservationSettlementAndOverlayConverge(t *testing.T) {
 
 	reservation, err := ReserveEdgeLocalBalance(db, EdgeLocalBalanceReservationRequest{
 		ReservationID: "reservation-balance-1", RequestID: "request-balance-1",
-		UserID: 7, TokenID: 11, Quota: 50, NegativeFloorQuota: -20, NowUnixMilli: now.UnixMilli(),
+		UserID: 7, TokenID: 11, Quota: 50, SettlementFloorQuota: -20, NowUnixMilli: now.UnixMilli(),
 	})
 	require.NoError(t, err)
 	assert.Equal(t, EdgeBalanceAccountTypeSubscription, reservation.FundingAccountType)
@@ -62,7 +62,7 @@ func TestEdgeLocalBalanceReservationSettlementAndOverlayConverge(t *testing.T) {
 		BaseRevision:                     1,
 		Revision:                         2,
 		SettlementAppliedThroughSequence: settled.Sequence,
-		Tokens:                           []dto.EdgeTokenBalanceV2{{TokenID: 11, UserID: 7, RemainQuota: -10}},
+		Tokens:                           []dto.EdgeTokenBalanceV2{{TokenID: 11, UserID: 7, RemainQuota: 10}},
 		Subscriptions: []dto.EdgeSubscriptionBalanceV2{{
 			SubscriptionID: 21, UserID: 7, TotalQuota: 100, RemainQuota: 10,
 			ExpiresAtUnixMilli: now.Add(time.Hour).UnixMilli(), AllowWalletOverflow: true,
@@ -74,7 +74,7 @@ func TestEdgeLocalBalanceReservationSettlementAndOverlayConverge(t *testing.T) {
 	assert.Zero(t, subscription.UnsettledQuota)
 	assert.Zero(t, token.UnsettledQuota)
 	assert.Equal(t, int64(10), subscription.ReplicatedQuota)
-	assert.Equal(t, int64(-10), token.ReplicatedQuota)
+	assert.Equal(t, int64(10), token.ReplicatedQuota)
 
 	require.NoError(t, ApplyEdgeLocalBalanceDelta(db, control, masterApplied, now.Add(4*time.Second).UnixMilli()))
 	state, err := GetEdgeLocalBalanceState(db)
@@ -84,7 +84,7 @@ func TestEdgeLocalBalanceReservationSettlementAndOverlayConverge(t *testing.T) {
 	assert.Equal(t, settled.Sequence, state.SettlementSequence)
 }
 
-func TestEdgeLocalBalanceWorksOfflineUntilNegativeFloor(t *testing.T) {
+func TestEdgeLocalBalanceWorksOfflineUntilZeroAdmissionFloor(t *testing.T) {
 	db := openEdgeLocalTestDB(t, "balance-offline.db")
 	require.NoError(t, ApplyEdgeLocalSnapshot(db, edgeLocalTestSnapshot(1)))
 	now := time.UnixMilli(edgeLocalTestNow + 20_000)
@@ -101,19 +101,65 @@ func TestEdgeLocalBalanceWorksOfflineUntilNegativeFloor(t *testing.T) {
 
 	reservation, err := ReserveEdgeLocalBalance(db, EdgeLocalBalanceReservationRequest{
 		ReservationID: "reservation-offline-1", RequestID: "request-offline-1",
-		UserID: 7, TokenID: 11, Quota: 80, NegativeFloorQuota: -20, NowUnixMilli: now.UnixMilli(),
+		UserID: 7, TokenID: 11, Quota: 60, SettlementFloorQuota: -20, NowUnixMilli: now.UnixMilli(),
 	})
 	require.NoError(t, err)
-	event := edgeLocalBalanceUsageEvent("event-offline-1", 80, now)
+	event := edgeLocalBalanceUsageEvent("event-offline-1", 60, now)
 	require.NoError(t, StageEdgeLocalReservationSettlement(db, reservation.ReservationID, event))
 	_, err = SettleStagedEdgeLocalReservation(db, reservation.ReservationID)
 	require.NoError(t, err)
 
 	_, err = ReserveEdgeLocalBalance(db, EdgeLocalBalanceReservationRequest{
 		ReservationID: "reservation-offline-2", RequestID: "request-offline-2",
-		UserID: 7, TokenID: 11, Quota: 1, NegativeFloorQuota: -20, NowUnixMilli: now.Add(time.Second).UnixMilli(),
+		UserID: 7, TokenID: 11, Quota: 1, SettlementFloorQuota: -20, NowUnixMilli: now.Add(time.Second).UnixMilli(),
 	})
 	assert.ErrorIs(t, err, ErrEdgeLocalQuotaInsufficient)
+}
+
+func TestEdgeLocalBalanceSeparatesAdmissionAndSettlementFloors(t *testing.T) {
+	db := openEdgeLocalTestDB(t, "balance-floor-separation.db")
+	snapshot := edgeLocalTestSnapshot(1)
+	snapshot.Users[0].Setting.BillingPreference = "wallet_only"
+	require.NoError(t, ApplyEdgeLocalSnapshot(db, snapshot))
+	now := time.UnixMilli(edgeLocalTestNow + 25_000)
+	control := dto.EdgeNodeControlConfigV1{NodeID: "edge.balance-floor-separation", NodeGeneration: 1}
+	require.NoError(t, ApplyEdgeLocalBalanceDelta(db, control, dto.EdgeBalanceDeltaV2{
+		Dataset: dto.EdgeBalanceDatasetBalancesV2, BaseRevision: 0, Revision: 1, Full: true,
+		Wallets: []dto.EdgeWalletBalanceV2{{UserID: 7, RemainQuota: 100}},
+		Tokens:  []dto.EdgeTokenBalanceV2{{TokenID: 11, UserID: 7, RemainQuota: 100}},
+	}, now.UnixMilli()))
+
+	_, err := ReserveEdgeLocalBalance(db, EdgeLocalBalanceReservationRequest{
+		ReservationID: "reservation-overdraft", RequestID: "request-overdraft",
+		UserID: 7, TokenID: 11, Quota: 101, SettlementFloorQuota: -20, NowUnixMilli: now.UnixMilli(),
+	})
+	assert.ErrorIs(t, err, ErrEdgeLocalQuotaInsufficient, "settlement tolerance must not grant admission credit")
+
+	reservation, err := ReserveEdgeLocalBalance(db, EdgeLocalBalanceReservationRequest{
+		ReservationID: "reservation-settlement-overrun", RequestID: "request-settlement-overrun",
+		UserID: 7, TokenID: 11, Quota: 100, SettlementFloorQuota: -20, NowUnixMilli: now.Add(time.Second).UnixMilli(),
+	})
+	require.NoError(t, err)
+	require.NoError(t, StageEdgeLocalReservationSettlement(db, reservation.ReservationID, edgeLocalBalanceUsageEvent("event-settlement-overrun", 110, now)))
+	_, err = SettleStagedEdgeLocalReservation(db, reservation.ReservationID)
+	require.NoError(t, err)
+
+	wallet := requireEdgeLocalBalanceAccount(t, db, EdgeBalanceAccountTypeWallet, 7)
+	token := requireEdgeLocalBalanceAccount(t, db, EdgeBalanceAccountTypeToken, 11)
+	assert.Equal(t, int64(110), wallet.UnsettledQuota)
+	assert.Equal(t, int64(110), token.UnsettledQuota)
+
+	_, err = ReserveEdgeLocalBalance(db, EdgeLocalBalanceReservationRequest{
+		ReservationID: "reservation-after-negative", RequestID: "request-after-negative",
+		UserID: 7, TokenID: 11, Quota: 1, SettlementFloorQuota: -20, NowUnixMilli: now.Add(2 * time.Second).UnixMilli(),
+	})
+	assert.ErrorIs(t, err, ErrEdgeLocalQuotaInsufficient)
+
+	_, err = ReserveEdgeLocalBalance(db, EdgeLocalBalanceReservationRequest{
+		ReservationID: "reservation-free-after-negative", RequestID: "request-free-after-negative",
+		UserID: 7, TokenID: 11, Quota: 0, SettlementFloorQuota: -20, NowUnixMilli: now.Add(3 * time.Second).UnixMilli(),
+	})
+	require.NoError(t, err, "zero-charge requests retain master free-model semantics")
 }
 
 func TestEdgeLocalSettlementRequestIDRefreshesAfterCircuitEpochAdvance(t *testing.T) {
@@ -128,7 +174,7 @@ func TestEdgeLocalSettlementRequestIDRefreshesAfterCircuitEpochAdvance(t *testin
 	}, now.UnixMilli()))
 	reservation, err := ReserveEdgeLocalBalance(db, EdgeLocalBalanceReservationRequest{
 		ReservationID: "reservation-circuit-retry", RequestID: "request-circuit-retry",
-		UserID: 7, TokenID: 11, Quota: 10, NegativeFloorQuota: -20, NowUnixMilli: now.UnixMilli(),
+		UserID: 7, TokenID: 11, Quota: 10, SettlementFloorQuota: -20, NowUnixMilli: now.UnixMilli(),
 	})
 	require.NoError(t, err)
 	_, err = SettleEdgeLocalReservation(db, reservation.ReservationID, edgeLocalBalanceUsageEvent("event-circuit-retry", 10, now))
@@ -167,7 +213,7 @@ func TestEdgeLocalReservationOwnerAndTaskLookupIncludeZeroQuota(t *testing.T) {
 
 	reservation, err := ReserveEdgeLocalBalance(db, EdgeLocalBalanceReservationRequest{
 		ReservationID: "reservation-task-owner", RequestID: "request-task-owner",
-		UserID: 7, TokenID: 11, Quota: 0, NegativeFloorQuota: -20, NowUnixMilli: now.UnixMilli(),
+		UserID: 7, TokenID: 11, Quota: 0, SettlementFloorQuota: -20, NowUnixMilli: now.UnixMilli(),
 	})
 	require.NoError(t, err)
 	require.NoError(t, BindEdgeLocalReservationOwner(db, reservation.ReservationID, "task", "task-owner-test", now.Add(time.Second).UnixMilli()))

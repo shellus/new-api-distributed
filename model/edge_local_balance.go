@@ -20,13 +20,13 @@ type EdgeLocalBalanceState struct {
 }
 
 type EdgeLocalBalanceReservationRequest struct {
-	ReservationID      string
-	RequestID          string
-	UserID             int64
-	TokenID            int64
-	Quota              int64
-	NegativeFloorQuota int64
-	NowUnixMilli       int64
+	ReservationID        string
+	RequestID            string
+	UserID               int64
+	TokenID              int64
+	Quota                int64
+	SettlementFloorQuota int64
+	NowUnixMilli         int64
 }
 
 func BindEdgeLocalReservationOwner(db *gorm.DB, reservationID, ownerKind, ownerID string, nowUnixMilli int64) error {
@@ -290,8 +290,8 @@ func ReserveEdgeLocalBalance(db *gorm.DB, request EdgeLocalBalanceReservationReq
 	if err := validateEdgeLocalQuota(request.Quota, true); err != nil {
 		return nil, err
 	}
-	if request.NegativeFloorQuota < -int64(common.MaxQuota) || request.NegativeFloorQuota > 0 {
-		return nil, errors.New("edge local negative floor is invalid")
+	if request.SettlementFloorQuota < -int64(common.MaxQuota) || request.SettlementFloorQuota > 0 {
+		return nil, errors.New("edge local settlement floor is invalid")
 	}
 
 	var reservation *EdgeLocalQuotaReservation
@@ -304,7 +304,7 @@ func ReserveEdgeLocalBalance(db *gorm.DB, request EdgeLocalBalanceReservationReq
 		if query.RowsAffected == 1 {
 			if existing.ReservationID == request.ReservationID && existing.RequestID == request.RequestID &&
 				existing.UserID == request.UserID && existing.TokenID == request.TokenID && existing.ReservedQuota == request.Quota &&
-				existing.NegativeFloorQuota == request.NegativeFloorQuota && existing.FundingAccountType != "" {
+				existing.SettlementFloorQuota == request.SettlementFloorQuota && existing.FundingAccountType != "" {
 				if existing.Status != EdgeLocalReservationStatusActive {
 					return ErrEdgeLocalReservationFinalized
 				}
@@ -328,7 +328,7 @@ func ReserveEdgeLocalBalance(db *gorm.DB, request EdgeLocalBalanceReservationReq
 		if err != nil || !user.Enabled {
 			return ErrEdgeLocalSnapshotMismatch
 		}
-		funding, err := selectEdgeLocalFundingAccountTx(tx, request.UserID, common.NormalizeBillingPreference(user.Setting.BillingPreference), request.Quota, request.NegativeFloorQuota, request.NowUnixMilli)
+		funding, err := selectEdgeLocalFundingAccountTx(tx, request.UserID, common.NormalizeBillingPreference(user.Setting.BillingPreference), request.Quota, request.NowUnixMilli)
 		if err != nil {
 			return err
 		}
@@ -339,10 +339,10 @@ func ReserveEdgeLocalBalance(db *gorm.DB, request EdgeLocalBalanceReservationReq
 		if token.UserID != request.UserID || token.Deleted {
 			return ErrEdgeLocalQuotaInsufficient
 		}
-		if err := reserveEdgeLocalAccountTx(tx, funding, request.Quota, request.NegativeFloorQuota, request.NowUnixMilli); err != nil {
+		if err := reserveEdgeLocalAccountTx(tx, funding, request.Quota, request.NowUnixMilli); err != nil {
 			return err
 		}
-		if err := reserveEdgeLocalAccountTx(tx, &token, request.Quota, request.NegativeFloorQuota, request.NowUnixMilli); err != nil {
+		if err := reserveEdgeLocalAccountTx(tx, &token, request.Quota, request.NowUnixMilli); err != nil {
 			return err
 		}
 		created := &EdgeLocalQuotaReservation{
@@ -352,7 +352,7 @@ func ReserveEdgeLocalBalance(db *gorm.DB, request EdgeLocalBalanceReservationReq
 			TokenAccountID: token.AccountID, TokenUnlimitedQuota: token.UnlimitedQuota,
 			SnapshotID: control.SnapshotID, SnapshotRevision: control.SnapshotRevision,
 			PricingRevision: pricing.Revision, BalanceRevision: control.BalanceRevision,
-			NegativeFloorQuota: request.NegativeFloorQuota, ReservedQuota: request.Quota,
+			SettlementFloorQuota: request.SettlementFloorQuota, ReservedQuota: request.Quota,
 			CreatedAtUnixMilli: request.NowUnixMilli, UpdatedAtUnixMilli: request.NowUnixMilli,
 		}
 		if err := tx.Create(created).Error; err != nil {
@@ -367,7 +367,7 @@ func ReserveEdgeLocalBalance(db *gorm.DB, request EdgeLocalBalanceReservationReq
 	return reservation, nil
 }
 
-func selectEdgeLocalFundingAccountTx(tx *gorm.DB, userID int64, preference string, quota, floor, nowUnixMilli int64) (*EdgeLocalBalanceAccount, error) {
+func selectEdgeLocalFundingAccountTx(tx *gorm.DB, userID int64, preference string, quota, nowUnixMilli int64) (*EdgeLocalBalanceAccount, error) {
 	var wallet EdgeLocalBalanceAccount
 	walletErr := tx.Where("account_type = ? AND account_id = ? AND deleted = ?", EdgeBalanceAccountTypeWallet, userID, false).First(&wallet).Error
 	var subscriptions []EdgeLocalBalanceAccount
@@ -378,14 +378,14 @@ func selectEdgeLocalFundingAccountTx(tx *gorm.DB, userID int64, preference strin
 	}
 	findSubscription := func() *EdgeLocalBalanceAccount {
 		for i := range subscriptions {
-			if edgeLocalAccountCanReserve(subscriptions[i], quota, floor) {
+			if edgeLocalAccountCanReserve(subscriptions[i], quota) {
 				copy := subscriptions[i]
 				return &copy
 			}
 		}
 		return nil
 	}
-	walletAvailable := walletErr == nil && edgeLocalAccountCanReserve(wallet, quota, floor)
+	walletAvailable := walletErr == nil && edgeLocalAccountCanReserve(wallet, quota)
 	subscription := findSubscription()
 	switch preference {
 	case "wallet_only":
@@ -424,17 +424,17 @@ func selectEdgeLocalFundingAccountTx(tx *gorm.DB, userID int64, preference strin
 	return nil, ErrEdgeLocalQuotaInsufficient
 }
 
-func edgeLocalAccountCanReserve(account EdgeLocalBalanceAccount, quota, floor int64) bool {
+func edgeLocalAccountCanReserve(account EdgeLocalBalanceAccount, quota int64) bool {
 	if account.Deleted {
 		return false
 	}
-	if account.UnlimitedQuota {
+	if account.UnlimitedQuota || quota == 0 {
 		return true
 	}
-	return account.ReplicatedQuota-account.ReservedQuota-account.UnsettledQuota-quota >= floor
+	return account.ReplicatedQuota-account.ReservedQuota-account.UnsettledQuota-quota >= 0
 }
 
-func reserveEdgeLocalAccountTx(tx *gorm.DB, account *EdgeLocalBalanceAccount, quota, floor, nowUnixMilli int64) error {
+func reserveEdgeLocalAccountTx(tx *gorm.DB, account *EdgeLocalBalanceAccount, quota, nowUnixMilli int64) error {
 	if account == nil || account.Deleted {
 		return ErrEdgeLocalQuotaInsufficient
 	}
@@ -442,8 +442,8 @@ func reserveEdgeLocalAccountTx(tx *gorm.DB, account *EdgeLocalBalanceAccount, qu
 		return nil
 	}
 	result := tx.Model(&EdgeLocalBalanceAccount{}).
-		Where("account_type = ? AND account_id = ? AND deleted = ? AND unlimited_quota = ? AND replicated_quota - reserved_quota - unsettled_quota - ? >= ?",
-			account.AccountType, account.AccountID, false, false, quota, floor).
+		Where("account_type = ? AND account_id = ? AND deleted = ? AND unlimited_quota = ? AND replicated_quota - reserved_quota - unsettled_quota - ? >= 0",
+			account.AccountType, account.AccountID, false, false, quota).
 		Updates(map[string]any{
 			"reserved_quota": gorm.Expr("reserved_quota + ?", quota), "updated_at_unix_milli": nowUnixMilli,
 		})
@@ -482,11 +482,11 @@ func AdjustEdgeLocalBalanceReservation(db *gorm.DB, reservationID string, target
 		}
 		delta := targetQuota - reservation.ReservedQuota
 		if delta != 0 {
-			if err := adjustEdgeLocalAccountReservedTx(tx, reservation.FundingAccountType, reservation.FundingAccountID, delta, reservation.NegativeFloorQuota, nowUnixMilli); err != nil {
+			if err := adjustEdgeLocalAccountReservedTx(tx, reservation.FundingAccountType, reservation.FundingAccountID, delta, nowUnixMilli); err != nil {
 				return err
 			}
 			if !reservation.TokenUnlimitedQuota {
-				if err := adjustEdgeLocalAccountReservedTx(tx, EdgeBalanceAccountTypeToken, reservation.TokenAccountID, delta, reservation.NegativeFloorQuota, nowUnixMilli); err != nil {
+				if err := adjustEdgeLocalAccountReservedTx(tx, EdgeBalanceAccountTypeToken, reservation.TokenAccountID, delta, nowUnixMilli); err != nil {
 					return err
 				}
 			}
@@ -506,13 +506,13 @@ func AdjustEdgeLocalBalanceReservation(db *gorm.DB, reservationID string, target
 	return adjusted, nil
 }
 
-func adjustEdgeLocalAccountReservedTx(tx *gorm.DB, accountType EdgeBalanceAccountType, accountID, delta, floor, nowUnixMilli int64) error {
+func adjustEdgeLocalAccountReservedTx(tx *gorm.DB, accountType EdgeBalanceAccountType, accountID, delta, nowUnixMilli int64) error {
 	if delta == 0 {
 		return nil
 	}
 	query := tx.Model(&EdgeLocalBalanceAccount{}).Where("account_type = ? AND account_id = ? AND unlimited_quota = ?", accountType, accountID, false)
 	if delta > 0 {
-		query = query.Where("deleted = ? AND replicated_quota - reserved_quota - unsettled_quota - ? >= ?", false, delta, floor)
+		query = query.Where("deleted = ? AND replicated_quota - reserved_quota - unsettled_quota - ? >= 0", false, delta)
 	} else {
 		query = query.Where("reserved_quota >= ?", -delta)
 	}
@@ -537,12 +537,12 @@ func settleStagedEdgeLocalBalanceReservationTx(tx *gorm.DB, reservation *EdgeLoc
 	}
 	charged := event.Billing.ChargedQuota
 	if err := settleEdgeLocalBalanceAccountTx(tx, reservation.FundingAccountType, reservation.FundingAccountID,
-		reservation.ReservedQuota, charged, reservation.NegativeFloorQuota, event.FinishedAtUnixMilli); err != nil {
+		reservation.ReservedQuota, charged, reservation.SettlementFloorQuota, event.FinishedAtUnixMilli); err != nil {
 		return err
 	}
 	if !reservation.TokenUnlimitedQuota {
 		if err := settleEdgeLocalBalanceAccountTx(tx, EdgeBalanceAccountTypeToken, reservation.TokenAccountID,
-			reservation.ReservedQuota, charged, reservation.NegativeFloorQuota, event.FinishedAtUnixMilli); err != nil {
+			reservation.ReservedQuota, charged, reservation.SettlementFloorQuota, event.FinishedAtUnixMilli); err != nil {
 			return err
 		}
 	}
@@ -573,12 +573,12 @@ func refundEdgeLocalBalanceReservationTx(tx *gorm.DB, reservation EdgeLocalQuota
 	}
 	if reservation.ReservedQuota > 0 {
 		if err := adjustEdgeLocalAccountReservedTx(tx, reservation.FundingAccountType, reservation.FundingAccountID,
-			-reservation.ReservedQuota, reservation.NegativeFloorQuota, nowUnixMilli); err != nil {
+			-reservation.ReservedQuota, nowUnixMilli); err != nil {
 			return err
 		}
 		if !reservation.TokenUnlimitedQuota {
 			if err := adjustEdgeLocalAccountReservedTx(tx, EdgeBalanceAccountTypeToken, reservation.TokenAccountID,
-				-reservation.ReservedQuota, reservation.NegativeFloorQuota, nowUnixMilli); err != nil {
+				-reservation.ReservedQuota, nowUnixMilli); err != nil {
 				return err
 			}
 		}

@@ -38,7 +38,7 @@ master 与 edge 基于同一个官方 New API 派生仓库。上游默认入口�
 
 ### 选择余额复制、本地预留与异步结算
 
-master 向 edge 复制带 revision 的钱包、订阅和 token 余额。edge 在本地余额 overlay 上原子预留，完成请求后把 durable usage event 组成 settlement block 异步上报；master 通过每节点负下限和 settlement circuit 限制断线风险。该决定见 ADR 0004。
+master 向 edge 复制带 revision 的钱包、订阅和 token 余额。edge 在本地余额 overlay 上原子预留，完成请求后把 durable usage event 组成 settlement block 异步上报；新请求必须在预占后保持有限账户非负，已执行请求的实际费用超过预扣时使用独立 Settlement Floor 完成落账。多节点窗口期风险继续由余额 revision 和 settlement circuit 约束。该决定见 ADR 0004 与 ADR 0006。
 
 ### 选择完整共享数据面
 
@@ -52,7 +52,7 @@ master 与 edge 使用同一套路由注册、relay、provider adaptor 和计费
 4. 正常用户请求不进行同步 master 调用。
 5. edge 必须拥有完整的安全令牌鉴权索引，首次请求鉴权在本地完成。
 6. 用户请求只使用本地余额投影和 reservation；master 不可用时不得为单个请求同步申请额度。
-7. master 使用每节点余额 revision、负下限和 settlement circuit 控制多节点离线消费风险。
+7. master 使用每节点余额 revision、零余额 admission 和 settlement circuit 控制多节点离线消费风险；Settlement Floor 只处理已经发生的真实消费。
 8. edge 使用 New API 的原生计费逻辑计算本地使用，master 按相同价格版本和 Billing Receipt 复核。
 9. usage event、reservation 结算和 outbox 必须使用可靠本地事务，不能依赖进程内队列。
 10. edge SQLite 是可恢复的自动投影和账务状态，不是人工配置入口。
@@ -82,7 +82,7 @@ master 与 edge 使用同一套路由注册、relay、provider adaptor 和计费
 - 通信 DTO 的具体字段、编码和分页形式。
 - 节点身份使用的具体密钥算法和注册流程。
 - token 安全指纹的具体算法与索引结构。
-- 每节点负余额下限、结算滑动窗口和 circuit 恢复阈值。
+- Settlement Floor、结算滑动窗口和 circuit 恢复阈值。
 - 快照同步、心跳和 settlement block 的具体时间或数量阈值。
 - edge 本地事务的表结构和清理周期。
 - master 节点列表的具体 UI 和客户端选点方式。

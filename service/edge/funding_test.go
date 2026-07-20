@@ -39,7 +39,7 @@ func TestEdgeBalanceFundingWorksWithoutMasterClient(t *testing.T) {
 func TestEdgeBalanceFundingSettlementCanExceedPreConsumeWithinFloor(t *testing.T) {
 	db, now := newEdgeRuntimeTestDB(t, "")
 	funding := newEdgeBalanceFundingForTest(db, now, "reservation-supplement", "request-supplement")
-	funding.negativeFloorQuota = -1_000_000
+	funding.settlementFloorQuota = -1_000_000
 
 	require.NoError(t, funding.PreConsume(100))
 	require.NoError(t, funding.Settle(50))
@@ -193,8 +193,30 @@ func newEdgeBalanceFundingForTest(db *gorm.DB, now time.Time, reservationID, req
 			BillingMode: dto.EdgeBillingModeFixedPriceV1,
 		},
 		reservationID: reservationID, requestID: requestID,
-		negativeFloorQuota: defaultEdgeBalanceNegativeFloorQuota,
+		settlementFloorQuota: defaultEdgeBalanceSettlementFloorQuota,
 	}
+}
+
+func TestEdgeBalanceSettlementFloorConfigPrefersNewNameAndSupportsLegacyAlias(t *testing.T) {
+	t.Setenv(edgeBalanceSettlementFloorQuotaEnv, "")
+	t.Setenv(legacyEdgeBalanceNegativeFloorQuotaEnv, "")
+	floor, err := edgeBalanceSettlementFloorQuota()
+	require.NoError(t, err)
+	assert.Equal(t, int64(defaultEdgeBalanceSettlementFloorQuota), floor)
+
+	t.Setenv(legacyEdgeBalanceNegativeFloorQuotaEnv, "-500")
+	floor, err = edgeBalanceSettlementFloorQuota()
+	require.NoError(t, err)
+	assert.Equal(t, int64(-500), floor)
+
+	t.Setenv(edgeBalanceSettlementFloorQuotaEnv, "-300")
+	floor, err = edgeBalanceSettlementFloorQuota()
+	require.NoError(t, err)
+	assert.Equal(t, int64(-300), floor)
+
+	t.Setenv(edgeBalanceSettlementFloorQuotaEnv, "1")
+	_, err = edgeBalanceSettlementFloorQuota()
+	assert.Error(t, err)
 }
 
 var _ coreservice.FundingSource = (*EdgeBalanceFunding)(nil)

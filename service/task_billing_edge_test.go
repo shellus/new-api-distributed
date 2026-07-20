@@ -30,7 +30,7 @@ func TestRecoverEdgeTaskBillingReconcilesSettledAndZeroQuotaFailedTasks(t *testi
 
 	settledReservation, err := model.ReserveEdgeLocalBalance(db, model.EdgeLocalBalanceReservationRequest{
 		ReservationID: "reservation-task-settled", RequestID: "request-task-settled",
-		UserID: 7, TokenID: 11, Quota: 40, NegativeFloorQuota: -100, NowUnixMilli: now.UnixMilli(),
+		UserID: 7, TokenID: 11, Quota: 40, SettlementFloorQuota: -100, NowUnixMilli: now.UnixMilli(),
 	})
 	require.NoError(t, err)
 	settledTask := &model.Task{
@@ -62,7 +62,7 @@ func TestRecoverEdgeTaskBillingReconcilesSettledAndZeroQuotaFailedTasks(t *testi
 
 	zeroReservation, err := model.ReserveEdgeLocalBalance(db, model.EdgeLocalBalanceReservationRequest{
 		ReservationID: "reservation-task-zero", RequestID: "request-task-zero",
-		UserID: 7, TokenID: 11, Quota: 0, NegativeFloorQuota: -100, NowUnixMilli: now.Add(2 * time.Second).UnixMilli(),
+		UserID: 7, TokenID: 11, Quota: 0, SettlementFloorQuota: -100, NowUnixMilli: now.Add(2 * time.Second).UnixMilli(),
 	})
 	require.NoError(t, err)
 	failedTask := &model.Task{
@@ -81,6 +81,50 @@ func TestRecoverEdgeTaskBillingReconcilesSettledAndZeroQuotaFailedTasks(t *testi
 	zeroReservation, err = model.GetEdgeLocalReservation(db, zeroReservation.ReservationID)
 	require.NoError(t, err)
 	assert.Equal(t, model.EdgeLocalReservationStatusRefunded, zeroReservation.Status)
+}
+
+func TestFinalizeEdgeTaskBillingUsesSettlementFloorWithoutExpandingAdmission(t *testing.T) {
+	db, now := newTaskBillingEdgeTestDB(t)
+	previousDB := model.DB
+	model.DB = db
+	require.NoError(t, common.SetRuntimeMode(common.RuntimeModeEdge))
+	t.Cleanup(func() {
+		model.DB = previousDB
+		require.NoError(t, common.SetRuntimeMode(common.RuntimeModeMaster))
+	})
+
+	reservation, err := model.ReserveEdgeLocalBalance(db, model.EdgeLocalBalanceReservationRequest{
+		ReservationID: "reservation-task-settlement-floor", RequestID: "request-task-settlement-floor",
+		UserID: 7, TokenID: 11, Quota: 1_000, SettlementFloorQuota: -100, NowUnixMilli: now.UnixMilli(),
+	})
+	require.NoError(t, err)
+	task := &model.Task{
+		TaskID: "task-settlement-floor", UserId: 7, Group: "default", ChannelId: 31, Quota: 1_000,
+		Status: model.TaskStatusSuccess, SubmitTime: now.Unix(), FinishTime: now.Add(time.Second).Unix(),
+		Properties: model.Properties{OriginModelName: "gpt-task"},
+		PrivateData: model.TaskPrivateData{
+			TokenId: 11, EdgeReservationID: reservation.ReservationID,
+			BillingContext: &model.TaskBillingContext{
+				ModelPrice: 0.00008, GroupRatio: 1, OriginModelName: "gpt-task", PerCallBilling: true,
+				PricingPolicyID: "pricing-task", PricingPolicyVersion: "v1", BillingMode: string(dto.EdgeBillingModeFixedPriceV1),
+			},
+		},
+	}
+	require.NoError(t, task.Insert())
+	require.NoError(t, model.BindEdgeLocalReservationOwner(db, reservation.ReservationID, "task", task.TaskID, now.UnixMilli()))
+
+	require.NoError(t, FinalizeEdgeTaskBilling(context.Background(), task, 1_010))
+	settled, err := model.GetEdgeLocalReservation(db, reservation.ReservationID)
+	require.NoError(t, err)
+	assert.Equal(t, model.EdgeLocalReservationStatusSettled, settled.Status)
+	assert.Equal(t, int64(1_000), settled.ReservedQuota)
+	assert.Equal(t, int64(1_010), settled.ChargedQuota)
+
+	_, err = model.ReserveEdgeLocalBalance(db, model.EdgeLocalBalanceReservationRequest{
+		ReservationID: "reservation-task-after-negative", RequestID: "request-task-after-negative",
+		UserID: 7, TokenID: 11, Quota: 1, SettlementFloorQuota: -100, NowUnixMilli: now.Add(2 * time.Second).UnixMilli(),
+	})
+	assert.ErrorIs(t, err, model.ErrEdgeLocalQuotaInsufficient)
 }
 
 func newTaskBillingEdgeTestDB(t *testing.T) (*gorm.DB, time.Time) {

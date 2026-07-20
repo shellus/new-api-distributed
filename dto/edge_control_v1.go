@@ -465,6 +465,7 @@ type EdgePricingPolicyV1 struct {
 	BillingExpressionHash    string             `json:"billing_expression_hash,omitempty"`
 	BillingExpressionVersion int                `json:"billing_expression_version,omitempty"`
 	QuotaPerUnit             float64            `json:"quota_per_unit"`
+	PreConsumedQuota         *int               `json:"pre_consumed_quota,omitempty"`
 }
 
 // EdgeBillingFactsV1 carries request-derived accounting facts that cannot be
@@ -1590,6 +1591,11 @@ func (p EdgePricingPolicyV1) Validate() error {
 	}
 	if err := validateEdgeControlFiniteFloatV1("pricing.quota_per_unit", p.QuotaPerUnit, true); err != nil {
 		return err
+	}
+	if p.PreConsumedQuota != nil {
+		if err := validateEdgeBillingCountV1("pricing.pre_consumed_quota", *p.PreConsumedQuota); err != nil {
+			return err
+		}
 	}
 	if len(p.ToolPrices) > EdgeControlMaxAppliedRatiosV1 {
 		return fmt.Errorf("pricing.tool_prices exceeds %d items", EdgeControlMaxAppliedRatiosV1)

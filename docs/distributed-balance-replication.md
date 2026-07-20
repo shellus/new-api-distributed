@@ -4,7 +4,7 @@
 
 余额复制采用“master 权威余额向量 + 每节点确认 revision + 心跳服务端 diff + edge 本地事务账本 + 原有异步结算链”的闭环。master 不记录余额变更日志，也不向上游钱包、token 或订阅写路径增加插桩；每次心跳直接读取当前余额事实，与该节点最后确认的完整向量比较，只传变化条目。edge 的普通请求不访问 master。
 
-本设计由 [ADR 0004](./adr/0004-replicated-balances-and-bounded-oversell.md) 替代 ADR 0002，属于 `AGENTS.md` 允许的“显式替代 ADR”路径。实施阶段不得恢复租约作为兼容回退。
+本设计由 [ADR 0004](./adr/0004-replicated-balances-and-bounded-oversell.md) 替代 ADR 0002，并由 [ADR 0006](./adr/0006-zero-admission-and-bounded-settlement.md) 把原单一负下限拆成零余额 admission 与独立 Settlement Floor。实施阶段不得恢复租约作为兼容回退。
 
 ## 现有实现基线
 
@@ -166,7 +166,7 @@ master 为每个节点保存一行复制状态：
 
 `edge_local_usage_events` 与其 payload 保存同样的 funding/source、subscription ID、策略版本和 balance revision，供 master 结算与本地水位清理使用。现有 usage event、outbox、settlement block 和控制游标表继续承担 durable exactly-once 链路。
 
-### 可用额度与负下限
+### 可用额度、Admission Floor 与 Settlement Floor
 
 有限账户的实时可用额度定义为：
 
@@ -174,7 +174,9 @@ master 为每个节点保存一行复制状态：
 available_quota = replicated_quota - reserved_quota - unsettled_quota
 ```
 
-每个请求同时检查一个资金账户和一个 token 账户；token 为 unlimited 时只检查资金账户。`EDGE_BALANCE_NEGATIVE_FLOOR_QUOTA` 默认 `-10_000_000`（约 -$20），有效范围 `-common.MaxQuota..0`。reservation 后每个被扣减的有限账户都必须满足 `available_quota >= negative_floor`，否则在访问 CPA 前返回额度不足。负下限不授予额外正余额，只限制单节点在尚未同步时对每个有限账户产生的最大负向偏差。
+每个请求同时检查一个资金账户和一个 token 账户；token 为 unlimited 时只检查资金账户。正额度 reservation 后每个被扣减的有限账户都必须满足 `available_quota >= 0`，否则在访问 CPA 前返回额度不足。master 失联时，reservation 与 unsettled overlay 继续扣减最后同步的正余额；单个 edge 不能主动把余额消费为负数。
+
+`EDGE_BALANCE_SETTLEMENT_FLOOR_QUOTA` 默认 `-10_000_000`（约 -$20），有效范围 `-common.MaxQuota..0`。它只用于已经执行上游请求后的最终结算：实际 charge 高于 reservation 时，只要结算后的有限账户仍不低于 Settlement Floor，就持久化真实 usage 并完成账务；账户变负后不再接受新的正额度 reservation。旧变量 `EDGE_BALANCE_NEGATIVE_FLOOR_QUOTA` 仅作为兼容别名。
 
 免费请求仍创建零额度 reservation、usage event 和 settlement 序列，但不会修改有限账户余额。
 
@@ -185,7 +187,7 @@ available_quota = replicated_quota - reserved_quota - unsettled_quota
 1. **PreConsume**：按用户的 `billing_preference` 选择钱包或订阅，再与 token 账户在同一 SQLite 事务增加 `reserved_quota` 并创建 reservation。
 2. **Reserve(delta)**：正 delta 同时扩展资金账户与有限 token 的预占；负 delta 只回滚本次扩展。任一账户更新失败时整个事务回滚。
 3. **Refund**：在没有 staged usage 时，把 reservation 的预占从两个账户原子释放，并把 reservation 标记为 refunded。
-4. **Settle**：先原样 staged 精确 usage；随后在一个事务中从 `reserved_quota` 释放原预占，把实际 charge 加入 `unsettled_quota`，完成 reservation，写 usage event/outbox 并推进事件序号。实际 charge 高于预占时，额外部分也必须通过负下限检查。
+4. **Settle**：先原样 staged 精确 usage；随后在一个事务中从 `reserved_quota` 释放原预占，把实际 charge 加入 `unsettled_quota`，完成 reservation，写 usage event/outbox 并推进事件序号。实际 charge 高于预占时，额外部分必须通过 Settlement Floor；该下限不参与 PreConsume 或 Reserve(delta)。
 5. **Recovery**：启动时 active 且未 staged 的孤儿 reservation 仍 fail closed；已 staged 的 reservation 只从 durable payload 重试。该安全边界沿用现有实现（`service/edge/accounting_recovery.go:15`、`service/edge/accounting_recovery.go:37`、`service/edge/accounting_recovery.go:60`）。
 
 当前 `EdgeUserSettingV1` 明确排除了 `billing_preference`，因为资金选择由 master 租约承担（`dto/edge_control_v1.go:321`）。删除租约后必须把规范化后的 `billing_preference` 加入低频用户策略快照；它不属于余额 dataset。订阅按 `end_at_unix_milli, subscription_id` 升序选择，严格保持 `subscription_only`、`wallet_only`、`wallet_first`、`subscription_first` 和 `allow_wallet_overflow` 的现有语义（`service/billing_session.go:428`、`service/billing_session.go:492`、`model/subscription.go:1309`）。
@@ -309,8 +311,8 @@ master 使用以下配置：
 ## 验证门禁
 
 - diff：新增、修改、删除、无变化零条目、pending 原样重发、ack 推进、revision 断档 full。
-- 本地账本：钱包/订阅优先级、有限与 unlimited token、双账户原子预占、退款、实际 charge 高于预占、负下限边界。
+- 本地账本：钱包/订阅优先级、有限与 unlimited token、双账户零余额原子预占、退款、实际 charge 高于预占、Settlement Floor 边界，以及结算变负后禁止下一次正额度 reservation。
 - overlay：结算受理后、balance diff 应用前继续消费，不得被绝对余额覆盖；重复 delta 不得重复清除 unsettled。
 - 结算：重复 block 最多扣一次权威钱包/订阅和 token，最多写一次 usage、consume log 和 `quota_data`。
 - 熔断：事件时间窗口边界、恢复期批量回放、触发后拒收且节点继续心跳、人工恢复后同一 block 使用新 request ID 成功。
-- readiness：master 断开且策略快照 TTL 已过时，只要鉴权索引、余额副本和 accounting 正常，数据面继续服务到本地负下限；没有 full 余额集的旧 edge 明确失败。
+- readiness：master 断开且策略快照 TTL 已过时，只要鉴权索引、余额副本和 accounting 正常，数据面继续服务到本地正余额耗尽；没有 full 余额集的旧 edge 明确失败。

@@ -40,6 +40,18 @@ func TestEdgeModelPriceHelperRatioDefaultsMatchMasterSemantics(t *testing.T) {
 	assert.False(t, priceData.GroupRatioInfo.HasSpecialRatio)
 }
 
+func TestEdgeModelPriceHelperUsesSignedPreConsumedQuota(t *testing.T) {
+	modelRatio := 2.0
+	preConsumedQuota := 2_000
+	priceData := edgePriceDataForTest(t, dto.EdgePricingPolicyV1{
+		PolicyID: "ratio-signed-pre-consume", Version: "v1", Model: "gpt-ratio-signed-pre-consume",
+		BillingMode: dto.EdgeBillingModeRatioV1, ModelRatio: &modelRatio, QuotaPerUnit: 500_000,
+		PreConsumedQuota: &preConsumedQuota,
+	}, &types.TokenCountMeta{})
+
+	assert.Equal(t, 4_000, priceData.QuotaToPreConsume)
+}
+
 func TestEdgeAndMasterPriceDataLogSemanticsMatchForRatioBilling(t *testing.T) {
 	modelName := "price-parity-ratio-model"
 	savedModelPrices := ratio_setting.ModelPrice2JSONString()

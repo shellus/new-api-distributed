@@ -48,6 +48,14 @@ _Avoid_: Database replica, quota lease
 A temporary local hold against one funding account and, when finite, one token account before an edge sends a request to CPA.
 _Avoid_: Final charge, master reservation
 
+**Admission Floor**:
+The zero lower bound that every finite funding and token account must satisfy after a new edge reservation. It prevents edge admission from granting deliberate overdraft credit.
+_Avoid_: Negative floor, settlement buffer
+
+**Settlement Floor**:
+The bounded negative balance allowed only while finalizing an already-executed request whose actual charge exceeds its reservation. It cannot authorize a new request.
+_Avoid_: Admission credit, offline quota
+
 **Settlement Circuit**:
 A per-node audited safety state for excessive settlement exposure. While open, the edge cannot admit new data-plane requests, but its durable accounting remains recoverable.
 _Avoid_: Node revocation, automatic retry backoff

@@ -14,6 +14,7 @@ import (
 	"github.com/QuantumNous/new-api/pkg/edgeauth"
 	"github.com/QuantumNous/new-api/setting/billing_setting"
 	"github.com/QuantumNous/new-api/setting/operation_setting"
+	"github.com/QuantumNous/new-api/setting/ratio_setting"
 
 	"github.com/glebarez/sqlite"
 	"github.com/stretchr/testify/assert"
@@ -67,17 +68,51 @@ func TestEdgeSnapshotCompilerProjectsCanonicalSafePolicy(t *testing.T) {
 
 func TestEdgeSnapshotCompilerMasterFirstOmitsNewLogFieldsByDefault(t *testing.T) {
 	t.Setenv("EDGE_CONSUME_LOG_SNAPSHOT_FIELDS_ENABLED", "false")
+	t.Setenv("EDGE_PRE_CONSUMED_QUOTA_SNAPSHOT_ENABLED", "false")
 	projection, err := projectEdgeSnapshotDatabaseState(edgeSnapshotCompilerTestState())
 	require.NoError(t, err)
+	require.NoError(t, captureEdgeSnapshotSettings(projection))
 	payload, err := common.Marshal(dto.EdgeSnapshotPagePayloadV1{
 		Authentication: projection.Authentication,
 		Users:          projection.Users,
 		Groups:         projection.Groups,
+		Pricing:        projection.Pricing,
 	})
 	require.NoError(t, err)
 	assert.NotContains(t, string(payload), `"token_name"`)
 	assert.NotContains(t, string(payload), `"record_ip_log"`)
 	assert.NotContains(t, string(payload), `"special_ratio"`)
+	assert.NotContains(t, string(payload), `"pre_consumed_quota"`)
+}
+
+func TestEdgeSnapshotCompilerProjectsPreConsumedQuotaAfterRollout(t *testing.T) {
+	t.Setenv("EDGE_PRE_CONSUMED_QUOTA_SNAPSHOT_ENABLED", "true")
+	previous := common.PreConsumedQuota
+	common.PreConsumedQuota = 1_234
+	t.Cleanup(func() { common.PreConsumedQuota = previous })
+
+	projection, err := projectEdgeSnapshotDatabaseState(edgeSnapshotCompilerTestState())
+	require.NoError(t, err)
+	savedPrices := ratio_setting.ModelPrice2JSONString()
+	savedRatios := ratio_setting.ModelRatio2JSONString()
+	t.Cleanup(func() {
+		require.NoError(t, ratio_setting.UpdateModelPriceByJSONString(savedPrices))
+		require.NoError(t, ratio_setting.UpdateModelRatioByJSONString(savedRatios))
+	})
+	require.NoError(t, ratio_setting.UpdateModelPriceByJSONString(`{}`))
+	ratios := make(map[string]float64, len(projection.modelNames))
+	for _, modelName := range projection.modelNames {
+		ratios[modelName] = 1
+	}
+	ratioPayload, err := common.Marshal(ratios)
+	require.NoError(t, err)
+	require.NoError(t, ratio_setting.UpdateModelRatioByJSONString(string(ratioPayload)))
+	require.NoError(t, captureEdgeSnapshotSettings(projection))
+	require.NotEmpty(t, projection.Pricing)
+	for _, policy := range projection.Pricing {
+		require.NotNil(t, policy.PreConsumedQuota)
+		assert.Equal(t, 1_234, *policy.PreConsumedQuota)
+	}
 }
 
 func TestEdgeSnapshotCompilerIncludesAllRelayModels(t *testing.T) {

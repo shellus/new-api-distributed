@@ -1,5 +1,7 @@
 # Edge 使用余额副本和有界超卖异步结算
 
+本 ADR 中“同一个负余额下限同时控制新请求预占与最终结算”的部分由 [ADR 0006](./0006-zero-admission-and-bounded-settlement.md) 替代；余额复制、异步结算、每节点 revision 和多节点窗口期超卖等其余决定继续有效。
+
 ADR 0002 的配额租约会把单次请求限制在租约上限内，并把快照有效期、租约期限和数据面可用性绑定。决定以 master 权威余额、edge 本地余额副本、心跳服务端 diff 和原有异步 settlement block 替代租约；钱包、有限 token 和订阅额度在 edge 本地预占与结算，master 收到结算后幂等扣减权威账，再由后续心跳把新余额回冲到 edge。
 
 余额协议使用 `edge-control.v2`。master 每次心跳读取当前权威余额向量，与该节点最后确认的向量比较，只传变化条目；版本断档或 edge 本地状态重建时发送全量向量。不增加余额变更插桩、binlog、outbox、连接或轮询。
@@ -13,7 +15,7 @@ ADR 0002 的配额租约会把单次请求限制在租约上限内，并把快�
 
 ## Consequences
 
-多节点可以同时消费同一份已复制余额，系统明确接受有界超卖。风险由 edge 本地负余额下限和 master 每节点滑动窗口结算熔断共同约束；权威余额允许在结算后为负，现有 master 鉴权和余额检查负责阻止后续中心侧消费。
+多节点可以同时消费同一份已复制余额，系统明确接受 heartbeat 或 master 失联窗口内的有界超卖。ADR 0006 进一步要求新 reservation 不能主动产生负余额；已执行请求的最终补扣由独立 Settlement Floor 容纳。master 每节点滑动窗口结算熔断继续限制风险，权威余额允许在结算后为负。
 
 master 心跳读取已经写入数据库的余额事实，不关闭既有 batch update。启用 batch update 时，实际双花上界是“batch 延迟 + heartbeat 周期”；关闭 batch update 时 batch 延迟为零。
 

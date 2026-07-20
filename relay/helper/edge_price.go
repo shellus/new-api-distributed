@@ -92,7 +92,11 @@ func edgeModelPriceHelper(c *gin.Context, info *relaycommon.RelayInfo, promptTok
 		priceData.ImageRatio = edgeOptionalRatio(policy.ImageRatio, 1)
 		priceData.AudioRatio = edgeOptionalRatio(policy.AudioRatio, 1)
 		priceData.AudioCompletionRatio = edgeOptionalRatio(policy.AudioCompletionRatio, 1)
-		preConsumedTokens := common.Max(promptTokens, common.PreConsumedQuota)
+		preConsumedQuota := common.PreConsumedQuota
+		if policy.PreConsumedQuota != nil {
+			preConsumedQuota = *policy.PreConsumedQuota
+		}
+		preConsumedTokens := common.Max(promptTokens, preConsumedQuota)
 		if meta.MaxTokens > 0 {
 			if preConsumedTokens > common.MaxQuota-meta.MaxTokens {
 				return types.PriceData{}, errors.New("edge pre-consume token estimate exceeds the supported quota range")

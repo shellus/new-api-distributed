@@ -374,13 +374,6 @@ func FinalizeEdgeTaskBilling(ctx context.Context, task *model.Task, actualQuota 
 	if err != nil {
 		return err
 	}
-	if reservation.ReservedQuota != int64(actualQuota) {
-		if _, err := model.AdjustEdgeLocalBalanceReservation(
-			model.DB, reservation.ReservationID, int64(actualQuota), time.Now().UnixMilli(),
-		); err != nil {
-			return err
-		}
-	}
 	status := http.StatusOK
 	startedAt := task.SubmitTime * 1000
 	if startedAt <= 0 {
@@ -575,13 +568,6 @@ func FinalizeEdgeMidjourneyBilling(ctx context.Context, task *model.Midjourney) 
 	reservation, err := model.GetEdgeLocalReservation(model.DB, task.EdgeReservationID)
 	if err != nil {
 		return err
-	}
-	if reservation.ReservedQuota != int64(task.Quota) {
-		if _, err := model.AdjustEdgeLocalBalanceReservation(
-			model.DB, reservation.ReservationID, int64(task.Quota), time.Now().UnixMilli(),
-		); err != nil {
-			return err
-		}
 	}
 	status := http.StatusOK
 	startedAt := task.SubmitTime

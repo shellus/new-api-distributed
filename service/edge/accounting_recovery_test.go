@@ -18,7 +18,7 @@ func TestEdgeAccountingReadinessRecoversDurableBalanceSettlement(t *testing.T) {
 	enableEdgeRuntimeServing(t)
 	_, err := model.ReserveEdgeLocalBalance(db, model.EdgeLocalBalanceReservationRequest{
 		ReservationID: "reservation-accounting-recovery", RequestID: "request-accounting-recovery",
-		UserID: 7, TokenID: 11, Quota: 40, NegativeFloorQuota: -10_000_000, NowUnixMilli: now.UnixMilli(),
+		UserID: 7, TokenID: 11, Quota: 40, SettlementFloorQuota: -10_000_000, NowUnixMilli: now.UnixMilli(),
 	})
 	require.NoError(t, err)
 	require.NoError(t, model.StageEdgeLocalReservationSettlement(
@@ -41,7 +41,7 @@ func TestEdgeAccountingStartupBlocksOnOrphanedBalanceReservation(t *testing.T) {
 	db, now := newEdgeRuntimeTestDB(t, "")
 	_, err := model.ReserveEdgeLocalBalance(db, model.EdgeLocalBalanceReservationRequest{
 		ReservationID: "reservation-accounting-orphan", RequestID: "request-accounting-orphan",
-		UserID: 7, TokenID: 11, Quota: 40, NegativeFloorQuota: -10_000_000, NowUnixMilli: now.UnixMilli(),
+		UserID: 7, TokenID: 11, Quota: 40, SettlementFloorQuota: -10_000_000, NowUnixMilli: now.UnixMilli(),
 	})
 	require.NoError(t, err)
 

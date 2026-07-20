@@ -87,10 +87,13 @@ master 负责维护：
 | `EDGE_CONSUME_LOG_OUTBOX_INTERVAL_SECONDS` | `2`，最小 `1` | master 投影消费日志 outbox 的轮询周期 |
 | `EDGE_CONSUME_LOG_OUTBOX_BATCH_SIZE` | `100`，范围 `1..1000` | 每轮消费日志 outbox 的最大处理量 |
 | `EDGE_CONSUME_LOG_SNAPSHOT_FIELDS_ENABLED` | `false` | 向 edge 快照下发消费日志一致性所需的 token 名称、IP 记录策略和特殊分组倍率标记；仅在全部 edge 已升级到支持这些可选字段的版本后启用 |
+| `EDGE_PRE_CONSUMED_QUOTA_SNAPSHOT_ENABLED` | `false` | 向签名价格策略下发 master 当前 `PreConsumedQuota`；仅在全部 edge 已支持可选 `pre_consumed_quota` 字段后启用 |
 
 `EDGE_SNAPSHOT_COMPILE_INTERVAL_SECONDS` 应明显短于 `EDGE_SNAPSHOT_TTL_SECONDS`，建议不超过 TTL 的一半，为编译失败重试和 edge 拉取预留时间。快照 TTL 仍限制新快照的发布和应用，但最后一份已经验证并应用的策略过期后只冻结策略变化，不再关闭数据面。
 
 `EDGE_CONSUME_LOG_SNAPSHOT_FIELDS_ENABLED` 用于 master-first 滚动升级。新版 master 首次部署时保持 `false`，随后升级全部 edge；确认 edge 健康且没有待上传结算区块后，再将变量设为 `true` 并重启 master，使下一份编译快照携带新增字段。旧版 edge 使用严格 JSON 解码，混合版本期间提前启用会使其拒绝新快照。
+
+`EDGE_PRE_CONSUMED_QUOTA_SNAPSHOT_ENABLED` 使用相同的兼容顺序。关闭时新版 edge 继续使用自身默认值，只用于混合版本过渡；全部 edge 升级后必须启用，使 master 后台修改 `PreConsumedQuota` 时下一份签名价格策略同步携带该值。
 
 控制面下发的心跳、轮询、分页、结算、circuit 和时钟参数会通过版本化 DTO 再次校验。超出协议范围的配置不会被 edge 静默接受。
 
@@ -131,7 +134,8 @@ edge 的人工配置只保留部署必需信息：
 |------|------|------|
 | `EDGE_SQLITE_PATH` | 必填 | 独立 edge SQLite 文件；不能复用 master 的 `SQL_DSN` 或日志库 |
 | `EDGE_CHANNEL_CONFIG_DIR` | `/config/channels` | edge 本地渠道 YAML 目录；只读取顶层 `.yaml`/`.yml` 文件 |
-| `EDGE_BALANCE_NEGATIVE_FLOOR_QUOTA` | `-10000000`，范围 `-common.MaxQuota..0` | 每个有限资金账户和有限 token 账户在断网期间允许到达的本地负余额下限 |
+| `EDGE_BALANCE_SETTLEMENT_FLOOR_QUOTA` | `-10000000`，范围 `-common.MaxQuota..0` | 已执行请求的实际 charge 超过 reservation 时，有限资金账户和有限 token 账户仍可完成结算的最低余额；不参与新请求 admission |
+| `EDGE_BALANCE_NEGATIVE_FLOOR_QUOTA` | 兼容别名 | 仅在未设置新变量时作为 Settlement Floor 读取；后续部署应迁移到新变量名 |
 | `EDGE_CPA_HEALTH_TIMEOUT_SECONDS` | 兼容保留 | 当前 edge 不执行本地上游合成探测，也不读取此变量 |
 | `SHUTDOWN_TIMEOUT_SECONDS` | `120` | HTTP 优雅关闭时间；超时后强制关闭连接，但仍等待 handler 完成账务收尾 |
 | `EDGE_DRAIN_TIMEOUT_SECONDS` | `30` | 停止后台循环后，最终上传 durable settlement 的时间预算 |
@@ -217,11 +221,15 @@ edge SQLite 保存：
 
 在没有未上报账务数据时，SQLite 可以删除并通过 master 重新生成；存在 active/staged reservation、未确认 usage/outbox 或 pending settlement block 时必须先完成恢复或结算。
 
-## 余额副本、负下限与免费模型
+## 余额副本、零余额准入与结算容忍
 
 `edge-control.v2` 通过 heartbeat 下发钱包、订阅和 token 的版本化余额向量。edge 把 master confirmed balance 与本地 active reservation、unsettled usage overlay 合并后完成 admission；普通用户请求不为了余额访问 master。第一次 v2 heartbeat 必须 full 初始化，鉴权索引和余额副本未同时就绪时不访问 CPA。
 
-每次 reservation 在同一 SQLite 事务中固定资金来源、订阅 ID、token quota 模式、策略 revision 和 balance revision。钱包或订阅与有限 token 分别检查；任一有限账户预占后低于 `EDGE_BALANCE_NEGATIVE_FLOOR_QUOTA` 时，请求在访问 CPA 前返回额度不足。免费请求 charge 为零，但仍保留本地鉴权、reservation、usage event、连续结算序列和审计语义。
+每次 reservation 在同一 SQLite 事务中固定资金来源、订阅 ID、token quota 模式、策略 revision、balance revision 和 Settlement Floor。钱包或订阅与有限 token 分别检查；任一有限账户预占后低于零时，请求在访问 CPA 前返回额度不足。免费请求 charge 为零，仍保留本地鉴权、reservation、usage event、连续结算序列和审计语义。
+
+请求完成后的实际 charge 可以高于 reservation。该差额只允许在 `EDGE_BALANCE_SETTLEMENT_FLOOR_QUOTA` 内完成本地 durable settlement；账户因此变为负数后，后续正额度 reservation 会立即被零余额 admission 拒绝。该变量不能作为断网期间的固定信用额度使用。
+
+倍率计费的最低预估值使用 master Option `PreConsumedQuota`。启用 `EDGE_PRE_CONSUMED_QUOTA_SNAPSHOT_ENABLED` 后，该值固定在每个签名价格策略中；edge 使用策略值计算本次预扣，不读取本地 Option 或独立编译默认值。
 
 当前 v2 数据面只执行倍率计费和固定价格计费。tiered expression 可以存在于与当前请求无关的快照策略中，但使用 tiered 计费的模型不会在 edge v2 上执行，master 也不会接受伪造为 v2 可结算事件的动态计费结果。
 

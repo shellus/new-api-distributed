@@ -23,7 +23,7 @@ edge 获取的是“能够在本地完成请求所需的最小业务快照”，
 
 edge 不接收明文 API token、中心数据库、其他节点数据或 CPA OAuth 凭证。CPA 凭证由节点本机管理。
 
-用户第一次访问某个 edge 时，鉴权和余额 admission 都在本地完成，不需要查询 master。第一次 `edge-control.v2` heartbeat 必须完成余额 full 初始化；之后 heartbeat 只下发相对已确认 revision 的 delta，断档时重新 full。master 不可用时，edge 继续在最后一份已验证策略、confirmed balance 和本地负余额下限内服务。
+用户第一次访问某个 edge 时，鉴权和余额 admission 都在本地完成，不需要查询 master。第一次 `edge-control.v2` heartbeat 必须完成余额 full 初始化；之后 heartbeat 只下发相对已确认 revision 的 delta，断档时重新 full。master 不可用时，edge 继续使用最后一份已验证策略、confirmed balance 和本地 overlay，直到任一有限账户无法在新 reservation 后保持非负。
 
 签名计费策略明确免费时，edge 仍创建零额度 reservation 和 usage event，保留完整结算序列与审计语义，但不扣减有限账户。
 
@@ -52,7 +52,7 @@ master 还按节点代次和 usage event 完成时间检查滑动窗口。超限
 5. 网络恢复时，edge 续传未确认结算并恢复策略、余额 revision 收敛。
 6. edge 正常关闭时，停止 admission、等待在途账务完成并尽量上报剩余结算。
 
-用户请求不触发 master 通信。余额未初始化、本地有限账户达到负下限或 settlement circuit 打开时，请求在访问 CPA 前失败。
+用户请求不触发 master 通信。余额未初始化、本地有限账户无法在预占后保持非负或 settlement circuit 打开时，请求在访问 CPA 前失败。已访问 CPA 的请求若实际费用超过 reservation，可以在独立 Settlement Floor 内完成 durable settlement；该容忍额度不能授权后续请求。
 
 ## 4. Edge 数据面 readiness
 
@@ -74,7 +74,7 @@ edge 的 `/healthz` 只表示进程存活；`/readyz` 同时要求：
 - edge 不维护请求格式白名单，也不把不熟悉的合法请求回源 master。
 - New API 继续负责鉴权、权限、渠道策略和计费。
 - CPA 继续负责 OAuth 凭证池、上游调度、重试和执行。
-- master 失联时，edge 在最后一份已验证策略、余额副本和本地负余额下限内继续服务。
+- master 失联时，edge 在最后一份已验证策略和余额副本内继续服务；本地 reservation 与 unsettled overlay 持续扣减，有限账户耗尽后停止新 admission。
 - edge 使用自己的节点凭证声明公开访问地址，master 直接接受该可信声明。master 的主动探测只形成可达性和延迟状态，不承担地址审批。
 - master 不以公网主动探测决定 edge readiness；readiness 由 edge 本地策略、余额、accounting 和 settlement circuit 状态决定。
 

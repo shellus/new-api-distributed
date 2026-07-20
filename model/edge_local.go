@@ -188,7 +188,7 @@ type EdgeLocalQuotaReservation struct {
 	SnapshotRevision     int64                      `gorm:"not null;default:0"`
 	PricingRevision      int64                      `gorm:"not null;default:0"`
 	BalanceRevision      int64                      `gorm:"not null;default:0"`
-	NegativeFloorQuota   int64                      `gorm:"not null;default:0"`
+	SettlementFloorQuota int64                      `gorm:"column:negative_floor_quota;not null;default:0"`
 	Status               EdgeLocalReservationStatus `gorm:"type:varchar(32);not null;index"`
 	ReservedQuota        int64                      `gorm:"not null"`
 	ChargedQuota         int64                      `gorm:"not null"`

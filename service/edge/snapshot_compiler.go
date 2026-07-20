@@ -119,6 +119,7 @@ type edgeSnapshotPricingInput struct {
 	AudioInputPrice      *float64
 	ToolPrices           map[string]float64
 	QuotaPerUnit         float64
+	PreConsumedQuota     *int
 }
 
 type edgeSnapshotPageBuild struct {
@@ -763,6 +764,10 @@ func captureEdgeSnapshotSettings(projection *edgeSnapshotProjection) error {
 			Mode:         billing_setting.GetBillingMode(modelName),
 			QuotaPerUnit: common.QuotaPerUnit,
 		}
+		if edgePreConsumedQuotaSnapshotEnabled() {
+			preConsumedQuota := common.PreConsumedQuota
+			input.PreConsumedQuota = &preConsumedQuota
+		}
 		if expression, ok := billing_setting.GetBillingExpr(modelName); ok {
 			input.Expression = expression
 		}
@@ -818,6 +823,10 @@ func captureEdgeSnapshotSettings(projection *edgeSnapshotProjection) error {
 
 func edgeConsumeLogSnapshotFieldsEnabled() bool {
 	return common.GetEnvOrDefaultBool("EDGE_CONSUME_LOG_SNAPSHOT_FIELDS_ENABLED", false)
+}
+
+func edgePreConsumedQuotaSnapshotEnabled() bool {
+	return common.GetEnvOrDefaultBool("EDGE_PRE_CONSUMED_QUOTA_SNAPSHOT_ENABLED", false)
 }
 
 func filterEdgeSnapshotModelsByPricing(projection *edgeSnapshotProjection, billableModels map[string]struct{}) {
@@ -928,6 +937,10 @@ func projectEdgeSnapshotPricing(modelName string, input edgeSnapshotPricingInput
 		AudioCompletionRatio: cloneFloatPointer(input.AudioCompletionRatio),
 		AudioInputPrice:      cloneFloatPointer(input.AudioInputPrice),
 		ToolPrices:           cloneEdgeSnapshotFloatMap(input.ToolPrices),
+	}
+	if input.PreConsumedQuota != nil {
+		preConsumedQuota := *input.PreConsumedQuota
+		policy.PreConsumedQuota = &preConsumedQuota
 	}
 	if input.Mode != billing_setting.BillingModeRatio && input.Mode != billing_setting.BillingModeTieredExpr {
 		return dto.EdgePricingPolicyV1{}, fmt.Errorf("%w: model %q uses unknown billing mode %q", ErrEdgeSnapshotUnrepresentable, modelName, input.Mode)
