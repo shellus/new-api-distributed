@@ -281,3 +281,4 @@ go build ./cmd/newapi-edge
 ## 后续维护
 
 - master consume-log outbox 空轮询当前会让 GORM 每两秒记录一次预期内的 `record not found`。后续应把 `gorm.ErrRecordNotFound` 作为正常空闲结果处理并抑制对应数据库错误日志，同时保留真实查询错误和 worker 重试日志。
+- edge 的 `/v1/models` 路径仍会触发一次面向 master `users` 表的用户设置查询；SQLite 中没有该表时虽然接口继续返回成功，但会产生误导性的数据库错误日志。后续应让该路径只读取 edge 用户投影，并增加“不查询 master User/Token 表”的路由回归测试。
