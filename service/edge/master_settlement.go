@@ -375,11 +375,20 @@ func validateMasterSettlementTimes(request dto.EdgeSettlementBlockRequestV1, now
 		return fmt.Errorf("%w: settlement block was created in the future", ErrMasterSettlementConflict)
 	}
 	maxDurationMillis := int64(maxDurationSeconds) * int64(time.Second/time.Millisecond)
+	maxTaskDurationSeconds := common.GetEnvOrDefault("EDGE_MAX_TASK_DURATION_SECONDS", 604800)
+	if maxTaskDurationSeconds < maxDurationSeconds || maxTaskDurationSeconds > 2_592_000 {
+		return errors.New("edge maximum task duration configuration is invalid")
+	}
+	maxTaskDurationMillis := int64(maxTaskDurationSeconds) * int64(time.Second/time.Millisecond)
 	for i := range request.Events {
 		event := request.Events[i]
+		eventMaxDurationMillis := maxDurationMillis
+		if event.Endpoint == dto.EdgeEndpointTaskV1 || event.Endpoint == dto.EdgeEndpointMidjourneyV1 {
+			eventMaxDurationMillis = maxTaskDurationMillis
+		}
 		if event.StartedAtUnixMilli > latestAllowed || event.FinishedAtUnixMilli > latestAllowed ||
 			event.FinishedAtUnixMilli > request.CreatedAtUnixMilli ||
-			event.FinishedAtUnixMilli-event.StartedAtUnixMilli > maxDurationMillis {
+			event.FinishedAtUnixMilli-event.StartedAtUnixMilli > eventMaxDurationMillis {
 			return fmt.Errorf("%w: event %s has an invalid settlement timeline", ErrMasterSettlementConflict, event.EventID)
 		}
 	}

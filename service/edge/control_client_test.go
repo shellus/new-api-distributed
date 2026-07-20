@@ -667,8 +667,7 @@ func newEdgeControlTestClient(t *testing.T, fixture *edgeControlTransportFixture
 			Name: "edge-test", PublicURL: masterURL, SoftwareVersion: "test",
 			StartedAtUnixMilli: fixture.now.Add(-time.Minute).UnixMilli(),
 			Capabilities: []dto.EdgeEndpointCapabilityV1{
-				{Endpoint: dto.EdgeEndpointOpenAIChatCompletionsV1, Streaming: true},
-				{Endpoint: dto.EdgeEndpointOpenAIResponsesV1, Streaming: true},
+				{Endpoint: dto.EdgeEndpointDataPlaneV1, Streaming: true},
 			},
 		},
 		RequestTimeout: time.Second, MaxResponseBytes: 1 << 20, Now: func() time.Time { return fixture.now },

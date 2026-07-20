@@ -208,6 +208,45 @@ func TestRecomputeMasterUsageQuotaUsesMasterCacheCreationDefaults(t *testing.T) 
 	}
 }
 
+func TestRecomputeMasterUsageQuotaAcceptsTaskReceiptWithoutTokenUsage(t *testing.T) {
+	modelRatio := 2.0
+	groupRatio := 1.25
+	quotaBeforeRatios := 40.0
+	policies := &masterSnapshotPolicies{
+		users: map[int64]dto.EdgeUserPolicyV1{7: {UserID: 7, Enabled: true, DefaultGroup: "default"}},
+		groups: map[string]dto.EdgeGroupPolicyV1{"default": {
+			UserGroup: "default", UsingGroups: []dto.EdgeUsingGroupPolicyV1{{Group: "default", Enabled: true, Ratio: groupRatio}},
+		}},
+		models: map[string]dto.EdgeModelPolicyV1{"video-task": {
+			Model: "video-task", Enabled: true, Endpoints: []dto.EdgeEndpointV1{dto.EdgeEndpointDataPlaneV1}, ChannelIDs: []int64{31},
+		}},
+		channels: map[int64]dto.EdgeChannelProjectionV1{31: {
+			ChannelID: 31, Enabled: true, Groups: []string{"default"}, Models: []string{"video-task"},
+		}},
+		pricing: map[string]dto.EdgePricingPolicyV1{
+			masterPricingKey("task-policy", "v1", "video-task"): {
+				PolicyID: "task-policy", Version: "v1", Model: "video-task", BillingMode: dto.EdgeBillingModeRatioV1,
+				ModelRatio: &modelRatio, QuotaPerUnit: 500_000,
+			},
+		},
+	}
+	event := &dto.EdgeUsageEventV1{
+		UserID: 7, ChannelID: 31, Endpoint: dto.EdgeEndpointTaskV1,
+		Model: "video-task", Group: "default", Outcome: dto.EdgeUsageOutcomeSuccessV1,
+		Billing: dto.EdgeUsageBillingV1{
+			PricingPolicyID: "task-policy", PricingPolicyVersion: "v1", BillingMode: dto.EdgeBillingModeRatioV1,
+			GroupRatio: groupRatio, AppliedRatios: map[string]float64{"duration": 2},
+			Facts: dto.EdgeBillingFactsV1{TaskQuotaBeforeRatios: &quotaBeforeRatios},
+		},
+	}
+
+	quota, usage, err := recomputeMasterUsageQuota(policies, 7, event)
+	require.NoError(t, err)
+	assert.Equal(t, int64(80), quota)
+	require.NotNil(t, usage)
+	assert.Zero(t, usage.TotalTokens)
+}
+
 func TestProcessSettlementCircuitRejectionCommitsOnlyCircuitAndReceipt(t *testing.T) {
 	t.Setenv("EDGE_NODE_SETTLEMENT_WINDOW_SECONDS", "60")
 	t.Setenv("EDGE_NODE_SETTLEMENT_WINDOW_QUOTA", "200")
@@ -375,7 +414,9 @@ func newMasterSettlementTestFixture(t *testing.T, name string, userQuota int, to
 	require.NoError(t, db.Create(node).Error)
 	credential := &model.EdgeNodeCredential{
 		CredentialUID: "key-" + name, NodeID: node.ID, Generation: 1, VerifyMaterial: material,
-		Status: model.EdgeNodeCredentialStatusActive, NotBefore: now.Add(-24 * time.Hour).Unix(), ExpiresAt: now.Add(24 * time.Hour).Unix(),
+		Status:    model.EdgeNodeCredentialStatusActive,
+		NotBefore: time.Date(2025, time.January, 1, 0, 0, 0, 0, time.UTC).Unix(),
+		ExpiresAt: time.Date(2030, time.January, 1, 0, 0, 0, 0, time.UTC).Unix(),
 	}
 	require.NoError(t, db.Create(credential).Error)
 	user := &model.User{Username: "user-" + name, Password: "password", Status: common.UserStatusEnabled, Quota: userQuota, Group: "default"}

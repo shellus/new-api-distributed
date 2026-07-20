@@ -12,13 +12,12 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestEdgeRouterExposesOnlyHealthReadinessAndSupportedTextRelayRoutes(t *testing.T) {
+func TestEdgeRouterExposesSharedDataPlaneRoutes(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	engine := gin.New()
 	SetEdgeRouter(engine)
 
 	routes := engine.Routes()
-	require.Len(t, routes, 4)
 	registered := make(map[string]bool, len(routes))
 	for _, route := range routes {
 		registered[route.Method+" "+route.Path] = true
@@ -27,6 +26,13 @@ func TestEdgeRouterExposesOnlyHealthReadinessAndSupportedTextRelayRoutes(t *test
 	assert.True(t, registered[http.MethodGet+" /readyz"])
 	assert.True(t, registered[http.MethodPost+" /v1/chat/completions"])
 	assert.True(t, registered[http.MethodPost+" /v1/responses"])
+	assert.True(t, registered[http.MethodPost+" /v1/responses/compact"])
+	assert.True(t, registered[http.MethodPost+" /v1/images/generations"])
+	assert.True(t, registered[http.MethodPost+" /v1/audio/transcriptions"])
+	assert.True(t, registered[http.MethodPost+" /v1/embeddings"])
+	assert.True(t, registered[http.MethodPost+" /v1/messages"])
+	assert.True(t, registered[http.MethodPost+" /v1beta/models/*path"])
+	assert.True(t, registered[http.MethodGet+" /v1/realtime"])
 
 	healthRecorder := httptest.NewRecorder()
 	healthRequest := httptest.NewRequest(http.MethodGet, "/healthz", nil)
@@ -48,7 +54,7 @@ func TestEdgeRouterExposesOnlyHealthReadinessAndSupportedTextRelayRoutes(t *test
 	engine.ServeHTTP(readyRecorder, readyRequest)
 	assert.Equal(t, http.StatusServiceUnavailable, readyRecorder.Code)
 
-	for _, path := range []string{"/v1/chat/completions", "/v1/responses"} {
+	for _, path := range []string{"/v1/chat/completions", "/v1/responses", "/v1/responses/compact", "/v1/images/generations"} {
 		recorder := httptest.NewRecorder()
 		request := httptest.NewRequest(http.MethodPost, path, nil)
 		engine.ServeHTTP(recorder, request)
@@ -62,8 +68,6 @@ func TestEdgeRouterExposesOnlyHealthReadinessAndSupportedTextRelayRoutes(t *test
 		{method: http.MethodGet, path: "/"},
 		{method: http.MethodGet, path: "/api/status"},
 		{method: http.MethodPost, path: "/api/user/login"},
-		{method: http.MethodPost, path: "/v1/images/generations"},
-		{method: http.MethodGet, path: "/v1/realtime"},
 	} {
 		t.Run(requestSpec.method+" "+requestSpec.path, func(t *testing.T) {
 			recorder := httptest.NewRecorder()
@@ -72,4 +76,27 @@ func TestEdgeRouterExposesOnlyHealthReadinessAndSupportedTextRelayRoutes(t *test
 			assert.Equal(t, http.StatusNotFound, recorder.Code)
 		})
 	}
+}
+
+func TestEdgeRouterMatchesMasterUserDataPlaneRoutes(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	master := gin.New()
+	SetRelayRouter(master)
+	SetVideoRouter(master)
+	edge := gin.New()
+	SetEdgeRouter(edge)
+
+	dataPlaneRoutes := func(engine *gin.Engine) map[string]struct{} {
+		result := make(map[string]struct{})
+		for _, route := range engine.Routes() {
+			path := route.Path
+			if path == "/healthz" || path == "/readyz" || len(path) >= 3 && path[:3] == "/pg" {
+				continue
+			}
+			result[route.Method+" "+path] = struct{}{}
+		}
+		return result
+	}
+
+	assert.Equal(t, dataPlaneRoutes(master), dataPlaneRoutes(edge))
 }

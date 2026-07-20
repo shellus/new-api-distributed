@@ -63,6 +63,18 @@ func TestDigestBlockV1ExcludesFirstResponseTime(t *testing.T) {
 	assert.Equal(t, withoutDigest, withDigest)
 }
 
+func TestDigestBlockV1OmitsEmptyBillingFactsForLegacyBlocks(t *testing.T) {
+	request := settlementDigestRequestForTest()
+	canonical, err := CanonicalBlockV1("edge.digest", 1, request)
+	require.NoError(t, err)
+	assert.NotContains(t, string(canonical), `"facts"`)
+
+	request.Events[0].Billing.Facts.WebSearchCalls = 1
+	canonical, err = CanonicalBlockV1("edge.digest", 1, request)
+	require.NoError(t, err)
+	assert.Contains(t, string(canonical), `"facts":{"web_search_calls":1}`)
+}
+
 func TestDigestBlockV1BindsConsumeLogSnapshot(t *testing.T) {
 	left := settlementDigestRequestForTest()
 	left.Events[0].ConsumeLogSnapshot = &dto.EdgeConsumeLogSnapshotV1{

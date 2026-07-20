@@ -112,6 +112,7 @@ type RelayInfo struct {
 	InputAudioFormat       string
 	OutputAudioFormat      string
 	RealtimeTools          []dto.RealTimeTool
+	RealtimeObservedQuota  int
 	IsFirstRequest         bool
 	AudioUsage             bool
 	ReasoningEffort        string
@@ -177,6 +178,10 @@ type RelayInfo struct {
 	// funding ignores it; edge balance funding persists it with the reservation
 	// and durable usage outbox in the same local transaction.
 	SettlementUsage *dto.BillingUsage
+	// EdgeBillingFacts carries the request-derived, non-content accounting facts
+	// needed for durable settlement of tools and dynamic pricing.
+	EdgeBillingFacts       *dto.EdgeBillingFactsV1
+	EdgeBillingMatchedTier string
 	// EdgeConsumeLogSnapshot captures the request-time display and relay facts
 	// that cannot be reconstructed after asynchronous settlement. Accounting
 	// dimensions and amounts remain authoritative on the usage event itself.
@@ -190,6 +195,7 @@ type RelayInfo struct {
 	EdgeSnapshotID       string
 	EdgeSnapshotRevision int64
 	EdgePricingRevision  int64
+	EdgeReservationID    string
 
 	Request dto.Request
 

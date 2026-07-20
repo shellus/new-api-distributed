@@ -303,7 +303,8 @@ Edge 本地部署配置
 - master 快照签名私钥与 edge 节点私钥必须属于不同密钥，并且都不能进入数据库、日志或版本库。
 - edge SQLite 必须位于持久化存储；未确认 usage、staged settlement、outbox、pending block 或 active reservation 存在时不能删除或替换。
 - 生产探针应使用 `/readyz` 决定是否接流量，`/healthz` 只用于判断进程是否需要重启。
-- 只有 `/v1/chat/completions` 和 `/v1/responses` 的文本及流式请求属于当前 v2 数据面边界；图片、音频、视频、Realtime、异步任务和无法表达的内置工具在访问 CPA 前拒绝。
+- master 与 edge 的用户侧 AI 路由必须来自共享数据面注册表。Responses 压缩、多模态、Realtime 和异步任务不得由 edge 专用请求形状白名单拦截，也不得回源 master。
+- 本地渠道 YAML 必须覆盖对应渠道所需的 CPA/上游地址和凭证；未配置本地执行条件的渠道保持禁用，不影响其他渠道继续服务。
 
 ## 运维边界
 

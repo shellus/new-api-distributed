@@ -37,14 +37,8 @@ func edgeModelPriceHelper(c *gin.Context, info *relaycommon.RelayInfo, promptTok
 	if policy.Model != info.OriginModelName {
 		return types.PriceData{}, errors.New("edge pricing policy model mismatch")
 	}
-	if policy.BillingMode == dto.EdgeBillingModeTieredExprV1 {
-		return types.PriceData{}, errors.New("tiered billing is not supported by edge settlement v1")
-	}
 	if meta == nil {
 		meta = &types.TokenCountMeta{}
-	}
-	if meta.ImagePriceRatio != 0 || len(meta.BillingRatios) != 0 {
-		return types.PriceData{}, errors.New("request-specific billing multipliers are not supported by edge settlement v1")
 	}
 
 	groupInfo := types.GroupRatioInfo{GroupRatio: groupRatio, GroupSpecialRatio: -1}
@@ -52,6 +46,18 @@ func edgeModelPriceHelper(c *gin.Context, info *relaycommon.RelayInfo, promptTok
 		groupInfo.GroupSpecialRatio = groupRatio
 		groupInfo.HasSpecialRatio = true
 	}
+	if policy.BillingMode == dto.EdgeBillingModeTieredExprV1 {
+		priceData, err := modelPriceHelperTieredExpression(
+			c, info, promptTokens, meta, groupInfo, policy.BillingExpression, policy.QuotaPerUnit,
+		)
+		if err != nil {
+			return types.PriceData{}, err
+		}
+		policyCopy := policy
+		info.EdgePricingPolicy = &policyCopy
+		return priceData, nil
+	}
+
 	priceData := types.PriceData{GroupRatioInfo: groupInfo}
 	switch policy.BillingMode {
 	case dto.EdgeBillingModeFixedPriceV1:
@@ -60,7 +66,13 @@ func edgeModelPriceHelper(c *gin.Context, info *relaycommon.RelayInfo, promptTok
 		}
 		priceData.UsePrice = true
 		priceData.ModelPrice = *policy.ModelPrice
-		quota, err := common.QuotaFromFloatStrict(*policy.ModelPrice * policy.QuotaPerUnit * groupRatio)
+		if meta.ImagePriceRatio != 0 {
+			priceData.AddOtherRatio("image_price_ratio", meta.ImagePriceRatio)
+		}
+		for name, ratio := range meta.BillingRatios {
+			priceData.AddOtherRatio(name, ratio)
+		}
+		quota, err := common.QuotaFromFloatStrict(priceData.ApplyOtherRatiosToFloat(*policy.ModelPrice * policy.QuotaPerUnit * groupRatio))
 		if err != nil {
 			return types.PriceData{}, err
 		}
@@ -77,9 +89,9 @@ func edgeModelPriceHelper(c *gin.Context, info *relaycommon.RelayInfo, promptTok
 		priceData.CacheCreationRatio = edgeOptionalRatio(policy.CacheCreationRatio, 1.25)
 		priceData.CacheCreation5mRatio = priceData.CacheCreationRatio
 		priceData.CacheCreation1hRatio = edgeOptionalRatio(policy.CacheCreation1hRatio, priceData.CacheCreationRatio*claudeCacheCreation1hMultiplier)
-		priceData.ImageRatio = 1
-		priceData.AudioRatio = 1
-		priceData.AudioCompletionRatio = 1
+		priceData.ImageRatio = edgeOptionalRatio(policy.ImageRatio, 1)
+		priceData.AudioRatio = edgeOptionalRatio(policy.AudioRatio, 1)
+		priceData.AudioCompletionRatio = edgeOptionalRatio(policy.AudioCompletionRatio, 1)
 		preConsumedTokens := common.Max(promptTokens, common.PreConsumedQuota)
 		if meta.MaxTokens > 0 {
 			if preConsumedTokens > common.MaxQuota-meta.MaxTokens {
@@ -107,4 +119,59 @@ func edgeOptionalRatio(value *float64, fallback float64) float64 {
 		return fallback
 	}
 	return *value
+}
+
+func edgeModelPriceHelperPerCall(c *gin.Context, info *relaycommon.RelayInfo) (types.PriceData, error) {
+	if info == nil || model.DB == nil {
+		return types.PriceData{}, errors.New("edge pricing is not ready")
+	}
+	groupRatio, ok := common.GetContextKeyType[float64](c, constant.ContextKeyEdgeGroupRatio)
+	if !ok || math.IsNaN(groupRatio) || math.IsInf(groupRatio, 0) || groupRatio < 0 {
+		return types.PriceData{}, errors.New("edge request has no valid signed group ratio")
+	}
+	policies, err := model.GetEdgeLocalPricing(model.DB, info.OriginModelName)
+	if err != nil {
+		return types.PriceData{}, fmt.Errorf("load edge pricing policy: %w", err)
+	}
+	if len(policies) != 1 {
+		return types.PriceData{}, fmt.Errorf("model %s must have exactly one edge pricing policy", info.OriginModelName)
+	}
+	policy := policies[0]
+	if err := policy.Validate(); err != nil {
+		return types.PriceData{}, fmt.Errorf("invalid edge pricing policy: %w", err)
+	}
+	groupInfo := types.GroupRatioInfo{GroupRatio: groupRatio, GroupSpecialRatio: -1}
+	if common.GetContextKeyBool(c, constant.ContextKeyEdgeGroupSpecialRatio) {
+		groupInfo.GroupSpecialRatio = groupRatio
+		groupInfo.HasSpecialRatio = true
+	}
+	priceData := types.PriceData{GroupRatioInfo: groupInfo}
+	switch policy.BillingMode {
+	case dto.EdgeBillingModeFixedPriceV1:
+		if policy.ModelPrice == nil {
+			return types.PriceData{}, errors.New("edge fixed-price policy has no model price")
+		}
+		priceData.UsePrice = true
+		priceData.ModelPrice = *policy.ModelPrice
+		priceData.Quota, err = common.QuotaFromFloatStrict(*policy.ModelPrice * policy.QuotaPerUnit * groupRatio)
+	case dto.EdgeBillingModeRatioV1:
+		if policy.ModelRatio == nil {
+			return types.PriceData{}, errors.New("edge ratio policy has no model ratio")
+		}
+		priceData.ModelPrice = -1
+		priceData.ModelRatio = *policy.ModelRatio
+		priceData.Quota, err = common.QuotaFromFloatStrict(*policy.ModelRatio / 2 * policy.QuotaPerUnit * groupRatio)
+	case dto.EdgeBillingModeTieredExprV1:
+		return types.PriceData{}, errors.New("tiered expression is not a per-call task billing mode")
+	default:
+		return types.PriceData{}, errors.New("unsupported edge billing mode")
+	}
+	if err != nil {
+		return types.PriceData{}, err
+	}
+	priceData.FreeModel = groupRatio == 0 || priceData.Quota == 0
+	info.PriceData = priceData
+	policyCopy := policy
+	info.EdgePricingPolicy = &policyCopy
+	return priceData, nil
 }

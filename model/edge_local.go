@@ -197,6 +197,8 @@ type EdgeLocalQuotaReservation struct {
 	StagedEventID        string                     `gorm:"type:varchar(64);not null;default:'';index"`
 	StagedEventPayload   string                     `gorm:"type:text;not null;default:''"`
 	StagedAtUnixMilli    int64                      `gorm:"not null;default:0;index"`
+	OwnerKind            string                     `gorm:"type:varchar(32);not null;default:'';index"`
+	OwnerID              string                     `gorm:"type:varchar(191);not null;default:'';index"`
 	CreatedAtUnixMilli   int64                      `gorm:"not null"`
 	UpdatedAtUnixMilli   int64                      `gorm:"not null"`
 	FinalizedAtUnixMilli int64                      `gorm:"not null"`
@@ -396,6 +398,10 @@ func migrateEdgeLocalDB(db *gorm.DB) error {
 		&Channel{},
 		&Ability{},
 		&Log{},
+		&Task{},
+		&Midjourney{},
+		&SystemTask{},
+		&SystemTaskLock{},
 		&EdgeLocalControlState{},
 		&EdgeLocalDatasetState{},
 		&EdgeLocalAuthProjection{},
@@ -944,9 +950,16 @@ func edgeLocalLegacyChannel(
 		return Channel{}, nil, err
 	}
 	masterChannelSetting := dto.ChannelSettings{
-		ForceFormat: projection.TextPolicy.ForceFormat, ThinkingToContent: projection.TextPolicy.ThinkingToContent,
-		PassThroughBodyEnabled: projection.TextPolicy.PassThroughBodyEnabled,
-		SystemPrompt:           projection.TextPolicy.SystemPrompt, SystemPromptOverride: projection.TextPolicy.SystemPromptOverride,
+		ForceFormat: projection.ChannelSettings.ForceFormat, ThinkingToContent: projection.ChannelSettings.ThinkingToContent,
+		PassThroughBodyEnabled: projection.ChannelSettings.PassThroughBodyEnabled,
+		SystemPrompt:           projection.ChannelSettings.SystemPrompt, SystemPromptOverride: projection.ChannelSettings.SystemPromptOverride,
+	}
+	if projection.SettingsVersion == 0 {
+		masterChannelSetting = dto.ChannelSettings{
+			ForceFormat: projection.TextPolicy.ForceFormat, ThinkingToContent: projection.TextPolicy.ThinkingToContent,
+			PassThroughBodyEnabled: projection.TextPolicy.PassThroughBodyEnabled,
+			SystemPrompt:           projection.TextPolicy.SystemPrompt, SystemPromptOverride: projection.TextPolicy.SystemPromptOverride,
+		}
 	}
 	channelSetting, err := edgeLocalChannelStructMap(masterChannelSetting)
 	if err != nil {
@@ -959,11 +972,14 @@ func edgeLocalLegacyChannel(
 	if err != nil {
 		return Channel{}, nil, err
 	}
-	masterOtherSettings := dto.ChannelOtherSettings{
-		AllowServiceTier: projection.TextPolicy.AllowServiceTier, AllowInferenceGeo: projection.TextPolicy.AllowInferenceGeo,
-		AllowSpeed: projection.TextPolicy.AllowSpeed, DisableStore: projection.TextPolicy.DisableStore,
-		AllowSafetyIdentifier:   projection.TextPolicy.AllowSafetyIdentifier,
-		AllowIncludeObfuscation: projection.TextPolicy.AllowIncludeObfuscation,
+	masterOtherSettings := edgeLocalChannelOtherSettings(projection.ChannelOther)
+	if projection.SettingsVersion == 0 {
+		masterOtherSettings = dto.ChannelOtherSettings{
+			AllowServiceTier: projection.TextPolicy.AllowServiceTier, AllowInferenceGeo: projection.TextPolicy.AllowInferenceGeo,
+			AllowSpeed: projection.TextPolicy.AllowSpeed, DisableStore: projection.TextPolicy.DisableStore,
+			AllowSafetyIdentifier:   projection.TextPolicy.AllowSafetyIdentifier,
+			AllowIncludeObfuscation: projection.TextPolicy.AllowIncludeObfuscation,
+		}
 	}
 	channelOtherSettings, err := edgeLocalChannelStructMap(masterOtherSettings)
 	if err != nil {
@@ -1020,6 +1036,29 @@ func edgeLocalLegacyChannel(
 		}
 	}
 	return channel, abilities, nil
+}
+
+func edgeLocalChannelOtherSettings(source dto.EdgeChannelOtherSettingsV1) dto.ChannelOtherSettings {
+	result := dto.ChannelOtherSettings{
+		AzureResponsesVersion: source.AzureResponsesVersion, VertexKeyType: source.VertexKeyType,
+		OpenRouterEnterprise: source.OpenRouterEnterprise, ClaudeBetaQuery: source.ClaudeBetaQuery,
+		AllowServiceTier: source.AllowServiceTier, AllowInferenceGeo: source.AllowInferenceGeo,
+		AllowSpeed: source.AllowSpeed, AllowSafetyIdentifier: source.AllowSafetyIdentifier,
+		DisableStore: source.DisableStore, AllowIncludeObfuscation: source.AllowIncludeObfuscation,
+		DisableTaskPollingSleep: source.DisableTaskPollingSleep, AwsKeyType: source.AwsKeyType,
+	}
+	if source.AdvancedCustom != nil {
+		result.AdvancedCustom = &dto.AdvancedCustomConfig{
+			Routes: make([]dto.AdvancedCustomRoute, 0, len(source.AdvancedCustom.Routes)),
+		}
+		for _, route := range source.AdvancedCustom.Routes {
+			result.AdvancedCustom.Routes = append(result.AdvancedCustom.Routes, dto.AdvancedCustomRoute{
+				IncomingPath: route.IncomingPath, UpstreamPath: route.UpstreamPath,
+				Converter: route.Converter, Models: append([]string(nil), route.Models...),
+			})
+		}
+	}
+	return result
 }
 
 func filterEdgeLocalChannelValues(values []string, allowed map[string]struct{}) []string {

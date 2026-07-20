@@ -79,7 +79,7 @@ func sweepTimedOutTasks(ctx context.Context) {
 			continue
 		}
 		timedOutCount++
-		if !isLegacy && task.Quota != 0 {
+		if !isLegacy && (task.Quota != 0 || common.IsEdgeMode()) {
 			RefundTaskQuota(ctx, task, reason)
 		}
 	}
@@ -104,6 +104,12 @@ type TaskPollSummary struct {
 // adaptor factory has not been wired yet, to avoid a nil call during startup.
 func RunTaskPollingOnce(ctx context.Context, report func(processed, total int)) TaskPollSummary {
 	summary := TaskPollSummary{}
+	if common.IsEdgeMode() {
+		if err := RecoverEdgeTaskBilling(ctx); err != nil {
+			logger.LogError(ctx, "recover edge task billing before polling: "+err.Error())
+			return summary
+		}
+	}
 	if GetTaskAdaptorFunc == nil {
 		return summary
 	}
@@ -141,6 +147,9 @@ func RunTaskPollingOnce(ctx context.Context, report func(processed, total int)) 
 			upstreamID := task.GetUpstreamTaskID()
 			if upstreamID == "" {
 				// 统计失败的未完成任务
+				if common.IsEdgeMode() {
+					RefundTaskQuota(ctx, task, "missing upstream task id")
+				}
 				nullTaskIds = append(nullTaskIds, task.ID)
 				continue
 			}
@@ -218,6 +227,9 @@ func updateSunoTasks(ctx context.Context, channelId int, taskIds []string, taskM
 		var failedIDs []int64
 		for _, upstreamID := range taskIds {
 			if t, ok := taskM[upstreamID]; ok {
+				if common.IsEdgeMode() {
+					RefundTaskQuota(ctx, t, "channel unavailable during task polling")
+				}
 				failedIDs = append(failedIDs, t.ID)
 			}
 		}
@@ -289,6 +301,11 @@ func updateSunoTasks(ctx context.Context, channelId int, taskIds []string, taskM
 		}
 		if responseItem.Status == model.TaskStatusSuccess {
 			task.Progress = "100%"
+			if common.IsEdgeMode() {
+				if err := FinalizeEdgeTaskBilling(ctx, task, task.Quota); err != nil {
+					logger.LogError(ctx, fmt.Sprintf("edge Suno 任务结算失败 task %s: %s", task.TaskID, err.Error()))
+				}
+			}
 		}
 		task.Data = responseItem.Data
 
@@ -383,6 +400,9 @@ func updateVideoTasks(ctx context.Context, platform constant.TaskPlatform, chann
 		var failedIDs []int64
 		for _, upstreamID := range taskIds {
 			if t, ok := taskM[upstreamID]; ok {
+				if common.IsEdgeMode() {
+					RefundTaskQuota(ctx, t, "channel unavailable during task polling")
+				}
 				failedIDs = append(failedIDs, t.ID)
 			}
 		}
@@ -550,7 +570,7 @@ func updateVideoSingleTask(ctx context.Context, adaptor TaskPollingAdaptor, ch *
 		task.FailReason = taskResult.Reason
 		logger.LogInfo(ctx, fmt.Sprintf("Task %s failed: %s", task.TaskID, task.FailReason))
 		taskResult.Progress = taskcommon.ProgressComplete
-		if quota != 0 {
+		if quota != 0 || common.IsEdgeMode() {
 			shouldRefund = true
 		}
 	default:
@@ -631,6 +651,20 @@ func truncateBase64(s string) string {
 //  2. taskResult.TotalTokens > 0 → 按 token 重算
 //  3. 都不满足 → 保持预扣额度不变
 func settleTaskBillingOnComplete(ctx context.Context, adaptor TaskPollingAdaptor, task *model.Task, taskResult *relaycommon.TaskInfo) {
+	if common.IsEdgeMode() {
+		if actualQuota := adaptor.AdjustBillingOnComplete(task, taskResult); actualQuota > 0 {
+			RecalculateTaskQuota(ctx, task, actualQuota, "adaptor计费调整")
+			return
+		}
+		if taskResult.TotalTokens > 0 {
+			RecalculateTaskQuotaByTokens(ctx, task, taskResult.TotalTokens)
+			return
+		}
+		if err := FinalizeEdgeTaskBilling(ctx, task, task.Quota); err != nil {
+			logger.LogError(ctx, fmt.Sprintf("edge 任务结算失败 task %s: %s", task.TaskID, err.Error()))
+		}
+		return
+	}
 	// 0. 按次计费的任务不做差额结算
 	if bc := task.PrivateData.BillingContext; bc != nil && bc.PerCallBilling {
 		logger.LogInfo(ctx, fmt.Sprintf("任务 %s 按次计费，跳过差额结算", task.TaskID))

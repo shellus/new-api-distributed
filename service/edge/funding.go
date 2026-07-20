@@ -6,13 +6,13 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
-	"strings"
 	"time"
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/dto"
 	"github.com/QuantumNous/new-api/model"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
+	relayconstant "github.com/QuantumNous/new-api/relay/constant"
 	coreservice "github.com/QuantumNous/new-api/service"
 	"github.com/QuantumNous/new-api/types"
 
@@ -52,6 +52,7 @@ func BillingSessionFactory(c *gin.Context, preConsumedQuota int, relayInfo *rela
 	}
 	session, apiErr := coreservice.NewBillingSessionWithFunding(c, relayInfo, preConsumedQuota, funding, coreservice.NoopTokenQuotaAccounting{})
 	if apiErr == nil {
+		relayInfo.EdgeReservationID = reservationID
 		ReleaseEdgeRequestPolicy(c)
 	}
 	return session, apiErr
@@ -211,18 +212,9 @@ func (f *EdgeBalanceFunding) Refund() error {
 func (f *EdgeBalanceFunding) HasReservation() bool { return f != nil && f.hasReservation }
 
 func (f *EdgeBalanceFunding) buildUsageEvent(actualQuota int64) (*dto.EdgeUsageEventV1, error) {
-	if f.relayInfo.SettlementUsage == nil {
+	endpoint := edgeEndpointForRelayInfo(f.relayInfo)
+	if f.relayInfo.SettlementUsage == nil && endpoint != dto.EdgeEndpointTaskV1 && endpoint != dto.EdgeEndpointMidjourneyV1 {
 		return nil, errors.New("edge settlement usage is unavailable")
-	}
-	if len(f.relayInfo.PriceData.OtherRatios()) != 0 {
-		return nil, errors.New("edge settlement v2 does not support request-specific billing multipliers")
-	}
-	if f.pricing.BillingMode == dto.EdgeBillingModeTieredExprV1 {
-		return nil, errors.New("tiered billing is not supported by edge settlement v2")
-	}
-	endpoint := dto.EdgeEndpointOpenAIChatCompletionsV1
-	if strings.HasPrefix(f.relayInfo.RequestURLPath, "/v1/responses") {
-		endpoint = dto.EdgeEndpointOpenAIResponsesV1
 	}
 	status := http.StatusOK
 	if f.responseStatus != nil {
@@ -250,6 +242,14 @@ func (f *EdgeBalanceFunding) buildUsageEvent(actualQuota int64) (*dto.EdgeUsageE
 	if consumeLogSnapshot != nil && consumeLogSnapshot.Other != nil {
 		delete(consumeLogSnapshot.Other, "frt")
 	}
+	facts := dto.EdgeBillingFactsV1{}
+	if f.relayInfo.EdgeBillingFacts != nil {
+		facts = *f.relayInfo.EdgeBillingFacts
+		if f.relayInfo.EdgeBillingFacts.TieredQuotaBeforeGroup != nil {
+			value := *f.relayInfo.EdgeBillingFacts.TieredQuotaBeforeGroup
+			facts.TieredQuotaBeforeGroup = &value
+		}
+	}
 	return &dto.EdgeUsageEventV1{
 		EventID: "event-" + uuid.NewString(), ChannelID: int64(f.relayInfo.ChannelId),
 		Endpoint: endpoint, Streaming: f.relayInfo.IsStream, Model: f.relayInfo.OriginModelName,
@@ -260,9 +260,50 @@ func (f *EdgeBalanceFunding) buildUsageEvent(actualQuota int64) (*dto.EdgeUsageE
 		Billing: dto.EdgeUsageBillingV1{
 			PricingPolicyID: f.pricing.PolicyID, PricingPolicyVersion: f.pricing.Version,
 			BillingMode: f.pricing.BillingMode, GroupRatio: f.relayInfo.PriceData.GroupRatioInfo.GroupRatio,
-			ChargedQuota: actualQuota,
+			AppliedRatios:         f.relayInfo.PriceData.OtherRatios(),
+			BillingExpressionHash: f.pricing.BillingExpressionHash,
+			MatchedTier:           f.relayInfo.EdgeBillingMatchedTier,
+			Facts:                 facts,
+			ChargedQuota:          actualQuota,
 		},
 	}, nil
+}
+
+func edgeEndpointForRelayInfo(info *relaycommon.RelayInfo) dto.EdgeEndpointV1 {
+	if info == nil {
+		return dto.EdgeEndpointDataPlaneV1
+	}
+	switch info.RelayFormat {
+	case types.RelayFormatClaude:
+		return dto.EdgeEndpointClaudeMessagesV1
+	case types.RelayFormatOpenAIResponses:
+		return dto.EdgeEndpointOpenAIResponsesV1
+	case types.RelayFormatOpenAIResponsesCompaction:
+		return dto.EdgeEndpointOpenAIResponsesCompactV1
+	case types.RelayFormatOpenAIImage:
+		return dto.EdgeEndpointOpenAIImagesV1
+	case types.RelayFormatEmbedding:
+		return dto.EdgeEndpointOpenAIEmbeddingsV1
+	case types.RelayFormatOpenAIAudio:
+		return dto.EdgeEndpointOpenAIAudioV1
+	case types.RelayFormatRerank:
+		return dto.EdgeEndpointOpenAIRerankV1
+	case types.RelayFormatGemini:
+		return dto.EdgeEndpointGeminiV1
+	case types.RelayFormatOpenAIRealtime:
+		return dto.EdgeEndpointOpenAIRealtimeV1
+	case types.RelayFormatTask:
+		return dto.EdgeEndpointTaskV1
+	case types.RelayFormatMjProxy:
+		return dto.EdgeEndpointMidjourneyV1
+	case types.RelayFormatOpenAI:
+		if info.RelayMode == relayconstant.RelayModeCompletions {
+			return dto.EdgeEndpointOpenAICompletionsV1
+		}
+		return dto.EdgeEndpointOpenAIChatCompletionsV1
+	default:
+		return dto.EdgeEndpointDataPlaneV1
+	}
 }
 
 func edgeFundingStatus(err error) int {

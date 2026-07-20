@@ -136,8 +136,7 @@ func newEdgeRuntimeTestControlClient(t *testing.T, transport http.RoundTripper) 
 			Name: "runtime-edge", PublicURL: "http://localhost", SoftwareVersion: "test",
 			StartedAtUnixMilli: time.Now().Add(-time.Minute).UnixMilli(),
 			Capabilities: []dto.EdgeEndpointCapabilityV1{
-				{Endpoint: dto.EdgeEndpointOpenAIChatCompletionsV1, Streaming: true},
-				{Endpoint: dto.EdgeEndpointOpenAIResponsesV1, Streaming: true},
+				{Endpoint: dto.EdgeEndpointDataPlaneV1, Streaming: true},
 			},
 		},
 		HTTPClient: &http.Client{Transport: transport}, RequestTimeout: time.Second, MaxResponseBytes: 1 << 20,

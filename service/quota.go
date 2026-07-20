@@ -30,13 +30,17 @@ type TokenDetails struct {
 }
 
 type QuotaInfo struct {
-	InputDetails  TokenDetails
-	OutputDetails TokenDetails
-	ModelName     string
-	UsePrice      bool
-	ModelPrice    float64
-	ModelRatio    float64
-	GroupRatio    float64
+	InputDetails         TokenDetails
+	OutputDetails        TokenDetails
+	ModelName            string
+	UsePrice             bool
+	ModelPrice           float64
+	ModelRatio           float64
+	GroupRatio           float64
+	QuotaPerUnit         float64
+	CompletionRatio      float64
+	AudioRatio           float64
+	AudioCompletionRatio float64
 }
 
 func hasCustomModelRatio(modelName string, currentRatio float64) bool {
@@ -50,16 +54,16 @@ func hasCustomModelRatio(modelName string, currentRatio float64) bool {
 func calculateAudioQuota(info QuotaInfo) (int, *common.QuotaClamp) {
 	if info.UsePrice {
 		modelPrice := decimal.NewFromFloat(info.ModelPrice)
-		quotaPerUnit := decimal.NewFromFloat(common.QuotaPerUnit)
+		quotaPerUnit := decimal.NewFromFloat(info.QuotaPerUnit)
 		groupRatio := decimal.NewFromFloat(info.GroupRatio)
 
 		quota := modelPrice.Mul(quotaPerUnit).Mul(groupRatio)
 		return common.QuotaFromDecimalChecked(quota)
 	}
 
-	completionRatio := decimal.NewFromFloat(ratio_setting.GetCompletionRatio(info.ModelName))
-	audioRatio := decimal.NewFromFloat(ratio_setting.GetAudioRatio(info.ModelName))
-	audioCompletionRatio := decimal.NewFromFloat(ratio_setting.GetAudioCompletionRatio(info.ModelName))
+	completionRatio := decimal.NewFromFloat(info.CompletionRatio)
+	audioRatio := decimal.NewFromFloat(info.AudioRatio)
+	audioCompletionRatio := decimal.NewFromFloat(info.AudioCompletionRatio)
 
 	groupRatio := decimal.NewFromFloat(info.GroupRatio)
 	modelRatio := decimal.NewFromFloat(info.ModelRatio)
@@ -87,6 +91,29 @@ func calculateAudioQuota(info QuotaInfo) (int, *common.QuotaClamp) {
 }
 
 func PreWssConsumeQuota(ctx *gin.Context, relayInfo *relaycommon.RelayInfo, usage *dto.RealtimeUsage) error {
+	if common.IsEdgeMode() {
+		if relayInfo == nil || relayInfo.Billing == nil {
+			return errors.New("edge realtime billing session is unavailable")
+		}
+		if relayInfo.PriceData.UsePrice {
+			return nil
+		}
+		quota, clamp := calculateAudioQuota(QuotaInfo{
+			InputDetails: TokenDetails{
+				TextTokens: usage.InputTokenDetails.TextTokens, AudioTokens: usage.InputTokenDetails.AudioTokens,
+			},
+			OutputDetails: TokenDetails{
+				TextTokens: usage.OutputTokenDetails.TextTokens, AudioTokens: usage.OutputTokenDetails.AudioTokens,
+			},
+			ModelName: relayInfo.OriginModelName, UsePrice: false,
+			ModelRatio: relayInfo.PriceData.ModelRatio, GroupRatio: relayInfo.PriceData.GroupRatioInfo.GroupRatio,
+			QuotaPerUnit: edgeQuotaPerUnit(relayInfo), CompletionRatio: relayInfo.PriceData.CompletionRatio,
+			AudioRatio: relayInfo.PriceData.AudioRatio, AudioCompletionRatio: relayInfo.PriceData.AudioCompletionRatio,
+		})
+		noteQuotaClamp(relayInfo, clamp)
+		relayInfo.RealtimeObservedQuota += quota
+		return relayInfo.Billing.Reserve(relayInfo.RealtimeObservedQuota)
+	}
 	if relayInfo.UsePrice {
 		return nil
 	}
@@ -130,10 +157,14 @@ func PreWssConsumeQuota(ctx *gin.Context, relayInfo *relaycommon.RelayInfo, usag
 			TextTokens:  textOutTokens,
 			AudioTokens: audioOutTokens,
 		},
-		ModelName:  modelName,
-		UsePrice:   relayInfo.UsePrice,
-		ModelRatio: modelRatio,
-		GroupRatio: actualGroupRatio,
+		ModelName:            modelName,
+		UsePrice:             relayInfo.UsePrice,
+		ModelRatio:           modelRatio,
+		GroupRatio:           actualGroupRatio,
+		QuotaPerUnit:         common.QuotaPerUnit,
+		CompletionRatio:      ratio_setting.GetCompletionRatio(modelName),
+		AudioRatio:           ratio_setting.GetAudioRatio(modelName),
+		AudioCompletionRatio: ratio_setting.GetAudioCompletionRatio(modelName),
 	}
 
 	quota, clamp := calculateAudioQuota(quotaInfo)
@@ -194,10 +225,14 @@ func PostWssConsumeQuota(ctx *gin.Context, relayInfo *relaycommon.RelayInfo, mod
 			TextTokens:  textOutTokens,
 			AudioTokens: audioOutTokens,
 		},
-		ModelName:  modelName,
-		UsePrice:   usePrice,
-		ModelRatio: modelRatio,
-		GroupRatio: groupRatio,
+		ModelName:            modelName,
+		UsePrice:             usePrice,
+		ModelRatio:           modelRatio,
+		GroupRatio:           groupRatio,
+		QuotaPerUnit:         edgeQuotaPerUnit(relayInfo),
+		CompletionRatio:      relayInfo.PriceData.CompletionRatio,
+		AudioRatio:           relayInfo.PriceData.AudioRatio,
+		AudioCompletionRatio: relayInfo.PriceData.AudioCompletionRatio,
 	}
 
 	quota, clamp := calculateAudioQuota(quotaInfo)
@@ -207,6 +242,9 @@ func PostWssConsumeQuota(ctx *gin.Context, relayInfo *relaycommon.RelayInfo, mod
 	}
 
 	totalTokens := usage.TotalTokens
+	if totalTokens == 0 {
+		totalTokens = usage.InputTokens + usage.OutputTokens
+	}
 	var logContent string
 	if !usePrice {
 		logContent = fmt.Sprintf("模型倍率 %.2f，补全倍率 %.2f，音频倍率 %.2f，音频补全倍率 %.2f，分组倍率 %.2f",
@@ -223,13 +261,49 @@ func PostWssConsumeQuota(ctx *gin.Context, relayInfo *relaycommon.RelayInfo, mod
 		logContent += "（可能是上游超时）"
 		logger.LogError(ctx, fmt.Sprintf("total tokens is 0, cannot consume quota, userId %d, channelId %d, "+
 			"tokenId %d, model %s， pre-consumed quota %d", relayInfo.UserId, relayInfo.ChannelId, relayInfo.TokenId, modelName, relayInfo.FinalPreConsumedQuota))
-	} else {
+	} else if !common.IsEdgeMode() {
 		model.UpdateUserUsedQuotaAndRequestCount(relayInfo.UserId, quota)
 		model.UpdateChannelUsedQuota(relayInfo.ChannelId, quota)
 	}
 
+	if common.IsEdgeMode() {
+		settlementUsage := &dto.Usage{
+			PromptTokens: usage.InputTokens, CompletionTokens: usage.OutputTokens, TotalTokens: usage.TotalTokens,
+			PromptTokensDetails: dto.InputTokenDetails{
+				CachedTokens: usage.InputTokenDetails.CachedTokens,
+				TextTokens:   usage.InputTokenDetails.TextTokens,
+				AudioTokens:  usage.InputTokenDetails.AudioTokens,
+			},
+			CompletionTokenDetails: dto.OutputTokenDetails{
+				TextTokens:  usage.OutputTokenDetails.TextTokens,
+				AudioTokens: usage.OutputTokenDetails.AudioTokens,
+			},
+		}
+		relayInfo.SettlementUsage = dto.NewOpenAIChatBillingUsage(settlementUsage)
+		if relayInfo.SettlementUsage == nil {
+			relayInfo.SettlementUsage = &dto.BillingUsage{
+				Source: dto.BillingUsageSourceOAIChat, Semantic: dto.BillingUsageSemanticOpenAI, OpenAIUsage: settlementUsage,
+			}
+		}
+		facts := &dto.EdgeBillingFactsV1{}
+		if relayInfo.TieredBillingSnapshot != nil {
+			quotaBeforeGroup := relayInfo.TieredBillingSnapshot.EstimatedQuotaBeforeGroup
+			if tieredResult != nil {
+				quotaBeforeGroup = tieredResult.ActualQuotaBeforeGroup
+				relayInfo.EdgeBillingMatchedTier = tieredResult.MatchedTier
+			} else {
+				relayInfo.EdgeBillingMatchedTier = relayInfo.TieredBillingSnapshot.EstimatedTier
+			}
+			facts.TieredQuotaBeforeGroup = &quotaBeforeGroup
+		}
+		relayInfo.EdgeBillingFacts = facts
+	}
+
 	if err := SettleBilling(ctx, relayInfo, quota); err != nil {
 		logger.LogError(ctx, "error settling billing: "+err.Error())
+	}
+	if common.IsEdgeMode() {
+		return
 	}
 
 	logModel := modelName
@@ -317,10 +391,14 @@ func PostAudioConsumeQuota(ctx *gin.Context, relayInfo *relaycommon.RelayInfo, u
 			TextTokens:  textOutTokens,
 			AudioTokens: audioOutTokens,
 		},
-		ModelName:  relayInfo.OriginModelName,
-		UsePrice:   usePrice,
-		ModelRatio: modelRatio,
-		GroupRatio: groupRatio,
+		ModelName:            relayInfo.OriginModelName,
+		UsePrice:             usePrice,
+		ModelRatio:           modelRatio,
+		GroupRatio:           groupRatio,
+		QuotaPerUnit:         edgeQuotaPerUnit(relayInfo),
+		CompletionRatio:      relayInfo.PriceData.CompletionRatio,
+		AudioRatio:           relayInfo.PriceData.AudioRatio,
+		AudioCompletionRatio: relayInfo.PriceData.AudioCompletionRatio,
 	}
 
 	quota, clamp := calculateAudioQuota(quotaInfo)
@@ -330,6 +408,9 @@ func PostAudioConsumeQuota(ctx *gin.Context, relayInfo *relaycommon.RelayInfo, u
 	}
 
 	totalTokens := usage.TotalTokens
+	if totalTokens == 0 {
+		totalTokens = usage.PromptTokens + usage.CompletionTokens
+	}
 	var logContent string
 	if !usePrice {
 		logContent = fmt.Sprintf("模型倍率 %.2f，补全倍率 %.2f，音频倍率 %.2f，音频补全倍率 %.2f，分组倍率 %.2f",
@@ -346,13 +427,34 @@ func PostAudioConsumeQuota(ctx *gin.Context, relayInfo *relaycommon.RelayInfo, u
 		logContent += "（可能是上游超时）"
 		logger.LogError(ctx, fmt.Sprintf("total tokens is 0, cannot consume quota, userId %d, channelId %d, "+
 			"tokenId %d, model %s， pre-consumed quota %d", relayInfo.UserId, relayInfo.ChannelId, relayInfo.TokenId, relayInfo.OriginModelName, relayInfo.FinalPreConsumedQuota))
-	} else {
+	} else if !common.IsEdgeMode() {
 		model.UpdateUserUsedQuotaAndRequestCount(relayInfo.UserId, quota)
 		model.UpdateChannelUsedQuota(relayInfo.ChannelId, quota)
 	}
 
+	if common.IsEdgeMode() {
+		relayInfo.SettlementUsage = buildEdgeTextSettlementUsage(relayInfo, usage, usage, textQuotaSummary{
+			PromptTokens: usage.PromptTokens, CompletionTokens: usage.CompletionTokens, TotalTokens: usage.TotalTokens,
+		})
+		facts := &dto.EdgeBillingFactsV1{}
+		if relayInfo.TieredBillingSnapshot != nil {
+			quotaBeforeGroup := relayInfo.TieredBillingSnapshot.EstimatedQuotaBeforeGroup
+			if tieredResult != nil {
+				quotaBeforeGroup = tieredResult.ActualQuotaBeforeGroup
+				relayInfo.EdgeBillingMatchedTier = tieredResult.MatchedTier
+			} else {
+				relayInfo.EdgeBillingMatchedTier = relayInfo.TieredBillingSnapshot.EstimatedTier
+			}
+			facts.TieredQuotaBeforeGroup = &quotaBeforeGroup
+		}
+		relayInfo.EdgeBillingFacts = facts
+	}
+
 	if err := SettleBilling(ctx, relayInfo, quota); err != nil {
 		logger.LogError(ctx, "error settling billing: "+err.Error())
+	}
+	if common.IsEdgeMode() {
+		return
 	}
 
 	logModel := relayInfo.OriginModelName

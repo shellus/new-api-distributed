@@ -787,17 +787,15 @@ func TestEdgeControlV1ErrorCodesAreUnique(t *testing.T) {
 	assert.Len(t, seen, len(codes))
 }
 
-func TestEdgeControlV1InitialEndpointBoundary(t *testing.T) {
+func TestEdgeControlV1CompleteDataPlaneCapability(t *testing.T) {
 	capabilities := []EdgeEndpointCapabilityV1{
-		{Endpoint: EdgeEndpointOpenAIChatCompletionsV1, Streaming: true},
-		{Endpoint: EdgeEndpointOpenAIResponsesV1, Streaming: true},
+		{Endpoint: EdgeEndpointDataPlaneV1, Streaming: true},
 	}
 
 	encoded, err := common.Marshal(capabilities)
 	require.NoError(t, err)
 	assert.JSONEq(t, `[
-		{"endpoint":"openai_chat_completions","streaming":true},
-		{"endpoint":"openai_responses","streaming":true}
+		{"endpoint":"data_plane","streaming":true}
 	]`, string(encoded))
 }
 
@@ -814,8 +812,7 @@ func edgeValidDeclarationForValidationV1() EdgeNodeDeclarationV1 {
 		SoftwareVersion:    "v1.2.3-test",
 		StartedAtUnixMilli: 1_700_000_000_000,
 		Capabilities: []EdgeEndpointCapabilityV1{
-			{Endpoint: EdgeEndpointOpenAIChatCompletionsV1, Streaming: true},
-			{Endpoint: EdgeEndpointOpenAIResponsesV1, Streaming: true},
+			{Endpoint: EdgeEndpointDataPlaneV1, Streaming: true},
 		},
 	}
 }
@@ -923,8 +920,10 @@ func TestEdgeNodeDeclarationV1Validate(t *testing.T) {
 		{name: "started timestamp before year 2000", mutate: func(value *EdgeNodeDeclarationV1) { value.StartedAtUnixMilli = edgeControlMinUnixMilliV1 - 1 }},
 		{name: "timestamp beyond year 9999", mutate: func(value *EdgeNodeDeclarationV1) { value.StartedAtUnixMilli = edgeControlMaxUnixMilliV1 + 1 }},
 		{name: "empty capabilities", mutate: func(value *EdgeNodeDeclarationV1) { value.Capabilities = nil }},
-		{name: "unknown capability", mutate: func(value *EdgeNodeDeclarationV1) { value.Capabilities[0].Endpoint = "openai_images" }},
-		{name: "duplicate capability", mutate: func(value *EdgeNodeDeclarationV1) { value.Capabilities[1] = value.Capabilities[0] }},
+		{name: "invalid capability", mutate: func(value *EdgeNodeDeclarationV1) { value.Capabilities[0].Endpoint = "OpenAI/Images" }},
+		{name: "duplicate capability", mutate: func(value *EdgeNodeDeclarationV1) {
+			value.Capabilities = append(value.Capabilities, value.Capabilities[0])
+		}},
 		{name: "too many capabilities", mutate: func(value *EdgeNodeDeclarationV1) {
 			value.Capabilities = make([]EdgeEndpointCapabilityV1, EdgeControlMaxCapabilitiesV1+1)
 		}},
@@ -1438,6 +1437,7 @@ func edgeValidSnapshotPageResponseV1(dataset EdgeSnapshotDatasetV1) EdgeSnapshot
 
 func edgeValidUsageEventV1() EdgeUsageEventV1 {
 	httpStatus := 200
+	tieredQuotaBeforeGroup := 0.00016
 	return EdgeUsageEventV1{
 		EventID:             "event-validation-9",
 		Sequence:            9,
@@ -1480,8 +1480,11 @@ func edgeValidUsageEventV1() EdgeUsageEventV1 {
 			AppliedRatios:         map[string]float64{"speed": 2},
 			BillingExpressionHash: edgeTestDigestV1("d"),
 			MatchedTier:           "base",
-			ReservedQuota:         100,
-			ChargedQuota:          80,
+			Facts: EdgeBillingFactsV1{
+				TieredQuotaBeforeGroup: &tieredQuotaBeforeGroup,
+			},
+			ReservedQuota: 100,
+			ChargedQuota:  80,
 		},
 	}
 }
@@ -1845,7 +1848,7 @@ func TestEdgeUsageBillingAndEventV1Validate(t *testing.T) {
 		{name: "invalid balance revision", mutate: func(value *EdgeUsageEventV1) { value.BalanceRevision = 0 }},
 		{name: "invalid funding source", mutate: func(value *EdgeUsageEventV1) { value.FundingSource = "lease" }},
 		{name: "wallet with subscription", mutate: func(value *EdgeUsageEventV1) { value.UserSubscriptionID = 9 }},
-		{name: "invalid endpoint", mutate: func(value *EdgeUsageEventV1) { value.Endpoint = "images" }},
+		{name: "invalid endpoint", mutate: func(value *EdgeUsageEventV1) { value.Endpoint = "OpenAI/Images" }},
 		{name: "finish before start", mutate: func(value *EdgeUsageEventV1) { value.FinishedAtUnixMilli = value.StartedAtUnixMilli - 1 }},
 		{name: "first response at start", mutate: func(value *EdgeUsageEventV1) {
 			firstResponseAt := value.StartedAtUnixMilli

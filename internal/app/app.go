@@ -83,6 +83,12 @@ func Run(config Config) (runErr error) {
 		if err := edgeservice.InitializeEdgeAccountingReadiness(context.Background(), model.DB); err != nil {
 			return fmt.Errorf("failed to initialize edge accounting readiness: %w", err)
 		}
+		if err := edgeservice.RecoverEdgeStagedSettlements(context.Background(), model.DB); err != nil {
+			return fmt.Errorf("failed to recover staged edge settlements: %w", err)
+		}
+		if err := service.RecoverEdgeTaskBilling(context.Background()); err != nil {
+			return fmt.Errorf("failed to recover edge task billing: %w", err)
+		}
 	}
 
 	backgroundContext, cancelBackground := context.WithCancel(context.Background())
@@ -117,6 +123,37 @@ func Run(config Config) (runErr error) {
 			defer backgroundWorkers.Done()
 			common.RunSystemMonitor(backgroundContext)
 		}()
+		service.GetTaskAdaptorFunc = func(platform constant.TaskPlatform) service.TaskPollingAdaptor {
+			adaptor := relay.GetTaskAdaptor(platform)
+			if adaptor == nil {
+				return nil
+			}
+			return adaptor
+		}
+		if constant.UpdateTask {
+			backgroundWorkers.Add(1)
+			go func() {
+				defer backgroundWorkers.Done()
+				ticker := time.NewTicker(15 * time.Second)
+				defer ticker.Stop()
+				for {
+					select {
+					case <-backgroundContext.Done():
+						return
+					case <-ticker.C:
+						_ = edgeservice.WithEdgeDataPlanePolicyRead(func() error {
+							if model.HasUnfinishedMidjourneyTasks() {
+								controller.RunEdgeMidjourneyPollingOnce(backgroundContext)
+							}
+							if model.HasUnfinishedSyncTasks() {
+								service.RunTaskPollingOnce(backgroundContext, nil)
+							}
+							return nil
+						})
+					}
+				}
+			}()
+		}
 	}
 
 	if config.Mode == common.RuntimeModeMaster {

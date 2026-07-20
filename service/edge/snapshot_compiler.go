@@ -106,17 +106,19 @@ type edgeSnapshotProjection struct {
 }
 
 type edgeSnapshotPricingInput struct {
-	Mode                           string
-	Expression                     string
-	ModelPrice                     *float64
-	ModelRatio                     *float64
-	CompletionRatio                *float64
-	CacheReadRatio                 *float64
-	CacheCreationRatio             *float64
-	ImageRatioConfigured           bool
-	AudioRatioConfigured           bool
-	AudioCompletionRatioConfigured bool
-	QuotaPerUnit                   float64
+	Mode                 string
+	Expression           string
+	ModelPrice           *float64
+	ModelRatio           *float64
+	CompletionRatio      *float64
+	CacheReadRatio       *float64
+	CacheCreationRatio   *float64
+	ImageRatio           *float64
+	AudioRatio           *float64
+	AudioCompletionRatio *float64
+	AudioInputPrice      *float64
+	ToolPrices           map[string]float64
+	QuotaPerUnit         float64
 }
 
 type edgeSnapshotPageBuild struct {
@@ -311,7 +313,7 @@ func loadEdgeSnapshotDatabaseState(now int64) (*edgeSnapshotDatabaseState, error
 
 		modelSet := make(map[string]struct{}, len(state.Abilities))
 		for i := range state.Abilities {
-			if state.Abilities[i].Enabled && !strings.HasSuffix(state.Abilities[i].Model, ratio_setting.CompactModelSuffix) {
+			if state.Abilities[i].Enabled {
 				modelSet[state.Abilities[i].Model] = struct{}{}
 			}
 		}
@@ -333,26 +335,6 @@ func loadEdgeSnapshotDatabaseState(now int64) (*edgeSnapshotDatabaseState, error
 		return nil, err
 	}
 	return state, nil
-}
-
-// edgeTextCapableModel reports whether a model can be served by the edge
-// text data plane. Edge only exposes Chat Completions and Responses; image,
-// embeddings, rerank and video models must not be projected because edge
-// admission would accept requests the relay cannot serve. Text models keep
-// both endpoints declared: the shared relay converts between chat and
-// responses formats in both directions, matching master runtime behavior.
-func edgeTextCapableModel(channelType int, modelName string) bool {
-	if common.IsImageGenerationModel(modelName) {
-		return false
-	}
-	for _, endpointType := range common.GetEndpointTypesByChannelType(channelType, modelName) {
-		switch endpointType {
-		case constant.EndpointTypeOpenAI, constant.EndpointTypeOpenAIResponse,
-			constant.EndpointTypeAnthropic, constant.EndpointTypeGemini:
-			return true
-		}
-	}
-	return false
 }
 
 func projectEdgeSnapshotDatabaseState(state *edgeSnapshotDatabaseState) (*edgeSnapshotProjection, error) {
@@ -391,7 +373,7 @@ func projectEdgeSnapshotDatabaseState(state *edgeSnapshotDatabaseState) (*edgeSn
 			seenModels := make(map[string]struct{})
 			for _, modelName := range token.GetModelLimits() {
 				modelName = strings.TrimSpace(modelName)
-				if modelName == "" || strings.HasSuffix(modelName, ratio_setting.CompactModelSuffix) {
+				if modelName == "" {
 					continue
 				}
 				if _, exists := seenModels[modelName]; exists {
@@ -494,12 +476,6 @@ func projectEdgeSnapshotDatabaseState(state *edgeSnapshotDatabaseState) (*edgeSn
 		if !exists || !ability.Enabled || channel.Status != common.ChannelStatusEnabled {
 			continue
 		}
-		if strings.HasSuffix(ability.Model, ratio_setting.CompactModelSuffix) {
-			continue
-		}
-		if !edgeTextCapableModel(channel.Type, ability.Model) {
-			continue
-		}
 		if status, exists := state.ModelStatuses[ability.Model]; exists && status != 1 {
 			continue
 		}
@@ -565,7 +541,7 @@ func projectEdgeSnapshotDatabaseState(state *edgeSnapshotDatabaseState) (*edgeSn
 		projection.Models = append(projection.Models, dto.EdgeModelPolicyV1{
 			Model:      modelName,
 			Enabled:    true,
-			Endpoints:  []dto.EdgeEndpointV1{dto.EdgeEndpointOpenAIChatCompletionsV1, dto.EdgeEndpointOpenAIResponsesV1},
+			Endpoints:  []dto.EdgeEndpointV1{dto.EdgeEndpointDataPlaneV1},
 			Streaming:  true,
 			ChannelIDs: channelIDs,
 		})
@@ -640,14 +616,25 @@ func projectEdgeSnapshotChannel(channel model.Channel, localService dto.EdgeLoca
 	if channel.Priority != nil {
 		priority = *channel.Priority
 	}
+	sanitizedOther, err := sanitizeEdgeChannelOtherSettings(other)
+	if err != nil {
+		return dto.EdgeChannelProjectionV1{}, fmt.Errorf("%w: channel %q: sanitize typed settings: %v", ErrEdgeSnapshotUnrepresentable, channel.Name, err)
+	}
 	projection := dto.EdgeChannelProjectionV1{
-		ChannelID:    int64(channel.Id),
-		Type:         channel.Type,
-		Name:         channel.Name,
-		Enabled:      channel.Status == common.ChannelStatusEnabled,
-		Priority:     priority,
-		Weight:       weight,
-		LocalService: localService,
+		ChannelID:       int64(channel.Id),
+		Type:            channel.Type,
+		Name:            channel.Name,
+		Enabled:         channel.Status == common.ChannelStatusEnabled,
+		Priority:        priority,
+		Weight:          weight,
+		LocalService:    localService,
+		SettingsVersion: 1,
+		ChannelSettings: dto.EdgeChannelSettingsV1{
+			ForceFormat: settings.ForceFormat, ThinkingToContent: settings.ThinkingToContent,
+			PassThroughBodyEnabled: settings.PassThroughBodyEnabled,
+			SystemPrompt:           settings.SystemPrompt, SystemPromptOverride: settings.SystemPromptOverride,
+		},
+		ChannelOther: sanitizedOther,
 		TextPolicy: dto.EdgeTextRequestPolicyV1{
 			ForceFormat:             settings.ForceFormat,
 			ThinkingToContent:       settings.ThinkingToContent,
@@ -676,6 +663,29 @@ func projectEdgeSnapshotChannel(channel model.Channel, localService dto.EdgeLoca
 		return dto.EdgeChannelProjectionV1{}, err
 	}
 	return projection, nil
+}
+
+func sanitizeEdgeChannelOtherSettings(source dto.ChannelOtherSettings) (dto.EdgeChannelOtherSettingsV1, error) {
+	result := dto.EdgeChannelOtherSettingsV1{
+		AzureResponsesVersion: source.AzureResponsesVersion, VertexKeyType: source.VertexKeyType,
+		OpenRouterEnterprise: source.OpenRouterEnterprise, ClaudeBetaQuery: source.ClaudeBetaQuery,
+		AllowServiceTier: source.AllowServiceTier, AllowInferenceGeo: source.AllowInferenceGeo,
+		AllowSpeed: source.AllowSpeed, AllowSafetyIdentifier: source.AllowSafetyIdentifier,
+		DisableStore: source.DisableStore, AllowIncludeObfuscation: source.AllowIncludeObfuscation,
+		DisableTaskPollingSleep: source.DisableTaskPollingSleep, AwsKeyType: source.AwsKeyType,
+	}
+	if source.AdvancedCustom != nil {
+		result.AdvancedCustom = &dto.EdgeAdvancedCustomConfigV1{
+			Routes: make([]dto.EdgeAdvancedCustomRouteV1, 0, len(source.AdvancedCustom.Routes)),
+		}
+		for _, route := range source.AdvancedCustom.Routes {
+			result.AdvancedCustom.Routes = append(result.AdvancedCustom.Routes, dto.EdgeAdvancedCustomRouteV1{
+				IncomingPath: route.IncomingPath, UpstreamPath: route.UpstreamPath,
+				Converter: route.Converter, Models: append([]string(nil), route.Models...),
+			})
+		}
+	}
+	return result, nil
 }
 
 func pointerString(value *string) string {
@@ -767,9 +777,18 @@ func captureEdgeSnapshotSettings(projection *edgeSnapshotProjection) error {
 		input.CacheReadRatio = floatPointer(cacheRead)
 		cacheCreation, _ := ratio_setting.GetCreateCacheRatio(modelName)
 		input.CacheCreationRatio = floatPointer(cacheCreation)
-		_, input.ImageRatioConfigured = ratio_setting.GetImageRatio(modelName)
-		input.AudioRatioConfigured = ratio_setting.ContainsAudioRatio(modelName)
-		input.AudioCompletionRatioConfigured = ratio_setting.ContainsAudioCompletionRatio(modelName)
+		imageRatio, _ := ratio_setting.GetImageRatio(modelName)
+		input.ImageRatio = floatPointer(imageRatio)
+		input.AudioRatio = floatPointer(ratio_setting.GetAudioRatio(modelName))
+		input.AudioCompletionRatio = floatPointer(ratio_setting.GetAudioCompletionRatio(modelName))
+		if audioInputPrice := operation_setting.GetGeminiInputAudioPricePerMillionTokens(modelName); audioInputPrice > 0 {
+			input.AudioInputPrice = floatPointer(audioInputPrice)
+		}
+		input.ToolPrices = map[string]float64{
+			"web_search_preview": operation_setting.GetToolPriceForModel("web_search_preview", modelName),
+			"web_search":         operation_setting.GetToolPriceForModel("web_search", modelName),
+			"file_search":        operation_setting.GetToolPriceForModel("file_search", modelName),
+		}
 
 		policy, err := projectEdgeSnapshotPricing(modelName, input)
 		if err != nil {
@@ -900,10 +919,15 @@ func filterEdgeSnapshotAuthorizationGroups(projection *edgeSnapshotProjection) e
 
 func projectEdgeSnapshotPricing(modelName string, input edgeSnapshotPricingInput) (dto.EdgePricingPolicyV1, error) {
 	policy := dto.EdgePricingPolicyV1{
-		PolicyID:     modelName,
-		Version:      "v1",
-		Model:        modelName,
-		QuotaPerUnit: input.QuotaPerUnit,
+		PolicyID:             modelName,
+		Version:              "v1",
+		Model:                modelName,
+		QuotaPerUnit:         input.QuotaPerUnit,
+		ImageRatio:           cloneFloatPointer(input.ImageRatio),
+		AudioRatio:           cloneFloatPointer(input.AudioRatio),
+		AudioCompletionRatio: cloneFloatPointer(input.AudioCompletionRatio),
+		AudioInputPrice:      cloneFloatPointer(input.AudioInputPrice),
+		ToolPrices:           cloneEdgeSnapshotFloatMap(input.ToolPrices),
 	}
 	if input.Mode != billing_setting.BillingModeRatio && input.Mode != billing_setting.BillingModeTieredExpr {
 		return dto.EdgePricingPolicyV1{}, fmt.Errorf("%w: model %q uses unknown billing mode %q", ErrEdgeSnapshotUnrepresentable, modelName, input.Mode)
@@ -912,15 +936,6 @@ func projectEdgeSnapshotPricing(modelName string, input edgeSnapshotPricingInput
 		expression := input.Expression
 		if strings.TrimSpace(expression) == "" {
 			return dto.EdgePricingPolicyV1{}, fmt.Errorf("%w: model %q has empty tiered billing expression", ErrEdgeSnapshotUnrepresentable, modelName)
-		}
-		if strings.Contains(expression, "|||") {
-			return dto.EdgePricingPolicyV1{}, fmt.Errorf("%w: model %q uses request billing rules", ErrEdgeSnapshotUnrepresentable, modelName)
-		}
-		if _, err := billingexpr.CompileFromCache(expression); err != nil {
-			return dto.EdgePricingPolicyV1{}, fmt.Errorf("model %q billing expression: %w", modelName, err)
-		}
-		if dto.EdgeBillingExpressionHasRequestOrTimeDependenciesV1(expression) {
-			return dto.EdgePricingPolicyV1{}, fmt.Errorf("%w: model %q billing expression depends on request or time data", ErrEdgeSnapshotUnrepresentable, modelName)
 		}
 		if err := billing_setting.SmokeTestExpr(expression); err != nil {
 			return dto.EdgePricingPolicyV1{}, fmt.Errorf("model %q billing expression: %w", modelName, err)
@@ -936,9 +951,6 @@ func projectEdgeSnapshotPricing(modelName string, input edgeSnapshotPricingInput
 		if input.ModelRatio == nil {
 			return dto.EdgePricingPolicyV1{}, fmt.Errorf("model %q has no ratio or fixed price", modelName)
 		}
-		if input.ImageRatioConfigured || input.AudioRatioConfigured || input.AudioCompletionRatioConfigured {
-			return dto.EdgePricingPolicyV1{}, fmt.Errorf("%w: model %q uses text media token ratios unsupported by edge settlement v1", ErrEdgeSnapshotUnrepresentable, modelName)
-		}
 		policy.BillingMode = dto.EdgeBillingModeRatioV1
 		policy.ModelRatio = floatPointer(*input.ModelRatio)
 		policy.CompletionRatio = cloneFloatPointer(input.CompletionRatio)
@@ -952,6 +964,17 @@ func projectEdgeSnapshotPricing(modelName string, input edgeSnapshotPricingInput
 		return dto.EdgePricingPolicyV1{}, fmt.Errorf("model %q pricing: %w", modelName, err)
 	}
 	return policy, nil
+}
+
+func cloneEdgeSnapshotFloatMap(values map[string]float64) map[string]float64 {
+	if len(values) == 0 {
+		return nil
+	}
+	result := make(map[string]float64, len(values))
+	for key, value := range values {
+		result[key] = value
+	}
+	return result
 }
 
 func floatPointer(value float64) *float64 {

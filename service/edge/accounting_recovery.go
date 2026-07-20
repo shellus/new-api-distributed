@@ -28,7 +28,7 @@ func InitializeEdgeAccountingReadiness(ctx context.Context, db *gorm.DB) error {
 	}
 	var orphanedReservations int64
 	if err := db.WithContext(ctx).Model(&model.EdgeLocalQuotaReservation{}).
-		Where("status = ? AND staged_event_id = '' AND staged_event_payload = '' AND staged_at_unix_milli = 0",
+		Where("status = ? AND owner_kind = '' AND staged_event_id = '' AND staged_event_payload = '' AND staged_at_unix_milli = 0",
 			model.EdgeLocalReservationStatusActive).
 		Count(&orphanedReservations).Error; err != nil {
 		edgeAccountingBlock.Store(true)

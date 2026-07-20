@@ -186,10 +186,7 @@ func publishMasterConsumeLogClaim(ctx context.Context, claim *model.EdgeConsumeL
 		return nil
 	}
 
-	requestPath := "/v1/chat/completions"
-	if event.Endpoint == dto.EdgeEndpointOpenAIResponsesV1 {
-		requestPath = "/v1/responses"
-	}
+	requestPath := edgeEndpointRequestPath(event.Endpoint)
 	if consumeLogSnapshot == nil {
 		durationSeconds := (event.FinishedAtUnixMilli - event.StartedAtUnixMilli) / 1000
 		if durationSeconds > math.MaxInt32 {
@@ -286,6 +283,37 @@ func publishMasterConsumeLogClaim(ctx context.Context, claim *model.EdgeConsumeL
 		})
 	}
 	return err
+}
+
+func edgeEndpointRequestPath(endpoint dto.EdgeEndpointV1) string {
+	switch endpoint {
+	case dto.EdgeEndpointOpenAICompletionsV1:
+		return "/v1/completions"
+	case dto.EdgeEndpointOpenAIResponsesV1:
+		return "/v1/responses"
+	case dto.EdgeEndpointOpenAIResponsesCompactV1:
+		return "/v1/responses/compact"
+	case dto.EdgeEndpointClaudeMessagesV1:
+		return "/v1/messages"
+	case dto.EdgeEndpointOpenAIImagesV1:
+		return "/v1/images/generations"
+	case dto.EdgeEndpointOpenAIEmbeddingsV1:
+		return "/v1/embeddings"
+	case dto.EdgeEndpointOpenAIAudioV1:
+		return "/v1/audio"
+	case dto.EdgeEndpointOpenAIRerankV1:
+		return "/v1/rerank"
+	case dto.EdgeEndpointGeminiV1:
+		return "/v1beta/models"
+	case dto.EdgeEndpointOpenAIRealtimeV1:
+		return "/v1/realtime"
+	case dto.EdgeEndpointTaskV1:
+		return "/v1/video/generations"
+	case dto.EdgeEndpointMidjourneyV1:
+		return "/mj"
+	default:
+		return "/v1/chat/completions"
+	}
 }
 
 func validateConsumeLogOutboxProjection(claim *model.EdgeConsumeLogOutbox, payload edgeConsumeLogOutboxPayload, stored model.EdgeUsageEvent, node model.EdgeNode) (string, error) {

@@ -154,6 +154,48 @@ func TestEdgeLocalSettlementRequestIDRefreshesAfterCircuitEpochAdvance(t *testin
 	assert.Equal(t, built.Events, refreshed.Events)
 }
 
+func TestEdgeLocalReservationOwnerAndTaskLookupIncludeZeroQuota(t *testing.T) {
+	db := openEdgeLocalTestDB(t, "balance-task-owner.db")
+	require.NoError(t, ApplyEdgeLocalSnapshot(db, edgeLocalTestSnapshot(1)))
+	now := time.UnixMilli(edgeLocalTestNow + 40_000)
+	control := dto.EdgeNodeControlConfigV1{NodeID: "edge.balance-task-owner", NodeGeneration: 1}
+	require.NoError(t, ApplyEdgeLocalBalanceDelta(db, control, dto.EdgeBalanceDeltaV2{
+		Dataset: dto.EdgeBalanceDatasetBalancesV2, BaseRevision: 0, Revision: 1, Full: true,
+		Wallets: []dto.EdgeWalletBalanceV2{{UserID: 7, RemainQuota: 100}},
+		Tokens:  []dto.EdgeTokenBalanceV2{{TokenID: 11, UserID: 7, RemainQuota: 100}},
+	}, now.UnixMilli()))
+
+	reservation, err := ReserveEdgeLocalBalance(db, EdgeLocalBalanceReservationRequest{
+		ReservationID: "reservation-task-owner", RequestID: "request-task-owner",
+		UserID: 7, TokenID: 11, Quota: 0, NegativeFloorQuota: -20, NowUnixMilli: now.UnixMilli(),
+	})
+	require.NoError(t, err)
+	require.NoError(t, BindEdgeLocalReservationOwner(db, reservation.ReservationID, "task", "task-owner-test", now.Add(time.Second).UnixMilli()))
+
+	previousDB := DB
+	DB = db
+	t.Cleanup(func() { DB = previousDB })
+	task := &Task{
+		TaskID: "task-owner-test", UserId: 7, ChannelId: 31, Status: TaskStatusSubmitted,
+		PrivateData: TaskPrivateData{TokenId: 11, EdgeReservationID: reservation.ReservationID},
+	}
+	require.NoError(t, task.Insert())
+
+	owned, err := ListActiveEdgeLocalOwnedReservations(db, "task")
+	require.NoError(t, err)
+	require.Len(t, owned, 1)
+	assert.Equal(t, "task-owner-test", owned[0].OwnerID)
+	tasks, err := GetEdgeTasksWithReservations()
+	require.NoError(t, err)
+	require.Len(t, tasks, 1)
+	assert.Equal(t, reservation.ReservationID, tasks[0].PrivateData.EdgeReservationID)
+
+	require.NoError(t, RefundEdgeLocalReservation(db, reservation.ReservationID, now.Add(2*time.Second).UnixMilli()))
+	owned, err = ListActiveEdgeLocalOwnedReservations(db, "task")
+	require.NoError(t, err)
+	assert.Empty(t, owned)
+}
+
 func edgeLocalBalanceUsageEvent(eventID string, charged int64, now time.Time) dto.EdgeUsageEventV1 {
 	status := 200
 	return dto.EdgeUsageEventV1{

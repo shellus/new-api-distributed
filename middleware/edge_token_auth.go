@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/QuantumNous/new-api/common"
@@ -29,7 +30,7 @@ func EdgeTokenAuth() gin.HandlerFunc {
 			abortWithOpenAiMessage(c, http.StatusServiceUnavailable, "edge authentication is not ready")
 			return
 		}
-		fingerprint, err := edgetoken.FingerprintAuthorization(c.GetHeader("Authorization"))
+		fingerprint, err := edgetoken.FingerprintAuthorization(edgeAuthorizationValue(c))
 		if err != nil {
 			status := http.StatusUnauthorized
 			message := common.TranslateMessage(c, i18n.MsgTokenInvalid)
@@ -133,6 +134,41 @@ func EdgeTokenAuth() gin.HandlerFunc {
 		common.SetContextKey(c, constant.ContextKeyEdgeGroupSpecialRatio, specialRatio)
 		c.Next()
 	}
+}
+
+func edgeAuthorizationValue(c *gin.Context) string {
+	if c == nil || c.Request == nil {
+		return ""
+	}
+	if protocols := c.GetHeader("Sec-WebSocket-Protocol"); protocols != "" {
+		for _, protocol := range strings.Split(protocols, ",") {
+			protocol = strings.TrimSpace(protocol)
+			if strings.HasPrefix(protocol, "openai-insecure-api-key.") {
+				return "Bearer " + strings.TrimPrefix(protocol, "openai-insecure-api-key.")
+			}
+		}
+	}
+	path := c.Request.URL.Path
+	if strings.Contains(path, "/v1/messages") || strings.Contains(path, "/v1/models") {
+		if key := c.GetHeader("x-api-key"); key != "" {
+			return "Bearer " + key
+		}
+	}
+	if strings.HasPrefix(path, "/v1beta/models") ||
+		strings.HasPrefix(path, "/v1beta/openai/models") ||
+		strings.HasPrefix(path, "/v1/models/") {
+		if key := c.Query("key"); key != "" {
+			return "Bearer " + key
+		}
+		if key := c.GetHeader("x-goog-api-key"); key != "" {
+			return "Bearer " + key
+		}
+	}
+	authorization := c.GetHeader("Authorization")
+	if authorization == "" || authorization == "midjourney-proxy" {
+		return c.GetHeader("mj-api-secret")
+	}
+	return authorization
 }
 
 func edgeUsingGroupRatio(policy *dto.EdgeGroupPolicyV1, usingGroup string) (float64, bool, bool) {

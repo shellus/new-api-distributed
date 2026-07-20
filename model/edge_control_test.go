@@ -77,7 +77,7 @@ func TestEdgeNodePermissionsAndConditionalDeclaration(t *testing.T) {
 		PublicURL:         "https://edge-a.example",
 		SoftwareVersion:   "v1.2.3",
 		StartedAt:         now - 60,
-		Capabilities:      []dto.EdgeEndpointCapabilityV1{{Endpoint: dto.EdgeEndpointOpenAIChatCompletionsV1, Streaming: true}},
+		Capabilities:      []dto.EdgeEndpointCapabilityV1{{Endpoint: dto.EdgeEndpointDataPlaneV1, Streaming: true}},
 		LastPolicyVersion: 3,
 		LastSeenAt:        now + 1,
 	}

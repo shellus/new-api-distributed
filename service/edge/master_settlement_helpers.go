@@ -13,6 +13,7 @@ import (
 	"github.com/QuantumNous/new-api/dto"
 	"github.com/QuantumNous/new-api/model"
 	coreservice "github.com/QuantumNous/new-api/service"
+	"github.com/QuantumNous/new-api/setting/operation_setting"
 
 	"github.com/shopspring/decimal"
 	"gorm.io/gorm"
@@ -344,14 +345,8 @@ func recomputeMasterUsageQuota(policies *masterSnapshotPolicies, userID int, eve
 	if !exists || policy.BillingMode != event.Billing.BillingMode {
 		return 0, nil, ErrMasterSettlementConflict
 	}
-	if len(event.Billing.AppliedRatios) != 0 {
-		// V1 intentionally has no snapshot representation that would let master
-		// independently derive request-specific multipliers.
-		return 0, nil, ErrMasterSettlementConflict
-	}
 	modelPolicy, exists := policies.models[event.Model]
-	if !exists || !modelPolicy.Enabled || !masterContainsEndpoint(modelPolicy.Endpoints, event.Endpoint) ||
-		!masterContainsInt64(modelPolicy.ChannelIDs, event.ChannelID) {
+	if !exists || !modelPolicy.Enabled || !masterContainsInt64(modelPolicy.ChannelIDs, event.ChannelID) {
 		return 0, nil, ErrMasterSettlementConflict
 	}
 	channelPolicy, exists := policies.channels[event.ChannelID]
@@ -379,20 +374,16 @@ func recomputeMasterUsageQuota(policies *masterSnapshotPolicies, userID int, eve
 	if !groupFound || math.Abs(expectedGroupRatio-event.Billing.GroupRatio) > 1e-12 {
 		return 0, nil, ErrMasterSettlementConflict
 	}
-	if event.Usage == nil && event.Outcome == dto.EdgeUsageOutcomeSuccessV1 {
+	perCallWithoutUsage := event.Endpoint == dto.EdgeEndpointTaskV1 || event.Endpoint == dto.EdgeEndpointMidjourneyV1
+	if event.Usage == nil && event.Outcome == dto.EdgeUsageOutcomeSuccessV1 && !perCallWithoutUsage {
 		return 0, nil, ErrMasterSettlementConflict
 	}
 	usage, err := normalizeMasterBillingUsage(event.Usage)
 	if err != nil {
 		return 0, nil, err
 	}
-	if usage.PromptTokensDetails.ImageTokens != 0 || usage.PromptTokensDetails.AudioTokens != 0 ||
-		usage.CompletionTokenDetails.ImageTokens != 0 || usage.CompletionTokenDetails.AudioTokens != 0 {
-		return 0, nil, ErrMasterSettlementConflict
-	}
-
 	totalTokens := int64(usage.PromptTokens) + int64(usage.CompletionTokens)
-	if totalTokens == 0 {
+	if totalTokens == 0 && !perCallWithoutUsage {
 		return 0, usage, nil
 	}
 	groupRatio := decimal.NewFromFloat(expectedGroupRatio)
@@ -403,43 +394,40 @@ func recomputeMasterUsageQuota(policies *masterSnapshotPolicies, userID int, eve
 		if policy.ModelPrice == nil {
 			return 0, nil, ErrMasterSettlementConflict
 		}
-		quotaDecimal = decimal.NewFromFloat(*policy.ModelPrice).Mul(quotaPerUnit).Mul(groupRatio)
+		if perCallWithoutUsage && event.Billing.Facts.TaskQuotaBeforeRatios != nil {
+			quotaDecimal = decimal.NewFromFloat(*event.Billing.Facts.TaskQuotaBeforeRatios)
+		} else {
+			quotaDecimal = decimal.NewFromFloat(*policy.ModelPrice).Mul(quotaPerUnit).Mul(groupRatio)
+		}
+		if !perCallWithoutUsage {
+			quotaDecimal = quotaDecimal.Add(masterUsageAdditiveQuota(policy, event, usage, groupRatio, quotaPerUnit))
+		}
 	case dto.EdgeBillingModeRatioV1:
 		if policy.ModelRatio == nil {
 			return 0, nil, ErrMasterSettlementConflict
 		}
-		completionRatio := masterOptionalRatio(policy.CompletionRatio, 1)
-		cacheReadRatio := masterOptionalRatio(policy.CacheReadRatio, 1)
-		cacheCreationRatio := masterOptionalRatio(policy.CacheCreationRatio, 1.25)
-		cacheCreation1hRatio := masterOptionalRatio(policy.CacheCreation1hRatio, cacheCreationRatio*claudeCacheCreation1hMultiplier)
-
-		promptTokens := int64(usage.PromptTokens)
-		cachedTokens := int64(usage.PromptTokensDetails.CachedTokens)
-		cacheCreationTokens := int64(usage.PromptTokensDetails.CacheCreationTokensTotal())
-		cacheCreation1hTokens := int64(usage.ClaudeCacheCreation1hTokens)
-		if cacheCreation1hTokens > cacheCreationTokens {
-			cacheCreation1hTokens = cacheCreationTokens
-		}
-		cacheCreationDefaultTokens := cacheCreationTokens - cacheCreation1hTokens
-		basePromptTokens := promptTokens
-		if usage.UsageSemantic != dto.BillingUsageSemanticAnthropic {
-			basePromptTokens -= cachedTokens + cacheCreationTokens
-			if basePromptTokens < 0 {
-				basePromptTokens = 0
+		if perCallWithoutUsage {
+			if event.Billing.Facts.TaskQuotaBeforeRatios != nil {
+				quotaDecimal = decimal.NewFromFloat(*event.Billing.Facts.TaskQuotaBeforeRatios)
+			} else {
+				quotaDecimal = decimal.NewFromFloat(*policy.ModelRatio / 2).Mul(quotaPerUnit).Mul(groupRatio)
 			}
+		} else if event.Endpoint == dto.EdgeEndpointOpenAIAudioV1 || event.Endpoint == dto.EdgeEndpointOpenAIRealtimeV1 {
+			quotaDecimal = masterAudioUsageQuota(policy, usage, groupRatio)
+		} else {
+			quotaDecimal = masterTextUsageQuota(policy, event, usage, groupRatio, quotaPerUnit)
 		}
-		promptCost := decimal.NewFromInt(basePromptTokens).
-			Add(decimal.NewFromInt(cachedTokens).Mul(decimal.NewFromFloat(cacheReadRatio))).
-			Add(decimal.NewFromInt(cacheCreationDefaultTokens).Mul(decimal.NewFromFloat(cacheCreationRatio))).
-			Add(decimal.NewFromInt(cacheCreation1hTokens).Mul(decimal.NewFromFloat(cacheCreation1hRatio)))
-		completionCost := decimal.NewFromInt(int64(usage.CompletionTokens)).Mul(decimal.NewFromFloat(completionRatio))
-		quotaDecimal = promptCost.Add(completionCost).
-			Mul(decimal.NewFromFloat(*policy.ModelRatio)).Mul(groupRatio)
 	case dto.EdgeBillingModeTieredExprV1:
-		return 0, nil, ErrMasterDynamicPricingUnsupported
+		if policy.BillingExpressionHash == "" || policy.BillingExpressionHash != event.Billing.BillingExpressionHash ||
+			event.Billing.Facts.TieredQuotaBeforeGroup == nil {
+			return 0, nil, ErrMasterSettlementConflict
+		}
+		quotaDecimal = decimal.NewFromFloat(*event.Billing.Facts.TieredQuotaBeforeGroup).Mul(groupRatio)
+		quotaDecimal = quotaDecimal.Add(masterToolSurchargeQuota(policy, event.Billing.Facts, groupRatio, quotaPerUnit))
 	default:
 		return 0, nil, ErrMasterSettlementConflict
 	}
+	quotaDecimal = masterApplyRatios(quotaDecimal, event.Billing.AppliedRatios)
 	quota, clamp := common.QuotaFromDecimalChecked(quotaDecimal)
 	if clamp != nil {
 		return 0, nil, clamp
@@ -452,6 +440,120 @@ func recomputeMasterUsageQuota(policies *masterSnapshotPolicies, userID int, eve
 		quota = 1
 	}
 	return int64(quota), usage, nil
+}
+
+func masterTextUsageQuota(
+	policy dto.EdgePricingPolicyV1,
+	event *dto.EdgeUsageEventV1,
+	usage *dto.Usage,
+	groupRatio decimal.Decimal,
+	quotaPerUnit decimal.Decimal,
+) decimal.Decimal {
+	completionRatio := masterOptionalRatio(policy.CompletionRatio, 1)
+	cacheReadRatio := masterOptionalRatio(policy.CacheReadRatio, 1)
+	cacheCreationRatio := masterOptionalRatio(policy.CacheCreationRatio, 1.25)
+	cacheCreation1hRatio := masterOptionalRatio(policy.CacheCreation1hRatio, cacheCreationRatio*claudeCacheCreation1hMultiplier)
+	imageRatio := masterOptionalRatio(policy.ImageRatio, 1)
+
+	promptTokens := int64(usage.PromptTokens)
+	cachedTokens := int64(usage.PromptTokensDetails.CachedTokens)
+	cacheCreationTokens := int64(usage.PromptTokensDetails.CacheCreationTokensTotal())
+	cacheCreation1hTokens := int64(usage.ClaudeCacheCreation1hTokens)
+	if cacheCreation1hTokens > cacheCreationTokens {
+		cacheCreation1hTokens = cacheCreationTokens
+	}
+	cacheCreationDefaultTokens := cacheCreationTokens - cacheCreation1hTokens
+	imageTokens := int64(usage.PromptTokensDetails.ImageTokens)
+	audioTokens := int64(usage.PromptTokensDetails.AudioTokens)
+	basePromptTokens := promptTokens
+	if usage.UsageSemantic != dto.BillingUsageSemanticAnthropic {
+		basePromptTokens -= cachedTokens + cacheCreationTokens
+	}
+	basePromptTokens -= imageTokens
+	if policy.AudioInputPrice != nil && *policy.AudioInputPrice > 0 {
+		basePromptTokens -= audioTokens
+	}
+	if basePromptTokens < 0 {
+		basePromptTokens = 0
+	}
+	promptCost := decimal.NewFromInt(basePromptTokens).
+		Add(decimal.NewFromInt(cachedTokens).Mul(decimal.NewFromFloat(cacheReadRatio))).
+		Add(decimal.NewFromInt(cacheCreationDefaultTokens).Mul(decimal.NewFromFloat(cacheCreationRatio))).
+		Add(decimal.NewFromInt(cacheCreation1hTokens).Mul(decimal.NewFromFloat(cacheCreation1hRatio))).
+		Add(decimal.NewFromInt(imageTokens).Mul(decimal.NewFromFloat(imageRatio)))
+	completionCost := decimal.NewFromInt(int64(usage.CompletionTokens)).Mul(decimal.NewFromFloat(completionRatio))
+	quota := promptCost.Add(completionCost).
+		Mul(decimal.NewFromFloat(*policy.ModelRatio)).Mul(groupRatio)
+	return quota.Add(masterUsageAdditiveQuota(policy, event, usage, groupRatio, quotaPerUnit))
+}
+
+func masterAudioUsageQuota(policy dto.EdgePricingPolicyV1, usage *dto.Usage, groupRatio decimal.Decimal) decimal.Decimal {
+	inputText := decimal.NewFromInt(int64(usage.PromptTokensDetails.TextTokens))
+	outputText := decimal.NewFromInt(int64(usage.CompletionTokenDetails.TextTokens))
+	inputAudio := decimal.NewFromInt(int64(usage.PromptTokensDetails.AudioTokens))
+	outputAudio := decimal.NewFromInt(int64(usage.CompletionTokenDetails.AudioTokens))
+	completionRatio := decimal.NewFromFloat(masterOptionalRatio(policy.CompletionRatio, 1))
+	audioRatio := decimal.NewFromFloat(masterOptionalRatio(policy.AudioRatio, 1))
+	audioCompletionRatio := decimal.NewFromFloat(masterOptionalRatio(policy.AudioCompletionRatio, 1))
+	return inputText.
+		Add(outputText.Mul(completionRatio)).
+		Add(inputAudio.Mul(audioRatio)).
+		Add(outputAudio.Mul(audioRatio).Mul(audioCompletionRatio)).
+		Mul(decimal.NewFromFloat(*policy.ModelRatio)).Mul(groupRatio)
+}
+
+func masterUsageAdditiveQuota(
+	policy dto.EdgePricingPolicyV1,
+	event *dto.EdgeUsageEventV1,
+	usage *dto.Usage,
+	groupRatio decimal.Decimal,
+	quotaPerUnit decimal.Decimal,
+) decimal.Decimal {
+	quota := masterToolSurchargeQuota(policy, event.Billing.Facts, groupRatio, quotaPerUnit)
+	if policy.AudioInputPrice != nil && *policy.AudioInputPrice > 0 && usage.PromptTokensDetails.AudioTokens > 0 {
+		quota = quota.Add(decimal.NewFromFloat(*policy.AudioInputPrice).
+			Div(decimal.NewFromInt(1_000_000)).
+			Mul(decimal.NewFromInt(int64(usage.PromptTokensDetails.AudioTokens))).
+			Mul(groupRatio).Mul(quotaPerUnit))
+	}
+	return quota
+}
+
+func masterToolSurchargeQuota(
+	policy dto.EdgePricingPolicyV1,
+	facts dto.EdgeBillingFactsV1,
+	groupRatio decimal.Decimal,
+	quotaPerUnit decimal.Decimal,
+) decimal.Decimal {
+	quota := decimal.Zero
+	addCalls := func(name string, count int) {
+		if count <= 0 {
+			return
+		}
+		price := policy.ToolPrices[name]
+		if price <= 0 {
+			return
+		}
+		quota = quota.Add(decimal.NewFromFloat(price).
+			Mul(decimal.NewFromInt(int64(count))).
+			Div(decimal.NewFromInt(1000)).Mul(groupRatio).Mul(quotaPerUnit))
+	}
+	addCalls("web_search_preview", facts.WebSearchPreviewCalls)
+	addCalls("web_search", facts.WebSearchCalls)
+	addCalls("file_search", facts.FileSearchCalls)
+	if facts.ImageGenerationCall {
+		quota = quota.Add(decimal.NewFromFloat(operation_setting.GetGPTImage1PriceOnceCall(
+			facts.ImageGenerationQuality, facts.ImageGenerationSize,
+		)).Mul(groupRatio).Mul(quotaPerUnit))
+	}
+	return quota
+}
+
+func masterApplyRatios(value decimal.Decimal, ratios map[string]float64) decimal.Decimal {
+	for _, ratio := range ratios {
+		value = value.Mul(decimal.NewFromFloat(ratio))
+	}
+	return value
 }
 
 func masterOptionalRatio(value *float64, fallback float64) float64 {

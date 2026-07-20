@@ -245,9 +245,7 @@ func validateEdgeNodeCapabilities(capabilities []dto.EdgeEndpointCapabilityV1) e
 	seen := make(map[string]struct{}, len(capabilities))
 	for i := range capabilities {
 		endpoint := dto.EdgeEndpointV1(strings.TrimSpace(string(capabilities[i].Endpoint)))
-		switch endpoint {
-		case dto.EdgeEndpointOpenAIChatCompletionsV1, dto.EdgeEndpointOpenAIResponsesV1:
-		default:
+		if !endpoint.Valid() {
 			return errors.New("invalid edge node capability endpoint")
 		}
 		if _, exists := seen[string(endpoint)]; exists {

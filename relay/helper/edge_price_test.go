@@ -140,14 +140,15 @@ func TestEdgeModelPriceHelperPreservesExplicitZeroOptionalRatios(t *testing.T) {
 	assert.Zero(t, priceData.CacheCreation1hRatio)
 }
 
-func TestEdgeModelPriceHelperRejectsUnsupportedRequestSpecificRatios(t *testing.T) {
+func TestEdgeModelPriceHelperAppliesRequestSpecificRatios(t *testing.T) {
 	modelPrice := 0.02
-	_, err := edgePriceDataForTestResult(t, dto.EdgePricingPolicyV1{
+	priceData, err := edgePriceDataForTestResult(t, dto.EdgePricingPolicyV1{
 		PolicyID: "fixed-request-ratio", Version: "v1", Model: "gpt-fixed-request-ratio",
 		BillingMode: dto.EdgeBillingModeFixedPriceV1, ModelPrice: &modelPrice, QuotaPerUnit: 500_000,
 	}, &types.TokenCountMeta{ImagePriceRatio: 2, BillingRatios: map[string]float64{"n": 2}})
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "request-specific billing multipliers")
+	require.NoError(t, err)
+	assert.Equal(t, map[string]float64{"image_price_ratio": 2, "n": 2}, priceData.OtherRatios())
+	assert.Equal(t, 40_000, priceData.QuotaToPreConsume)
 }
 
 func edgePriceDataForTest(t *testing.T, policy dto.EdgePricingPolicyV1, meta *types.TokenCountMeta) types.PriceData {

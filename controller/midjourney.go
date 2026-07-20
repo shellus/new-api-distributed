@@ -212,6 +212,16 @@ func runMidjourneyTaskUpdateOnce(ctx context.Context, report func(processed, tot
 			won, err := task.UpdateWithStatus(preStatus)
 			if err != nil {
 				logger.LogError(ctx, "UpdateMidjourneyTask task error: "+err.Error())
+			} else if won && common.IsEdgeMode() {
+				if task.Status == "FAILURE" || task.FailReason != "" && task.Progress == "100%" {
+					if err := service.RefundEdgeMidjourneyBilling(ctx, task); err != nil {
+						logger.LogError(ctx, "fail to refund edge Midjourney reservation: "+err.Error())
+					}
+				} else if task.Status == "SUCCESS" && task.Progress == "100%" {
+					if err := service.FinalizeEdgeMidjourneyBilling(ctx, task); err != nil {
+						logger.LogError(ctx, "fail to settle edge Midjourney reservation: "+err.Error())
+					}
+				}
 			} else if won && shouldReturnQuota {
 				err = model.IncreaseUserQuota(task.UserId, task.Quota, false)
 				if err != nil {

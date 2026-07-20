@@ -36,26 +36,25 @@ func TestEdgeSnapshotCompilerProjectsCanonicalSafePolicy(t *testing.T) {
 		projection.Channels[2].ChannelID,
 		projection.Channels[3].ChannelID,
 	})
-	assert.Equal(t, []string{"gpt-5.3-codex", "gpt-5.4", "gpt-5.5", "unsafe-image-model"}, projection.modelNames)
-	assert.Equal(t, []dto.EdgeEndpointV1{
-		dto.EdgeEndpointOpenAIChatCompletionsV1,
-		dto.EdgeEndpointOpenAIResponsesV1,
-	}, projection.Models[0].Endpoints)
-	assert.Equal(t, []dto.EdgeEndpointV1{
-		dto.EdgeEndpointOpenAIChatCompletionsV1,
-		dto.EdgeEndpointOpenAIResponsesV1,
-	}, projection.Models[1].Endpoints)
-	assert.Equal(t, []dto.EdgeEndpointV1{
-		dto.EdgeEndpointOpenAIChatCompletionsV1,
-		dto.EdgeEndpointOpenAIResponsesV1,
-	}, projection.Models[2].Endpoints)
+	assert.Equal(t, []string{"gpt-5.3-codex", "gpt-5.4", "gpt-5.4-openai-compact", "gpt-5.5", "unsafe-image-model"}, projection.modelNames)
+	for _, policy := range projection.Models {
+		assert.Equal(t, []dto.EdgeEndpointV1{dto.EdgeEndpointDataPlaneV1}, policy.Endpoints)
+	}
 
 	for _, authentication := range projection.Authentication {
 		assert.NotEmpty(t, authentication.TokenName)
 		if authentication.ModelLimitEnabled {
-			assert.Equal(t, []string{"gpt-5.3-codex", "gpt-5.4"}, authentication.AllowedModels)
+			assert.Equal(t, []string{"gpt-5.3-codex", "gpt-5.4", "gpt-5.4-openai-compact"}, authentication.AllowedModels)
 		}
 	}
+	compactChannelFound := false
+	for _, channel := range projection.Channels {
+		if channel.ChannelID == 30 {
+			compactChannelFound = true
+			assert.Contains(t, channel.Models, "gpt-5.4-openai-compact")
+		}
+	}
+	assert.True(t, compactChannelFound)
 	assert.Equal(t, "edge text policy", projection.Channels[0].TextPolicy.SystemPrompt)
 	assert.True(t, projection.Channels[0].TextPolicy.SystemPromptOverride)
 	assert.True(t, projection.Channels[0].TextPolicy.AllowServiceTier)
@@ -81,7 +80,7 @@ func TestEdgeSnapshotCompilerMasterFirstOmitsNewLogFieldsByDefault(t *testing.T)
 	assert.NotContains(t, string(payload), `"special_ratio"`)
 }
 
-func TestEdgeSnapshotCompilerExcludesNonTextModels(t *testing.T) {
+func TestEdgeSnapshotCompilerIncludesAllRelayModels(t *testing.T) {
 	state := edgeSnapshotCompilerTestState()
 	priority := int64(5)
 	weight := uint(20)
@@ -100,12 +99,16 @@ func TestEdgeSnapshotCompilerExcludesNonTextModels(t *testing.T) {
 	projection, err := projectEdgeSnapshotDatabaseState(state)
 	require.NoError(t, err)
 
-	assert.NotContains(t, projection.modelNames, "jina-reranker-v2", "rerank-only model must not reach the edge text plane")
-	assert.NotContains(t, projection.modelNames, "dall-e-3", "image generation model must not reach the edge text plane")
-	assert.Contains(t, projection.modelNames, "gpt-5.4", "text models keep flowing")
+	assert.Contains(t, projection.modelNames, "jina-reranker-v2")
+	assert.Contains(t, projection.modelNames, "dall-e-3")
+	assert.Contains(t, projection.modelNames, "gpt-5.4")
+	foundJina := false
 	for _, channel := range projection.Channels {
-		assert.NotEqual(t, int64(50), channel.ChannelID, "channel with no text-capable model must be dropped")
+		if channel.ChannelID == 50 {
+			foundJina = true
+		}
 	}
+	assert.True(t, foundJina)
 }
 
 func TestEdgeSnapshotCompilerDatabaseLoadDoesNotSelectChannelOrUserSecrets(t *testing.T) {
@@ -335,7 +338,7 @@ func TestEdgeSnapshotCompilerIgnoresMasterOnlyChannelConfiguration(t *testing.T)
 	assert.Contains(t, string(payload), "kept")
 }
 
-func TestEdgeSnapshotCompilerRejectsDynamicBillingExpressions(t *testing.T) {
+func TestEdgeSnapshotCompilerProjectsDynamicBillingExpressions(t *testing.T) {
 	base := edgeSnapshotPricingInput{
 		Mode:         billing_setting.BillingModeTieredExpr,
 		QuotaPerUnit: 500_000,
@@ -343,17 +346,21 @@ func TestEdgeSnapshotCompilerRejectsDynamicBillingExpressions(t *testing.T) {
 	tests := []string{
 		`tier("base", p * 2 + c * 8) * (header("x-price") == "high" ? 2 : 1)`,
 		`tier("base", p * 2 + c * 8) * (hour("UTC") < 8 ? 0.5 : 1)`,
-		`tier("base", p * 2 + c * 8)|||when(header("x-mode") has "fast") * 2`,
 	}
 	for _, expression := range tests {
 		input := base
 		input.Expression = expression
-		_, err := projectEdgeSnapshotPricing("gpt-5.4", input)
-		require.Error(t, err)
-		assert.ErrorIs(t, err, ErrEdgeSnapshotUnrepresentable)
+		pricing, err := projectEdgeSnapshotPricing("gpt-5.4", input)
+		require.NoError(t, err)
+		assert.Equal(t, expression, pricing.BillingExpression)
+		assert.NotEmpty(t, pricing.BillingExpressionHash)
 	}
-
 	input := base
+	input.Expression = `tier("base", p * 2 + c * 8)|||when(header("x-mode") has "fast") * 2`
+	_, err := projectEdgeSnapshotPricing("gpt-5.4", input)
+	require.Error(t, err)
+
+	input = base
 	input.Expression = `tier("base", p * 2 + c * 8 + cr * 0.2)`
 	pricing, err := projectEdgeSnapshotPricing("gpt-5.4", input)
 	require.NoError(t, err)
@@ -436,24 +443,27 @@ func TestEdgeSnapshotCompilerAllowsZeroRatioPricing(t *testing.T) {
 	assert.Equal(t, dto.EdgeBillingModeRatioV1, pricing.BillingMode)
 }
 
-func TestEdgeSnapshotCompilerRejectsUnsupportedTextMediaRatios(t *testing.T) {
+func TestEdgeSnapshotCompilerProjectsMediaRatios(t *testing.T) {
 	modelRatio := 1.0
+	mediaRatio := 2.0
 	for _, tc := range []struct {
 		name  string
 		apply func(*edgeSnapshotPricingInput)
+		read  func(dto.EdgePricingPolicyV1) *float64
 	}{
-		{name: "image ratio", apply: func(input *edgeSnapshotPricingInput) { input.ImageRatioConfigured = true }},
-		{name: "audio input ratio", apply: func(input *edgeSnapshotPricingInput) { input.AudioRatioConfigured = true }},
-		{name: "audio completion ratio", apply: func(input *edgeSnapshotPricingInput) { input.AudioCompletionRatioConfigured = true }},
+		{name: "image ratio", apply: func(input *edgeSnapshotPricingInput) { input.ImageRatio = &mediaRatio }, read: func(policy dto.EdgePricingPolicyV1) *float64 { return policy.ImageRatio }},
+		{name: "audio input ratio", apply: func(input *edgeSnapshotPricingInput) { input.AudioRatio = &mediaRatio }, read: func(policy dto.EdgePricingPolicyV1) *float64 { return policy.AudioRatio }},
+		{name: "audio completion ratio", apply: func(input *edgeSnapshotPricingInput) { input.AudioCompletionRatio = &mediaRatio }, read: func(policy dto.EdgePricingPolicyV1) *float64 { return policy.AudioCompletionRatio }},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			input := edgeSnapshotPricingInput{
 				Mode: billing_setting.BillingModeRatio, ModelRatio: &modelRatio, QuotaPerUnit: 500_000,
 			}
 			tc.apply(&input)
-			_, err := projectEdgeSnapshotPricing("gpt-media-ratio", input)
-			require.Error(t, err)
-			assert.ErrorIs(t, err, ErrEdgeSnapshotUnrepresentable)
+			policy, err := projectEdgeSnapshotPricing("gpt-media-ratio", input)
+			require.NoError(t, err)
+			require.NotNil(t, tc.read(policy))
+			assert.Equal(t, mediaRatio, *tc.read(policy))
 		})
 	}
 }

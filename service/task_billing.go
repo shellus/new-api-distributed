@@ -2,22 +2,30 @@ package service
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"net/http"
 	"strings"
+	"time"
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
+	"github.com/QuantumNous/new-api/dto"
 	"github.com/QuantumNous/new-api/logger"
 	"github.com/QuantumNous/new-api/model"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	"github.com/QuantumNous/new-api/setting/ratio_setting"
 	"github.com/QuantumNous/new-api/types"
 	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
 )
 
 // LogTaskConsumption 记录任务消费日志和统计信息（仅记录，不涉及实际扣费）。
 // 实际扣费已由 BillingSession（PreConsumeBilling + SettleBilling）完成。
 func LogTaskConsumption(c *gin.Context, info *relaycommon.RelayInfo) {
+	if common.IsEdgeMode() {
+		return
+	}
 	tokenName := c.GetString("token_name")
 	logContent := fmt.Sprintf("操作 %s", info.Action)
 	// 支持任务仅按次计费
@@ -163,6 +171,21 @@ func taskModelName(task *model.Task) string {
 // RefundTaskQuota 统一的任务失败退款逻辑。
 // 当异步任务失败时，将预扣的 quota 退还给用户（支持钱包和订阅），并退还令牌额度。
 func RefundTaskQuota(ctx context.Context, task *model.Task, reason string) {
+	if common.IsEdgeMode() {
+		if task == nil || task.PrivateData.EdgeReservationID == "" {
+			return
+		}
+		if err := model.RefundEdgeLocalReservation(model.DB, task.PrivateData.EdgeReservationID, time.Now().UnixMilli()); err != nil {
+			logger.LogError(ctx, fmt.Sprintf("退还 edge 任务 reservation 失败 task %s: %s", task.TaskID, err.Error()))
+			return
+		}
+		task.PrivateData.EdgeReservationID = ""
+		task.Quota = 0
+		if err := task.Update(); err != nil {
+			logger.LogError(ctx, fmt.Sprintf("更新 edge 任务退款状态失败 task %s: %s", task.TaskID, err.Error()))
+		}
+		return
+	}
 	quota := task.Quota
 	if quota == 0 {
 		return
@@ -199,6 +222,12 @@ func RefundTaskQuota(ctx context.Context, task *model.Task, reason string) {
 // reason 用于日志记录（例如 "token重算" 或 "adaptor调整"）。
 // clamps 可选：若计算 actualQuota 时发生额度饱和，将其记入日志 admin_info（仅管理员可见）。
 func RecalculateTaskQuota(ctx context.Context, task *model.Task, actualQuota int, reason string, clamps ...*common.QuotaClamp) {
+	if common.IsEdgeMode() {
+		if err := FinalizeEdgeTaskBilling(ctx, task, actualQuota); err != nil {
+			logger.LogError(ctx, fmt.Sprintf("edge 任务结算失败 task %s: %s", task.TaskID, err.Error()))
+		}
+		return
+	}
 	if actualQuota <= 0 {
 		return
 	}
@@ -272,6 +301,19 @@ func RecalculateTaskQuotaByTokens(ctx context.Context, task *model.Task, totalTo
 	if totalTokens <= 0 {
 		return
 	}
+	if common.IsEdgeMode() {
+		billingContext := task.PrivateData.BillingContext
+		if billingContext == nil || billingContext.ModelRatio <= 0 || billingContext.GroupRatio < 0 {
+			return
+		}
+		otherMultiplier := 1.0
+		if priceData := taskBillingContextPriceData(billingContext); priceData != nil {
+			otherMultiplier = priceData.OtherRatioMultiplier()
+		}
+		actualQuota, clamp := common.QuotaFromFloatChecked(float64(totalTokens) * billingContext.ModelRatio * billingContext.GroupRatio * otherMultiplier)
+		RecalculateTaskQuota(ctx, task, actualQuota, "token重算", clamp)
+		return
+	}
 
 	modelName := taskModelName(task)
 
@@ -315,4 +357,286 @@ func RecalculateTaskQuotaByTokens(ctx context.Context, task *model.Task, totalTo
 
 	reason := fmt.Sprintf("token重算：tokens=%d, modelRatio=%.2f, groupRatio=%.2f, otherMultiplier=%.4f", totalTokens, modelRatio, finalGroupRatio, otherMultiplier)
 	RecalculateTaskQuota(ctx, task, actualQuota, reason, clamp)
+}
+
+func FinalizeEdgeTaskBilling(ctx context.Context, task *model.Task, actualQuota int) error {
+	if task == nil || task.PrivateData.EdgeReservationID == "" {
+		return nil
+	}
+	if actualQuota < 0 || actualQuota > common.MaxQuota {
+		return errors.New("edge task quota is outside the supported range")
+	}
+	billingContext := task.PrivateData.BillingContext
+	if billingContext == nil || billingContext.PricingPolicyID == "" || billingContext.PricingPolicyVersion == "" {
+		return errors.New("edge task billing context is incomplete")
+	}
+	reservation, err := model.GetEdgeLocalReservation(model.DB, task.PrivateData.EdgeReservationID)
+	if err != nil {
+		return err
+	}
+	if reservation.ReservedQuota != int64(actualQuota) {
+		if _, err := model.AdjustEdgeLocalBalanceReservation(
+			model.DB, reservation.ReservationID, int64(actualQuota), time.Now().UnixMilli(),
+		); err != nil {
+			return err
+		}
+	}
+	status := http.StatusOK
+	startedAt := task.SubmitTime * 1000
+	if startedAt <= 0 {
+		startedAt = reservation.CreatedAtUnixMilli
+	}
+	finishedAt := time.Now().UnixMilli()
+	if task.FinishTime > 0 {
+		finishedAt = task.FinishTime * 1000
+	}
+	if finishedAt < startedAt {
+		finishedAt = startedAt
+	}
+	event := dto.EdgeUsageEventV1{
+		EventID: "event-" + uuid.NewString(), UserID: int64(task.UserId), TokenID: int64(task.PrivateData.TokenId),
+		ChannelID: int64(task.ChannelId), Endpoint: dto.EdgeEndpointTaskV1,
+		Model: taskModelName(task), Group: task.Group, StartedAtUnixMilli: startedAt,
+		FinishedAtUnixMilli: finishedAt, Outcome: dto.EdgeUsageOutcomeSuccessV1, HTTPStatus: &status,
+		Billing: dto.EdgeUsageBillingV1{
+			PricingPolicyID: billingContext.PricingPolicyID, PricingPolicyVersion: billingContext.PricingPolicyVersion,
+			BillingMode: dto.EdgeBillingModeV1(billingContext.BillingMode), GroupRatio: billingContext.GroupRatio,
+			AppliedRatios: billingContext.OtherRatios, ChargedQuota: int64(actualQuota),
+		},
+	}
+	baseQuota := float64(actualQuota)
+	if priceData := taskBillingContextPriceData(billingContext); priceData != nil {
+		baseQuota = priceData.RemoveOtherRatiosFromFloat(baseQuota)
+	}
+	event.Billing.Facts.TaskQuotaBeforeRatios = &baseQuota
+	if err := model.StageEdgeLocalReservationSettlement(model.DB, reservation.ReservationID, event); err != nil {
+		return err
+	}
+	if _, err := model.SettleStagedEdgeLocalReservation(model.DB, reservation.ReservationID); err != nil {
+		return err
+	}
+	task.PrivateData.EdgeReservationID = ""
+	task.Quota = actualQuota
+	if err := task.Update(); err != nil {
+		return err
+	}
+	logger.LogInfo(ctx, fmt.Sprintf("edge 任务 %s 完成结算，额度 %s", task.TaskID, logger.LogQuota(actualQuota)))
+	return nil
+}
+
+func RecoverEdgeTaskBilling(ctx context.Context) error {
+	if !common.IsEdgeMode() || model.DB == nil {
+		return nil
+	}
+	tasks, err := model.GetEdgeTasksWithReservations()
+	if err != nil {
+		return err
+	}
+	taskReservations := make(map[string]*model.Task, len(tasks))
+	for _, task := range tasks {
+		reservation, err := model.GetEdgeLocalReservation(model.DB, task.PrivateData.EdgeReservationID)
+		if err != nil {
+			return err
+		}
+		if reservation.OwnerKind != "task" || reservation.OwnerID != task.TaskID {
+			return fmt.Errorf("edge task reservation %s owner does not match task %s", reservation.ReservationID, task.TaskID)
+		}
+		taskReservations[reservation.ReservationID] = task
+		switch reservation.Status {
+		case model.EdgeLocalReservationStatusSettled:
+			task.PrivateData.EdgeReservationID = ""
+			task.Quota = int(reservation.ChargedQuota)
+			if err := task.Update(); err != nil {
+				return err
+			}
+		case model.EdgeLocalReservationStatusRefunded:
+			task.PrivateData.EdgeReservationID = ""
+			task.Quota = 0
+			if err := task.Update(); err != nil {
+				return err
+			}
+		case model.EdgeLocalReservationStatusActive:
+			if reservation.StagedEventPayload != "" {
+				settled, err := model.SettleStagedEdgeLocalReservation(model.DB, reservation.ReservationID)
+				if err != nil {
+					return err
+				}
+				task.PrivateData.EdgeReservationID = ""
+				task.Quota = int(settled.Billing.ChargedQuota)
+				if err := task.Update(); err != nil {
+					return err
+				}
+				continue
+			}
+			switch task.Status {
+			case model.TaskStatusFailure:
+				RefundTaskQuota(ctx, task, task.FailReason)
+				if task.PrivateData.EdgeReservationID != "" {
+					return fmt.Errorf("edge task reservation %s refund did not finalize", reservation.ReservationID)
+				}
+			case model.TaskStatusSuccess:
+				if err := FinalizeEdgeTaskBilling(ctx, task, task.Quota); err != nil {
+					return err
+				}
+			}
+		default:
+			return fmt.Errorf("edge task reservation %s has invalid status %q", reservation.ReservationID, reservation.Status)
+		}
+	}
+	activeTaskReservations, err := model.ListActiveEdgeLocalOwnedReservations(model.DB, "task")
+	if err != nil {
+		return err
+	}
+	for _, reservation := range activeTaskReservations {
+		task, exists := taskReservations[reservation.ReservationID]
+		if !exists || task == nil || task.TaskID != reservation.OwnerID {
+			return fmt.Errorf("edge task reservation %s has no matching task", reservation.ReservationID)
+		}
+	}
+
+	midjourneyTasks, err := model.GetEdgeMidjourneyTasksWithReservations()
+	if err != nil {
+		return err
+	}
+	midjourneyReservations := make(map[string]*model.Midjourney, len(midjourneyTasks))
+	for _, task := range midjourneyTasks {
+		reservation, err := model.GetEdgeLocalReservation(model.DB, task.EdgeReservationID)
+		if err != nil {
+			return err
+		}
+		expectedOwner := fmt.Sprintf("midjourney-%d", task.Id)
+		if reservation.OwnerKind != "midjourney" || reservation.OwnerID != expectedOwner {
+			return fmt.Errorf("edge Midjourney reservation %s owner does not match task %d", reservation.ReservationID, task.Id)
+		}
+		midjourneyReservations[reservation.ReservationID] = task
+		switch reservation.Status {
+		case model.EdgeLocalReservationStatusSettled:
+			task.EdgeReservationID = ""
+			task.Quota = int(reservation.ChargedQuota)
+			if err := task.Update(); err != nil {
+				return err
+			}
+		case model.EdgeLocalReservationStatusRefunded:
+			task.EdgeReservationID = ""
+			task.Quota = 0
+			if err := task.Update(); err != nil {
+				return err
+			}
+		case model.EdgeLocalReservationStatusActive:
+			if reservation.StagedEventPayload != "" {
+				settled, err := model.SettleStagedEdgeLocalReservation(model.DB, reservation.ReservationID)
+				if err != nil {
+					return err
+				}
+				task.EdgeReservationID = ""
+				task.Quota = int(settled.Billing.ChargedQuota)
+				if err := task.Update(); err != nil {
+					return err
+				}
+				continue
+			}
+			if task.Status == "FAILURE" || task.FailReason != "" && task.Progress == "100%" {
+				if err := RefundEdgeMidjourneyBilling(ctx, task); err != nil {
+					return err
+				}
+			} else if task.Status == "SUCCESS" && task.Progress == "100%" {
+				if err := FinalizeEdgeMidjourneyBilling(ctx, task); err != nil {
+					return err
+				}
+			}
+		default:
+			return fmt.Errorf("edge Midjourney reservation %s has invalid status %q", reservation.ReservationID, reservation.Status)
+		}
+	}
+	activeMidjourneyReservations, err := model.ListActiveEdgeLocalOwnedReservations(model.DB, "midjourney")
+	if err != nil {
+		return err
+	}
+	for _, reservation := range activeMidjourneyReservations {
+		task, exists := midjourneyReservations[reservation.ReservationID]
+		if !exists || task == nil || fmt.Sprintf("midjourney-%d", task.Id) != reservation.OwnerID {
+			return fmt.Errorf("edge Midjourney reservation %s has no matching task", reservation.ReservationID)
+		}
+	}
+	// The owner scans deliberately cover finalized reservations as well as
+	// active ones. This closes the crash window between durable ledger settlement
+	// and clearing the task's reservation pointer.
+	return nil
+}
+
+func FinalizeEdgeMidjourneyBilling(ctx context.Context, task *model.Midjourney) error {
+	if task == nil || task.EdgeReservationID == "" {
+		return nil
+	}
+	billingContext := task.BillingContext
+	if billingContext == nil || billingContext.PricingPolicyID == "" || billingContext.PricingPolicyVersion == "" {
+		return errors.New("edge Midjourney billing context is incomplete")
+	}
+	reservation, err := model.GetEdgeLocalReservation(model.DB, task.EdgeReservationID)
+	if err != nil {
+		return err
+	}
+	if reservation.ReservedQuota != int64(task.Quota) {
+		if _, err := model.AdjustEdgeLocalBalanceReservation(
+			model.DB, reservation.ReservationID, int64(task.Quota), time.Now().UnixMilli(),
+		); err != nil {
+			return err
+		}
+	}
+	status := http.StatusOK
+	startedAt := task.SubmitTime
+	if startedAt <= 0 {
+		startedAt = reservation.CreatedAtUnixMilli
+	}
+	finishedAt := task.FinishTime
+	if finishedAt <= 0 {
+		finishedAt = time.Now().UnixMilli()
+	}
+	if finishedAt < startedAt {
+		finishedAt = startedAt
+	}
+	event := dto.EdgeUsageEventV1{
+		EventID: "event-" + uuid.NewString(), UserID: int64(task.UserId), TokenID: int64(task.TokenId),
+		ChannelID: int64(task.ChannelId), Endpoint: dto.EdgeEndpointMidjourneyV1,
+		Model: CovertMjpActionToModelName(task.Action), Group: task.Group, StartedAtUnixMilli: startedAt,
+		FinishedAtUnixMilli: finishedAt, Outcome: dto.EdgeUsageOutcomeSuccessV1, HTTPStatus: &status,
+		Billing: dto.EdgeUsageBillingV1{
+			PricingPolicyID: billingContext.PricingPolicyID, PricingPolicyVersion: billingContext.PricingPolicyVersion,
+			BillingMode: dto.EdgeBillingModeV1(billingContext.BillingMode), GroupRatio: billingContext.GroupRatio,
+			AppliedRatios: billingContext.OtherRatios, ChargedQuota: int64(task.Quota),
+		},
+	}
+	baseQuota := float64(task.Quota)
+	if priceData := taskBillingContextPriceData(billingContext); priceData != nil {
+		baseQuota = priceData.RemoveOtherRatiosFromFloat(baseQuota)
+	}
+	event.Billing.Facts.TaskQuotaBeforeRatios = &baseQuota
+	if err := model.StageEdgeLocalReservationSettlement(model.DB, reservation.ReservationID, event); err != nil {
+		return err
+	}
+	if _, err := model.SettleStagedEdgeLocalReservation(model.DB, reservation.ReservationID); err != nil {
+		return err
+	}
+	task.EdgeReservationID = ""
+	if err := task.Update(); err != nil {
+		return err
+	}
+	logger.LogInfo(ctx, fmt.Sprintf("edge Midjourney 任务 %s 完成结算，额度 %s", task.MjId, logger.LogQuota(task.Quota)))
+	return nil
+}
+
+func RefundEdgeMidjourneyBilling(ctx context.Context, task *model.Midjourney) error {
+	if task == nil || task.EdgeReservationID == "" {
+		return nil
+	}
+	if err := model.RefundEdgeLocalReservation(model.DB, task.EdgeReservationID, time.Now().UnixMilli()); err != nil {
+		return err
+	}
+	task.EdgeReservationID = ""
+	task.Quota = 0
+	if err := task.Update(); err != nil {
+		return err
+	}
+	logger.LogInfo(ctx, fmt.Sprintf("edge Midjourney 任务 %s 已释放 reservation", task.MjId))
+	return nil
 }

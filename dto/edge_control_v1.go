@@ -70,8 +70,20 @@ const (
 type EdgeEndpointV1 string
 
 const (
-	EdgeEndpointOpenAIChatCompletionsV1 EdgeEndpointV1 = "openai_chat_completions"
-	EdgeEndpointOpenAIResponsesV1       EdgeEndpointV1 = "openai_responses"
+	EdgeEndpointOpenAIChatCompletionsV1  EdgeEndpointV1 = "openai_chat_completions"
+	EdgeEndpointOpenAICompletionsV1      EdgeEndpointV1 = "openai_completions"
+	EdgeEndpointOpenAIResponsesV1        EdgeEndpointV1 = "openai_responses"
+	EdgeEndpointOpenAIResponsesCompactV1 EdgeEndpointV1 = "openai_responses_compaction"
+	EdgeEndpointClaudeMessagesV1         EdgeEndpointV1 = "claude_messages"
+	EdgeEndpointOpenAIImagesV1           EdgeEndpointV1 = "openai_images"
+	EdgeEndpointOpenAIEmbeddingsV1       EdgeEndpointV1 = "openai_embeddings"
+	EdgeEndpointOpenAIAudioV1            EdgeEndpointV1 = "openai_audio"
+	EdgeEndpointOpenAIRerankV1           EdgeEndpointV1 = "openai_rerank"
+	EdgeEndpointGeminiV1                 EdgeEndpointV1 = "gemini"
+	EdgeEndpointOpenAIRealtimeV1         EdgeEndpointV1 = "openai_realtime"
+	EdgeEndpointTaskV1                   EdgeEndpointV1 = "task"
+	EdgeEndpointMidjourneyV1             EdgeEndpointV1 = "midjourney"
+	EdgeEndpointDataPlaneV1              EdgeEndpointV1 = "data_plane"
 )
 
 type EdgeLocalServiceV1 string
@@ -361,9 +373,9 @@ type EdgeModelPolicyV1 struct {
 	ChannelIDs []int64          `json:"channel_ids"`
 }
 
-// EdgeTextRequestPolicyV1 contains only request behavior needed by the first
-// Chat/Responses text boundary. Secret-bearing header overrides and proxies
-// are intentionally absent.
+// EdgeTextRequestPolicyV1 is retained for compatibility with snapshots created
+// before typed channel settings were introduced. Secret-bearing header
+// overrides and proxies are intentionally absent.
 type EdgeTextRequestPolicyV1 struct {
 	ForceFormat             bool   `json:"force_format"`
 	ThinkingToContent       bool   `json:"thinking_to_content"`
@@ -378,38 +390,95 @@ type EdgeTextRequestPolicyV1 struct {
 	AllowIncludeObfuscation bool   `json:"allow_include_obfuscation"`
 }
 
+type EdgeChannelSettingsV1 struct {
+	ForceFormat            bool   `json:"force_format,omitempty"`
+	ThinkingToContent      bool   `json:"thinking_to_content,omitempty"`
+	PassThroughBodyEnabled bool   `json:"pass_through_body_enabled,omitempty"`
+	SystemPrompt           string `json:"system_prompt,omitempty"`
+	SystemPromptOverride   bool   `json:"system_prompt_override,omitempty"`
+}
+
+type EdgeAdvancedCustomRouteV1 struct {
+	IncomingPath string   `json:"incoming_path,omitempty"`
+	UpstreamPath string   `json:"upstream_path,omitempty"`
+	Converter    string   `json:"converter,omitempty"`
+	Models       []string `json:"models,omitempty"`
+}
+
+type EdgeAdvancedCustomConfigV1 struct {
+	Routes []EdgeAdvancedCustomRouteV1 `json:"advanced_routes,omitempty"`
+}
+
+type EdgeChannelOtherSettingsV1 struct {
+	AzureResponsesVersion   string                      `json:"azure_responses_version,omitempty"`
+	VertexKeyType           VertexKeyType               `json:"vertex_key_type,omitempty"`
+	OpenRouterEnterprise    *bool                       `json:"openrouter_enterprise,omitempty"`
+	ClaudeBetaQuery         bool                        `json:"claude_beta_query,omitempty"`
+	AllowServiceTier        bool                        `json:"allow_service_tier,omitempty"`
+	AllowInferenceGeo       bool                        `json:"allow_inference_geo,omitempty"`
+	AllowSpeed              bool                        `json:"allow_speed,omitempty"`
+	AllowSafetyIdentifier   bool                        `json:"allow_safety_identifier,omitempty"`
+	DisableStore            bool                        `json:"disable_store,omitempty"`
+	AllowIncludeObfuscation bool                        `json:"allow_include_obfuscation,omitempty"`
+	DisableTaskPollingSleep bool                        `json:"disable_task_polling_sleep,omitempty"`
+	AwsKeyType              AwsKeyType                  `json:"aws_key_type,omitempty"`
+	AdvancedCustom          *EdgeAdvancedCustomConfigV1 `json:"advanced_custom,omitempty"`
+}
+
 // EdgeChannelProjectionV1 names an edge-local upstream service instead of
 // carrying the master channel key or base URL.
 type EdgeChannelProjectionV1 struct {
-	ChannelID         int64                   `json:"channel_id"`
-	Type              int                     `json:"type"`
-	Name              string                  `json:"name"`
-	Enabled           bool                    `json:"enabled"`
-	Groups            []string                `json:"groups"`
-	Models            []string                `json:"models"`
-	ModelMapping      map[string]string       `json:"model_mapping,omitempty"`
-	Priority          int64                   `json:"priority"`
-	Weight            int                     `json:"weight"`
-	LocalService      EdgeLocalServiceV1      `json:"local_service"`
-	StatusCodeMapping map[string]int          `json:"status_code_mapping,omitempty"`
-	TextPolicy        EdgeTextRequestPolicyV1 `json:"text_policy"`
+	ChannelID         int64                      `json:"channel_id"`
+	Type              int                        `json:"type"`
+	Name              string                     `json:"name"`
+	Enabled           bool                       `json:"enabled"`
+	Groups            []string                   `json:"groups"`
+	Models            []string                   `json:"models"`
+	ModelMapping      map[string]string          `json:"model_mapping,omitempty"`
+	Priority          int64                      `json:"priority"`
+	Weight            int                        `json:"weight"`
+	LocalService      EdgeLocalServiceV1         `json:"local_service"`
+	StatusCodeMapping map[string]int             `json:"status_code_mapping,omitempty"`
+	SettingsVersion   int                        `json:"settings_version,omitempty"`
+	ChannelSettings   EdgeChannelSettingsV1      `json:"channel_settings"`
+	ChannelOther      EdgeChannelOtherSettingsV1 `json:"channel_other_settings"`
+	TextPolicy        EdgeTextRequestPolicyV1    `json:"text_policy"`
 }
 
 type EdgePricingPolicyV1 struct {
-	PolicyID                 string            `json:"policy_id"`
-	Version                  string            `json:"version"`
-	Model                    string            `json:"model"`
-	BillingMode              EdgeBillingModeV1 `json:"billing_mode"`
-	ModelPrice               *float64          `json:"model_price,omitempty"`
-	ModelRatio               *float64          `json:"model_ratio,omitempty"`
-	CompletionRatio          *float64          `json:"completion_ratio,omitempty"`
-	CacheReadRatio           *float64          `json:"cache_read_ratio,omitempty"`
-	CacheCreationRatio       *float64          `json:"cache_creation_ratio,omitempty"`
-	CacheCreation1hRatio     *float64          `json:"cache_creation_1h_ratio,omitempty"`
-	BillingExpression        string            `json:"billing_expression,omitempty"`
-	BillingExpressionHash    string            `json:"billing_expression_hash,omitempty"`
-	BillingExpressionVersion int               `json:"billing_expression_version,omitempty"`
-	QuotaPerUnit             float64           `json:"quota_per_unit"`
+	PolicyID                 string             `json:"policy_id"`
+	Version                  string             `json:"version"`
+	Model                    string             `json:"model"`
+	BillingMode              EdgeBillingModeV1  `json:"billing_mode"`
+	ModelPrice               *float64           `json:"model_price,omitempty"`
+	ModelRatio               *float64           `json:"model_ratio,omitempty"`
+	CompletionRatio          *float64           `json:"completion_ratio,omitempty"`
+	CacheReadRatio           *float64           `json:"cache_read_ratio,omitempty"`
+	CacheCreationRatio       *float64           `json:"cache_creation_ratio,omitempty"`
+	CacheCreation1hRatio     *float64           `json:"cache_creation_1h_ratio,omitempty"`
+	ImageRatio               *float64           `json:"image_ratio,omitempty"`
+	AudioRatio               *float64           `json:"audio_ratio,omitempty"`
+	AudioCompletionRatio     *float64           `json:"audio_completion_ratio,omitempty"`
+	AudioInputPrice          *float64           `json:"audio_input_price,omitempty"`
+	ToolPrices               map[string]float64 `json:"tool_prices,omitempty"`
+	BillingExpression        string             `json:"billing_expression,omitempty"`
+	BillingExpressionHash    string             `json:"billing_expression_hash,omitempty"`
+	BillingExpressionVersion int                `json:"billing_expression_version,omitempty"`
+	QuotaPerUnit             float64            `json:"quota_per_unit"`
+}
+
+// EdgeBillingFactsV1 carries request-derived accounting facts that cannot be
+// reconstructed from token usage alone. They are deliberately narrower than
+// the request body and contain no prompt, file content or upstream credential.
+type EdgeBillingFactsV1 struct {
+	WebSearchPreviewCalls  int      `json:"web_search_preview_calls,omitempty"`
+	WebSearchCalls         int      `json:"web_search_calls,omitempty"`
+	FileSearchCalls        int      `json:"file_search_calls,omitempty"`
+	ImageGenerationCall    bool     `json:"image_generation_call,omitempty"`
+	ImageGenerationQuality string   `json:"image_generation_quality,omitempty"`
+	ImageGenerationSize    string   `json:"image_generation_size,omitempty"`
+	TieredQuotaBeforeGroup *float64 `json:"tiered_quota_before_group,omitempty"`
+	TaskQuotaBeforeRatios  *float64 `json:"task_quota_before_ratios,omitempty"`
 }
 
 // EdgeChannelAffinityKeySourceV1 describes one ordered affinity-key probe.
@@ -488,8 +557,12 @@ type EdgeUsageBillingV1 struct {
 	AppliedRatios         map[string]float64 `json:"applied_ratios,omitempty"`
 	BillingExpressionHash string             `json:"billing_expression_hash,omitempty"`
 	MatchedTier           string             `json:"matched_tier,omitempty"`
-	ReservedQuota         int64              `json:"reserved_quota"`
-	ChargedQuota          int64              `json:"charged_quota"`
+	// omitzero preserves the V1 settlement canonical JSON produced before
+	// billing facts existed. Without it, encoding/json emits an empty struct as
+	// "facts":{}, invalidating durable blocks created by an older edge binary.
+	Facts         EdgeBillingFactsV1 `json:"facts,omitempty,omitzero"`
+	ReservedQuota int64              `json:"reserved_quota"`
+	ChargedQuota  int64              `json:"charged_quota"`
 }
 
 // EdgeConsumeLogSnapshotV1 is an optional, request-time display snapshot used
@@ -730,12 +803,7 @@ type EdgeControlErrorResponseV1 struct {
 }
 
 func (e EdgeEndpointV1) Valid() bool {
-	switch e {
-	case EdgeEndpointOpenAIChatCompletionsV1, EdgeEndpointOpenAIResponsesV1:
-		return true
-	default:
-		return false
-	}
+	return validateEdgeControlIdentifierV1("endpoint", string(e)) == nil
 }
 
 func (d EdgeSnapshotDatasetV1) Valid() bool {
@@ -1131,6 +1199,9 @@ func (c EdgeChannelProjectionV1) Validate() error {
 	if c.Weight < 0 {
 		return fmt.Errorf("channel.weight must not be negative")
 	}
+	if c.SettingsVersion < 0 || c.SettingsVersion > 1 {
+		return fmt.Errorf("channel.settings_version is invalid")
+	}
 	if len(c.Groups) > EdgeControlMaxChannelGroupsV1 {
 		return fmt.Errorf("channel.groups exceeds %d items", EdgeControlMaxChannelGroupsV1)
 	}
@@ -1158,6 +1229,16 @@ func (c EdgeChannelProjectionV1) Validate() error {
 			return err
 		}
 	}
+	settingsPayload, err := common.Marshal(struct {
+		ChannelSettings EdgeChannelSettingsV1      `json:"channel_settings"`
+		ChannelOther    EdgeChannelOtherSettingsV1 `json:"channel_other_settings"`
+	}{ChannelSettings: c.ChannelSettings, ChannelOther: c.ChannelOther})
+	if err != nil {
+		return err
+	}
+	if len(settingsPayload) > EdgeControlMaxBillingExpressionLengthV1 {
+		return fmt.Errorf("channel typed settings exceed %d bytes", EdgeControlMaxBillingExpressionLengthV1)
+	}
 	return nil
 }
 
@@ -1168,8 +1249,8 @@ func (m EdgeModelPolicyV1) Validate() error {
 	if len(m.Endpoints) == 0 {
 		return fmt.Errorf("model.endpoints must not be empty")
 	}
-	if len(m.Endpoints) > 2 {
-		return fmt.Errorf("model.endpoints exceeds 2 items")
+	if len(m.Endpoints) > EdgeControlMaxCapabilitiesV1 {
+		return fmt.Errorf("model.endpoints exceeds %d items", EdgeControlMaxCapabilitiesV1)
 	}
 	seenEndpoints := make(map[EdgeEndpointV1]struct{}, len(m.Endpoints))
 	for i, endpoint := range m.Endpoints {
@@ -1495,6 +1576,10 @@ func (p EdgePricingPolicyV1) Validate() error {
 		{name: "cache_read_ratio", value: p.CacheReadRatio},
 		{name: "cache_creation_ratio", value: p.CacheCreationRatio},
 		{name: "cache_creation_1h_ratio", value: p.CacheCreation1hRatio},
+		{name: "image_ratio", value: p.ImageRatio},
+		{name: "audio_ratio", value: p.AudioRatio},
+		{name: "audio_completion_ratio", value: p.AudioCompletionRatio},
+		{name: "audio_input_price", value: p.AudioInputPrice},
 	} {
 		if value.value == nil {
 			continue
@@ -1505,6 +1590,17 @@ func (p EdgePricingPolicyV1) Validate() error {
 	}
 	if err := validateEdgeControlFiniteFloatV1("pricing.quota_per_unit", p.QuotaPerUnit, true); err != nil {
 		return err
+	}
+	if len(p.ToolPrices) > EdgeControlMaxAppliedRatiosV1 {
+		return fmt.Errorf("pricing.tool_prices exceeds %d items", EdgeControlMaxAppliedRatiosV1)
+	}
+	for name, price := range p.ToolPrices {
+		if err := validateEdgeControlIdentifierV1("pricing.tool_prices key", name); err != nil {
+			return err
+		}
+		if err := validateEdgeControlFiniteFloatV1("pricing.tool_prices["+name+"]", price, false); err != nil {
+			return err
+		}
 	}
 
 	switch p.BillingMode {
@@ -1761,11 +1857,52 @@ func (b EdgeUsageBillingV1) Validate() error {
 	} else if b.BillingExpressionHash != "" || b.MatchedTier != "" {
 		return fmt.Errorf("usage.billing tiered fields are only valid for tiered_expr billing")
 	}
+	if err := b.Facts.Validate(b.BillingMode); err != nil {
+		return err
+	}
 	if err := validateEdgeControlQuotaV1("usage.billing.reserved_quota", b.ReservedQuota); err != nil {
 		return err
 	}
 	if err := validateEdgeControlQuotaV1("usage.billing.charged_quota", b.ChargedQuota); err != nil {
 		return err
+	}
+	return nil
+}
+
+func (f EdgeBillingFactsV1) Validate(mode EdgeBillingModeV1) error {
+	for name, count := range map[string]int{
+		"web_search_preview_calls": f.WebSearchPreviewCalls,
+		"web_search_calls":         f.WebSearchCalls,
+		"file_search_calls":        f.FileSearchCalls,
+	} {
+		if err := validateEdgeBillingCountV1("usage.billing.facts."+name, count); err != nil {
+			return err
+		}
+	}
+	if f.ImageGenerationCall {
+		if err := validateEdgeControlIdentifierV1("usage.billing.facts.image_generation_quality", f.ImageGenerationQuality); err != nil {
+			return err
+		}
+		if err := validateEdgeControlIdentifierV1("usage.billing.facts.image_generation_size", f.ImageGenerationSize); err != nil {
+			return err
+		}
+	} else if f.ImageGenerationQuality != "" || f.ImageGenerationSize != "" {
+		return fmt.Errorf("usage.billing.facts image generation dimensions require image_generation_call")
+	}
+	if f.TieredQuotaBeforeGroup != nil {
+		if mode != EdgeBillingModeTieredExprV1 {
+			return fmt.Errorf("usage.billing.facts.tiered_quota_before_group is only valid for tiered_expr billing")
+		}
+		if err := validateEdgeControlFiniteFloatV1("usage.billing.facts.tiered_quota_before_group", *f.TieredQuotaBeforeGroup, false); err != nil {
+			return err
+		}
+	} else if mode == EdgeBillingModeTieredExprV1 {
+		return fmt.Errorf("usage.billing.facts.tiered_quota_before_group is required for tiered_expr billing")
+	}
+	if f.TaskQuotaBeforeRatios != nil {
+		if err := validateEdgeControlFiniteFloatV1("usage.billing.facts.task_quota_before_ratios", *f.TaskQuotaBeforeRatios, false); err != nil {
+			return err
+		}
 	}
 	return nil
 }

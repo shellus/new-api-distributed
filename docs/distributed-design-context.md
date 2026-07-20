@@ -36,21 +36,25 @@ CPA 能够处理协议、OAuth 调度和 usage 观察，但其插件 usage 链�
 
 master 与 edge 基于同一个官方 New API 派生仓库。上游默认入口继续构建 master，edge 只增加编译入口和少量边缘业务。协议、relay、鉴权上下文、渠道逻辑、计费表达式和 BillingSession 直接复用同一 Go package。
 
-### 选择配额租约与异步结算
+### 选择余额复制、本地预留与异步结算
 
-master 提前把有限额度预留给 edge。edge 在本地租约范围内处理请求，并把 durable usage event 组成 settlement block 异步上报。这样既消除了逐请求 master 依赖，也把断线期间的最大账务风险限制在已签发租约范围内。
+master 向 edge 复制带 revision 的钱包、订阅和 token 余额。edge 在本地余额 overlay 上原子预留，完成请求后把 durable usage event 组成 settlement block 异步上报；master 通过每节点负下限和 settlement circuit 限制断线风险。该决定见 ADR 0004。
+
+### 选择完整共享数据面
+
+master 与 edge 使用同一套路由注册、relay、provider adaptor 和计费计算器。edge 不维护请求体形状白名单，也不在遇到新格式时回源 master；Responses 压缩、图片、音频、embeddings、rerank、Claude、Gemini、Realtime、视频和异步任务都在 edge 本地执行。该决定见 ADR 0005。
 
 ## 共识结论列表
 
 1. 只维护一个 Git 仓库和一个 Go module，不复制 master/edge 代码。
 2. 上游默认 `main.go` 保持 master 行为；edge 是附加编译入口。
-3. edge 首期采用运行模式关闭无关能力，不先大规模删除上游源码。
+3. edge 通过运行模式关闭管理后台等控制面能力，但共享 master 已实现的完整用户数据面。
 4. 正常用户请求不进行同步 master 调用。
 5. edge 必须拥有完整的安全令牌鉴权索引，首次请求鉴权在本地完成。
-6. 用户在某 edge 没有本地 lease 时可以申请初始 lease；master 不可用则在访问 CPA 前拒绝。
-7. master 在签发 lease 时预留额度，禁止多个节点复制并消费同一余额。
-8. edge 使用 New API 的原生计费逻辑计算本地使用，master按相同价格版本复核。
-9. usage event、lease 结算和 outbox 必须使用可靠本地事务，不能依赖进程内队列。
+6. 用户请求只使用本地余额投影和 reservation；master 不可用时不得为单个请求同步申请额度。
+7. master 使用每节点余额 revision、负下限和 settlement circuit 控制多节点离线消费风险。
+8. edge 使用 New API 的原生计费逻辑计算本地使用，master 按相同价格版本和 Billing Receipt 复核。
+9. usage event、reservation 结算和 outbox 必须使用可靠本地事务，不能依赖进程内队列。
 10. edge SQLite 是可恢复的自动投影和账务状态，不是人工配置入口。
 11. 渠道由 master 创建并保持全局 channel ID；edge 自动生成同一业务渠道的本地投影。
 12. master 默认下发所有逻辑渠道；edge 按渠道名合并本地 YAML 中的 URL、凭证、代理和请求覆盖，不维护逐节点 channel ID 映射。
@@ -59,7 +63,7 @@ master 提前把有限额度预留给 edge。edge 在本地租约范围内处理
 15. master 直接信任已认证 edge 的地址声明，不增加人工审批。
 16. master 主动探测公开地址只产生可达性和延迟观测，不改变地址真值。
 17. master 主要维护节点身份、名称、凭证、启停和额度风险；地址、能力和运行状态由 edge 上报。
-18. edge 只执行能够由 master 快照表达并复核价格的模型；未配置本地凭证的渠道在该节点保持禁用。
+18. edge 执行能够由 master 快照表达并形成 Billing Receipt 的完整用户数据面；未配置本地凭证的渠道在该节点保持禁用。
 
 ## 明确的非目标
 
@@ -69,7 +73,7 @@ master 提前把有限额度预留给 edge。edge 在本地租约范围内处理
 - 不同步 CPA OAuth 凭证到 master。
 - 不在 edge 后台提供用户、渠道、计费或余额编辑能力。
 - 不以审计服务或 CPA usage 插件作为唯一账本。
-- 不在首期追求所有 New API 路由和模型能力。
+- 不为 edge 复制第二套路由、协议转换或计费实现。
 
 ## 有意留给实现阶段决定的内容
 
@@ -78,7 +82,7 @@ master 提前把有限额度预留给 edge。edge 在本地租约范围内处理
 - 通信 DTO 的具体字段、编码和分页形式。
 - 节点身份使用的具体密钥算法和注册流程。
 - token 安全指纹的具体算法与索引结构。
-- lease 默认大小、补充阈值、期限和动态调整算法。
+- 每节点负余额下限、结算滑动窗口和 circuit 恢复阈值。
 - 快照同步、心跳和 settlement block 的具体时间或数量阈值。
 - edge 本地事务的表结构和清理周期。
 - master 节点列表的具体 UI 和客户端选点方式。

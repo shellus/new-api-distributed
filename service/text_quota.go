@@ -57,6 +57,30 @@ type textQuotaSummary struct {
 	ToolCallSurchargeQuota   decimal.Decimal
 }
 
+func resolvedBillingToolPrice(relayInfo *relaycommon.RelayInfo, toolName, modelName string) float64 {
+	if common.IsEdgeMode() && relayInfo != nil && relayInfo.EdgePricingPolicy != nil {
+		return relayInfo.EdgePricingPolicy.ToolPrices[toolName]
+	}
+	return operation_setting.GetToolPriceForModel(toolName, modelName)
+}
+
+func resolvedBillingAudioInputPrice(relayInfo *relaycommon.RelayInfo, modelName string) float64 {
+	if common.IsEdgeMode() && relayInfo != nil && relayInfo.EdgePricingPolicy != nil {
+		if relayInfo.EdgePricingPolicy.AudioInputPrice == nil {
+			return 0
+		}
+		return *relayInfo.EdgePricingPolicy.AudioInputPrice
+	}
+	return operation_setting.GetGeminiInputAudioPricePerMillionTokens(modelName)
+}
+
+func edgeQuotaPerUnit(relayInfo *relaycommon.RelayInfo) float64 {
+	if common.IsEdgeMode() && relayInfo != nil && relayInfo.EdgePricingPolicy != nil {
+		return relayInfo.EdgePricingPolicy.QuotaPerUnit
+	}
+	return common.QuotaPerUnit
+}
+
 func cacheWriteTokensTotal(summary textQuotaSummary) int {
 	if summary.CacheCreationTokens5m > 0 || summary.CacheCreationTokens1h > 0 {
 		splitCacheWriteTokens := summary.CacheCreationTokens5m + summary.CacheCreationTokens1h
@@ -83,10 +107,7 @@ func isLegacyClaudeDerivedOpenAIUsage(relayInfo *relaycommon.RelayInfo, usage *d
 
 func calculateTextToolCallSurcharge(ctx *gin.Context, relayInfo *relaycommon.RelayInfo, summary *textQuotaSummary) decimal.Decimal {
 	dGroupRatio := decimal.NewFromFloat(summary.GroupRatio)
-	quotaPerUnit := common.QuotaPerUnit
-	if common.IsEdgeMode() && relayInfo.EdgePricingPolicy != nil {
-		quotaPerUnit = relayInfo.EdgePricingPolicy.QuotaPerUnit
-	}
+	quotaPerUnit := edgeQuotaPerUnit(relayInfo)
 	dQuotaPerUnit := decimal.NewFromFloat(quotaPerUnit)
 
 	var surcharge decimal.Decimal
@@ -94,7 +115,7 @@ func calculateTextToolCallSurcharge(ctx *gin.Context, relayInfo *relaycommon.Rel
 	if relayInfo.ResponsesUsageInfo != nil {
 		if webSearchTool, exists := relayInfo.ResponsesUsageInfo.BuiltInTools[dto.BuildInToolWebSearchPreview]; exists && webSearchTool.CallCount > 0 {
 			summary.WebSearchCallCount = webSearchTool.CallCount
-			summary.WebSearchPrice = operation_setting.GetToolPriceForModel("web_search_preview", summary.ModelName)
+			summary.WebSearchPrice = resolvedBillingToolPrice(relayInfo, "web_search_preview", summary.ModelName)
 			surcharge = surcharge.Add(decimal.NewFromFloat(summary.WebSearchPrice).
 				Mul(decimal.NewFromInt(int64(webSearchTool.CallCount))).
 				Div(decimal.NewFromInt(1000)).
@@ -103,7 +124,7 @@ func calculateTextToolCallSurcharge(ctx *gin.Context, relayInfo *relaycommon.Rel
 		}
 	} else if strings.HasSuffix(summary.ModelName, "search-preview") {
 		summary.WebSearchCallCount = 1
-		summary.WebSearchPrice = operation_setting.GetToolPriceForModel("web_search_preview", summary.ModelName)
+		summary.WebSearchPrice = resolvedBillingToolPrice(relayInfo, "web_search_preview", summary.ModelName)
 		surcharge = surcharge.Add(decimal.NewFromFloat(summary.WebSearchPrice).
 			Div(decimal.NewFromInt(1000)).
 			Mul(dGroupRatio).
@@ -112,7 +133,7 @@ func calculateTextToolCallSurcharge(ctx *gin.Context, relayInfo *relaycommon.Rel
 
 	summary.ClaudeWebSearchCallCount = ctx.GetInt("claude_web_search_requests")
 	if summary.ClaudeWebSearchCallCount > 0 {
-		summary.ClaudeWebSearchPrice = operation_setting.GetToolPrice("web_search")
+		summary.ClaudeWebSearchPrice = resolvedBillingToolPrice(relayInfo, "web_search", summary.ModelName)
 		surcharge = surcharge.Add(decimal.NewFromFloat(summary.ClaudeWebSearchPrice).
 			Div(decimal.NewFromInt(1000)).
 			Mul(dGroupRatio).
@@ -123,7 +144,7 @@ func calculateTextToolCallSurcharge(ctx *gin.Context, relayInfo *relaycommon.Rel
 	if relayInfo.ResponsesUsageInfo != nil {
 		if fileSearchTool, exists := relayInfo.ResponsesUsageInfo.BuiltInTools[dto.BuildInToolFileSearch]; exists && fileSearchTool.CallCount > 0 {
 			summary.FileSearchCallCount = fileSearchTool.CallCount
-			summary.FileSearchPrice = operation_setting.GetToolPrice("file_search")
+			summary.FileSearchPrice = resolvedBillingToolPrice(relayInfo, "file_search", summary.ModelName)
 			surcharge = surcharge.Add(decimal.NewFromFloat(summary.FileSearchPrice).
 				Mul(decimal.NewFromInt(int64(fileSearchTool.CallCount))).
 				Div(decimal.NewFromInt(1000)).
@@ -249,10 +270,7 @@ func calculateTextQuotaSummary(ctx *gin.Context, relayInfo *relaycommon.RelayInf
 	dCacheCreationRatio := decimal.NewFromFloat(summary.CacheCreationRatio)
 	dCacheCreationRatio5m := decimal.NewFromFloat(summary.CacheCreationRatio5m)
 	dCacheCreationRatio1h := decimal.NewFromFloat(summary.CacheCreationRatio1h)
-	quotaPerUnit := common.QuotaPerUnit
-	if common.IsEdgeMode() && relayInfo.EdgePricingPolicy != nil {
-		quotaPerUnit = relayInfo.EdgePricingPolicy.QuotaPerUnit
-	}
+	quotaPerUnit := edgeQuotaPerUnit(relayInfo)
 	dQuotaPerUnit := decimal.NewFromFloat(quotaPerUnit)
 
 	ratio := dModelRatio.Mul(dGroupRatio)
@@ -294,7 +312,7 @@ func calculateTextQuotaSummary(ctx *gin.Context, relayInfo *relaycommon.RelayInf
 		}
 
 		if !dAudioTokens.IsZero() {
-			summary.AudioInputPrice = operation_setting.GetGeminiInputAudioPricePerMillionTokens(summary.ModelName)
+			summary.AudioInputPrice = resolvedBillingAudioInputPrice(relayInfo, summary.ModelName)
 			if summary.AudioInputPrice > 0 {
 				baseTokens = baseTokens.Sub(dAudioTokens)
 				audioInputQuota = decimal.NewFromFloat(summary.AudioInputPrice).
@@ -408,6 +426,33 @@ func PostTextConsumeQuota(ctx *gin.Context, relayInfo *relaycommon.RelayInfo, us
 
 	if common.IsEdgeMode() {
 		relayInfo.SettlementUsage = buildEdgeTextSettlementUsage(relayInfo, originUsage, billingUsage, summary)
+		facts := &dto.EdgeBillingFactsV1{
+			WebSearchPreviewCalls: summary.WebSearchCallCount,
+			WebSearchCalls:        summary.ClaudeWebSearchCallCount,
+			FileSearchCalls:       summary.FileSearchCallCount,
+			ImageGenerationCall:   summary.ImageGenerationCallPrice > 0,
+		}
+		if facts.ImageGenerationCall {
+			facts.ImageGenerationQuality = ctx.GetString("image_generation_call_quality")
+			facts.ImageGenerationSize = ctx.GetString("image_generation_call_size")
+			if facts.ImageGenerationQuality == "" {
+				facts.ImageGenerationQuality = "high"
+			}
+			if facts.ImageGenerationSize == "" {
+				facts.ImageGenerationSize = "1024x1024"
+			}
+		}
+		if relayInfo.TieredBillingSnapshot != nil {
+			quotaBeforeGroup := relayInfo.TieredBillingSnapshot.EstimatedQuotaBeforeGroup
+			if tieredResult != nil {
+				quotaBeforeGroup = tieredResult.ActualQuotaBeforeGroup
+				relayInfo.EdgeBillingMatchedTier = tieredResult.MatchedTier
+			} else {
+				relayInfo.EdgeBillingMatchedTier = relayInfo.TieredBillingSnapshot.EstimatedTier
+			}
+			facts.TieredQuotaBeforeGroup = &quotaBeforeGroup
+		}
+		relayInfo.EdgeBillingFacts = facts
 	}
 
 	if err := SettleBilling(ctx, relayInfo, summary.Quota); err != nil {

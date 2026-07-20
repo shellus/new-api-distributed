@@ -8,6 +8,8 @@
 
 master 与 edge 使用同一代码仓库和同一套 New API 业务代码。master 使用上游默认入口，edge 使用额外的轻量编译入口；CPA 继续作为 edge 的本地上游执行引擎。
 
+master 与 edge 的用户侧 AI API 由共享路由注册表生成，覆盖 New API 已实现的 Chat/Completions、Responses 与压缩、Claude、Gemini、图片、音频、embeddings、rerank、Realtime、视频、Suno 和 Midjourney 等数据面。edge 在本地完成鉴权、路由、上游执行和账务，不代理或回退到 master；master 尚未实现的占位接口仍保持未实现。
+
 ## 1. Edge 从 Master 获取的内容
 
 edge 获取的是“能够在本地完成请求所需的最小业务快照”，不是中心数据库副本。
@@ -24,6 +26,8 @@ edge 不接收明文 API token、中心数据库、其他节点数据或 CPA OAu
 用户第一次访问某个 edge 时，鉴权和余额 admission 都在本地完成，不需要查询 master。第一次 `edge-control.v2` heartbeat 必须完成余额 full 初始化；之后 heartbeat 只下发相对已确认 revision 的 delta，断档时重新 full。master 不可用时，edge 继续在最后一份已验证策略、confirmed balance 和本地负余额下限内服务。
 
 签名计费策略明确免费时，edge 仍创建零额度 reservation 和 usage event，保留完整结算序列与审计语义，但不扣减有限账户。
+
+异步任务提交后由 edge SQLite 保存任务状态与 reservation 所有权。edge 本地轮询上游；任务成功后形成最终 Billing Receipt 并结算，失败或超时则释放 reservation。重启恢复会先完成已 staged 的账务，再按任务所有权清理已结算/已退款指针或继续轮询，不依赖 master 保存任务状态。
 
 ## 2. Edge 向 Master 上报的内容
 
@@ -67,6 +71,7 @@ edge 的 `/healthz` 只表示进程存活；`/readyz` 同时要求：
 
 - master 不代理 edge 的用户请求。
 - edge 不自行实现 AI 协议、流式转发或 OAuth 凭证调度。
+- edge 不维护请求格式白名单，也不把不熟悉的合法请求回源 master。
 - New API 继续负责鉴权、权限、渠道策略和计费。
 - CPA 继续负责 OAuth 凭证池、上游调度、重试和执行。
 - master 失联时，edge 在最后一份已验证策略、余额副本和本地负余额下限内继续服务。

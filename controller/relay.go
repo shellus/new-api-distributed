@@ -621,17 +621,13 @@ func RelayTask(c *gin.Context) {
 
 	// ── 成功：结算 + 日志 + 插入任务 ──
 	if taskErr == nil {
-		if settleErr := service.SettleBilling(c, relayInfo, result.Quota); settleErr != nil {
-			common.SysError("settle task billing error: " + settleErr.Error())
-		}
-		service.LogTaskConsumption(c, relayInfo)
-
 		task := model.InitTask(result.Platform, relayInfo)
 		task.PrivateData.UpstreamTaskID = result.UpstreamTaskID
 		task.PrivateData.BillingSource = relayInfo.BillingSource
 		task.PrivateData.SubscriptionId = relayInfo.SubscriptionId
 		task.PrivateData.TokenId = relayInfo.TokenId
 		task.PrivateData.NodeName = common.NodeName
+		task.PrivateData.EdgeReservationID = relayInfo.EdgeReservationID
 		task.PrivateData.BillingContext = &model.TaskBillingContext{
 			ModelPrice:      relayInfo.PriceData.ModelPrice,
 			GroupRatio:      relayInfo.PriceData.GroupRatioInfo.GroupRatio,
@@ -640,11 +636,42 @@ func RelayTask(c *gin.Context) {
 			OriginModelName: relayInfo.OriginModelName,
 			PerCallBilling:  common.StringsContains(constant.TaskPricePatches, relayInfo.OriginModelName) || relayInfo.PriceData.UsePrice,
 		}
+		if relayInfo.EdgePricingPolicy != nil {
+			task.PrivateData.BillingContext.PricingPolicyID = relayInfo.EdgePricingPolicy.PolicyID
+			task.PrivateData.BillingContext.PricingPolicyVersion = relayInfo.EdgePricingPolicy.Version
+			task.PrivateData.BillingContext.BillingMode = string(relayInfo.EdgePricingPolicy.BillingMode)
+		}
 		task.Quota = result.Quota
 		task.Data = result.TaskData
 		task.Action = relayInfo.Action
-		if insertErr := task.Insert(); insertErr != nil {
-			common.SysError("insert task error: " + insertErr.Error())
+
+		if common.IsEdgeMode() {
+			if insertErr := task.Insert(); insertErr != nil {
+				common.SysError("insert edge task error: " + insertErr.Error())
+				if relayInfo.Billing != nil {
+					relayInfo.Billing.Refund(c)
+				}
+				return
+			}
+			if bindErr := model.BindEdgeLocalReservationOwner(
+				model.DB, relayInfo.EdgeReservationID, "task", task.TaskID, time.Now().UnixMilli(),
+			); bindErr != nil {
+				common.SysError("bind edge task reservation error: " + bindErr.Error())
+				task.PrivateData.EdgeReservationID = ""
+				_ = task.Update()
+				if relayInfo.Billing != nil {
+					relayInfo.Billing.Refund(c)
+				}
+				return
+			}
+		} else {
+			if settleErr := service.SettleBilling(c, relayInfo, result.Quota); settleErr != nil {
+				common.SysError("settle task billing error: " + settleErr.Error())
+			}
+			service.LogTaskConsumption(c, relayInfo)
+			if insertErr := task.Insert(); insertErr != nil {
+				common.SysError("insert task error: " + insertErr.Error())
+			}
 		}
 	}
 

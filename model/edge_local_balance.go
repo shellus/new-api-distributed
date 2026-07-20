@@ -29,6 +29,50 @@ type EdgeLocalBalanceReservationRequest struct {
 	NowUnixMilli       int64
 }
 
+func BindEdgeLocalReservationOwner(db *gorm.DB, reservationID, ownerKind, ownerID string, nowUnixMilli int64) error {
+	if db == nil || db.Dialector.Name() != "sqlite" {
+		return errors.New("edge local reservation owner binding requires SQLite")
+	}
+	if err := validateEdgeLocalIdentifier(reservationID); err != nil {
+		return err
+	}
+	if err := validateEdgeLocalIdentifier(ownerKind); err != nil {
+		return err
+	}
+	if err := validateEdgeLocalIdentifier(ownerID); err != nil {
+		return err
+	}
+	if nowUnixMilli <= 0 {
+		return errors.New("edge local reservation owner binding time must be positive")
+	}
+	result := db.Model(&EdgeLocalQuotaReservation{}).
+		Where("reservation_id = ? AND status = ? AND staged_event_payload = '' AND (owner_kind = '' OR (owner_kind = ? AND owner_id = ?))",
+			reservationID, EdgeLocalReservationStatusActive, ownerKind, ownerID).
+		Updates(map[string]any{"owner_kind": ownerKind, "owner_id": ownerID, "updated_at_unix_milli": nowUnixMilli})
+	if result.Error != nil {
+		return result.Error
+	}
+	if result.RowsAffected != 1 {
+		return ErrEdgeLocalReservationConflict
+	}
+	return nil
+}
+
+func ListActiveEdgeLocalOwnedReservations(db *gorm.DB, ownerKind string) ([]EdgeLocalQuotaReservation, error) {
+	if db == nil || db.Dialector.Name() != "sqlite" {
+		return nil, errors.New("edge local owned reservation query requires SQLite")
+	}
+	if err := validateEdgeLocalIdentifier(ownerKind); err != nil {
+		return nil, err
+	}
+	var reservations []EdgeLocalQuotaReservation
+	if err := db.Where("status = ? AND owner_kind = ?", EdgeLocalReservationStatusActive, ownerKind).
+		Order("created_at_unix_milli asc, reservation_id asc").Find(&reservations).Error; err != nil {
+		return nil, err
+	}
+	return reservations, nil
+}
+
 func GetEdgeLocalBalanceState(db *gorm.DB) (*EdgeLocalBalanceState, error) {
 	if db == nil || db.Dialector.Name() != "sqlite" {
 		return nil, errors.New("edge local balance state requires SQLite")

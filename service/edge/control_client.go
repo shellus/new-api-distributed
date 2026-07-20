@@ -127,8 +127,7 @@ func LoadEdgeControlClientConfigFromEnv(startedAt time.Time) (EdgeControlClientC
 		SoftwareVersion:    common.Version,
 		StartedAtUnixMilli: startedAt.UTC().UnixMilli(),
 		Capabilities: []dto.EdgeEndpointCapabilityV1{
-			{Endpoint: dto.EdgeEndpointOpenAIChatCompletionsV1, Streaming: true},
-			{Endpoint: dto.EdgeEndpointOpenAIResponsesV1, Streaming: true},
+			{Endpoint: dto.EdgeEndpointDataPlaneV1, Streaming: true},
 		},
 	}
 	return EdgeControlClientConfig{

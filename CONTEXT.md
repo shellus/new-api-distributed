@@ -12,6 +12,10 @@ _Avoid_: Primary request gateway, shared database server
 A trusted data-plane node that authenticates and serves user requests from local policy and balance projections, then reports usage asynchronously.
 _Avoid_: Slave database replica, New API cluster worker
 
+**Complete Data Plane**:
+The user-facing AI API surface shared by master and edge. An edge executes these routes locally with the same relay packages and never proxies or falls back to the master.
+_Avoid_: Text-only edge boundary, master fallback
+
 **CPA**:
 The edge-local upstream execution engine that owns OAuth credentials, credential scheduling, retries, and provider execution.
 _Avoid_: Billing authority, public user gateway
@@ -51,6 +55,10 @@ _Avoid_: Node revocation, automatic retry backoff
 **Usage Event**:
 The durable local accounting fact produced when one edge request finishes or fails.
 _Avoid_: Volatile metric, CPA usage callback
+
+**Billing Receipt**:
+The immutable accounting payload inside a usage event: frozen pricing identity, normalized usage, request-derived billing factors, and the final charge inputs needed by the shared calculator.
+_Avoid_: Consume log snapshot, raw request body
 
 **Settlement Block**:
 An ordered, idempotent batch of usage events submitted by an edge and acknowledged by the master.

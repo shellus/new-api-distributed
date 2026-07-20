@@ -14,7 +14,7 @@
 
 New API Distributed 在同一个 Go module 中为 New API 增加 master/edge 分布式运行能力，同时保留上游兼容的默认 master 入口。
 
-- **master** 继续提供 New API 的用户、令牌、渠道、计费、日志和管理后台能力，并承担 edge 控制面、策略快照、配额租约与结算汇总。
+- **master** 继续提供 New API 的用户、令牌、渠道、计费、日志和管理后台能力，并承担 edge 控制面、策略快照、余额复制与结算汇总。
 - **edge** 在节点本地完成用户请求鉴权、模型策略检查、额度预留、上游调用和账务落盘；普通请求不依赖同步访问 master。
 - **CPA** 作为 edge 的本地上游执行引擎，只接收已经通过 edge 鉴权和计费边界的内部请求，不作为公开旁路。
 
@@ -25,8 +25,9 @@ New API Distributed 在同一个 Go module 中为 New API 增加 master/edge 分
 - 保留上游兼容的 master 构建入口，关闭分布式开关时不注册 edge 控制面。
 - 使用 master 签名的最小策略快照，把用户、令牌、模型、分组、渠道和计费策略同步到 edge。
 - 使用 edge 本地签名令牌快照完成请求鉴权，正常请求路径不对 master 发起同步调用。
-- 使用配额租约、预扣、结算区块和幂等事件维护用户钱包与订阅额度一致性。
-- 使用本地 SQLite 保存 edge 快照、租约、预留、outbox 和结算状态，节点重启后继续恢复。
+- master 与 edge 从共享路由注册表暴露同一套用户侧 AI 数据面，包括 Responses 压缩、多模态、Realtime 和异步任务；edge 不回源 master。
+- 使用余额复制、本地 reservation、结算区块和幂等事件维护用户钱包、订阅与 token 额度一致性。
+- 使用本地 SQLite 保存 edge 快照、余额投影、预留、任务、outbox 和结算状态，节点重启后继续恢复。
 - 使用节点凭证、请求签名、nonce、幂等键和节点代次保护控制面请求。
 - 使用消费日志 outbox 和全局账务事件键防止重复投影消费日志。
 - 支持节点心跳、公开地址声明、快照轮换、租约续期、优雅 drain 和 fail-closed。
@@ -45,9 +46,9 @@ New API Distributed 在同一个 Go module 中为 New API 增加 master/edge 分
 │         master         │◄──►│          edge          │
 │                        │    │                        │
 │ 用户、令牌、渠道、计费 │    │ 本地鉴权、策略与账务   │
-│ PostgreSQL / Redis     │    │ SQLite / 本地租约      │
+│ PostgreSQL / Redis     │    │ SQLite / 余额投影      │
 └────────────────────────┘    └───────────┬────────────┘
-             控制面：策略快照 / 租约 / 结算 / 心跳     │
+             控制面：策略快照 / 余额 / 结算 / 心跳     │
                                              │ 内部上游调用
                                              ▼
                                       ┌──────────────┐
@@ -55,7 +56,7 @@ New API Distributed 在同一个 Go module 中为 New API 增加 master/edge 分
                                       └──────────────┘
 ```
 
-master 是全局业务和账务真值。edge 只持有服务请求所需的最小快照与已授权额度；master 不可达且本地没有有效租约时，请求必须在进入 CPA 前失败。
+master 是全局业务和账务真值。edge 只持有服务请求所需的最小快照与余额投影；master 不可达时，edge 继续使用最后一份已验证策略和本地余额 overlay，直到 token/订阅到期、可用余额触及安全下限、账务恢复未完成或 settlement circuit 打开。
 
 ## 运行入口
 
@@ -70,13 +71,13 @@ master 是全局业务和账务真值。edge 只持有服务请求所需的最�
 cmd/newapi-edge/       edge 二进制入口
 internal/app/          master 与 edge 共享的应用启动流程
 controller/            master 控制面和节点管理接口
-middleware/            edge 鉴权、模型策略和请求准入边界
+middleware/            edge 鉴权与请求准入边界
 model/                 master 全局状态与 edge 本地持久化模型
 pkg/edgeauth/          控制请求签名与校验
 pkg/edgesettlement/    结算区块摘要和链式校验
 pkg/edgesnapshot/      快照摘要、签名和数据集校验
 pkg/edgetoken/         token 指纹
-service/edge/          控制面、快照、租约、结算和节点生命周期
+service/edge/          控制面、快照、余额复制、结算和节点生命周期
 ops/master-switch/     原版/master 演练、切换和回滚脚本
 ```
 

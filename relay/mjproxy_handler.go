@@ -202,6 +202,7 @@ func RelaySwapFace(c *gin.Context, info *relaycommon.RelayInfo) *dto.MidjourneyR
 		return service.MidjourneyErrorWrapper(constant.MjRequestError, "sour_base64_and_target_base64_is_required")
 	}
 	modelName := service.CovertMjpActionToModelName(constant.MjActionSwapFace)
+	info.OriginModelName = modelName
 
 	priceData, err := helper.ModelPriceHelperPerCall(c, info)
 	if err != nil {
@@ -211,18 +212,24 @@ func RelaySwapFace(c *gin.Context, info *relaycommon.RelayInfo) *dto.MidjourneyR
 		}
 	}
 
-	userQuota, err := model.GetUserQuota(info.UserId, false)
-	if err != nil {
-		return &dto.MidjourneyResponse{
-			Code:        4,
-			Description: err.Error(),
+	edgeSettled := false
+	if common.IsEdgeMode() {
+		info.ForcePreConsume = true
+		if apiErr := service.PreConsumeBilling(c, priceData.Quota, info); apiErr != nil {
+			return service.MidjourneyErrorWrapper(constant.MjRequestError, apiErr.Error())
 		}
-	}
-
-	if userQuota-priceData.Quota < 0 {
-		return &dto.MidjourneyResponse{
-			Code:        4,
-			Description: "quota_not_enough",
+		defer func() {
+			if !edgeSettled && info.Billing != nil {
+				info.Billing.Refund(c)
+			}
+		}()
+	} else {
+		userQuota, err := model.GetUserQuota(info.UserId, false)
+		if err != nil {
+			return &dto.MidjourneyResponse{Code: 4, Description: err.Error()}
+		}
+		if userQuota-priceData.Quota < 0 {
+			return &dto.MidjourneyResponse{Code: 4, Description: "quota_not_enough"}
 		}
 	}
 	requestURL := getMjRequestPath(c.Request.URL.String())
@@ -234,6 +241,14 @@ func RelaySwapFace(c *gin.Context, info *relaycommon.RelayInfo) *dto.MidjourneyR
 	}
 	defer func() {
 		if mjResp.StatusCode == 200 && mjResp.Response.Code == 1 {
+			if common.IsEdgeMode() {
+				if err := service.SettleBilling(c, info, priceData.Quota); err != nil {
+					common.SysLog("error settling edge Midjourney quota: " + err.Error())
+					return
+				}
+				edgeSettled = true
+				return
+			}
 			err := service.PostConsumeQuota(info, priceData.Quota, 0, true)
 			if err != nil {
 				common.SysLog("error consuming token remain quota: " + err.Error())
@@ -509,6 +524,7 @@ func RelayMidjourneySubmit(c *gin.Context, relayInfo *relaycommon.RelayInfo) *dt
 	fullRequestURL := fmt.Sprintf("%s%s", baseURL, requestURL)
 
 	modelName := service.CovertMjpActionToModelName(midjRequest.Action)
+	relayInfo.OriginModelName = modelName
 
 	priceData, err := helper.ModelPriceHelperPerCall(c, relayInfo)
 	if err != nil {
@@ -518,18 +534,24 @@ func RelayMidjourneySubmit(c *gin.Context, relayInfo *relaycommon.RelayInfo) *dt
 		}
 	}
 
-	userQuota, err := model.GetUserQuota(relayInfo.UserId, false)
-	if err != nil {
-		return &dto.MidjourneyResponse{
-			Code:        4,
-			Description: err.Error(),
+	reservationBound := false
+	if common.IsEdgeMode() && consumeQuota {
+		relayInfo.ForcePreConsume = true
+		if apiErr := service.PreConsumeBilling(c, priceData.Quota, relayInfo); apiErr != nil {
+			return service.MidjourneyErrorWrapper(constant.MjRequestError, apiErr.Error())
 		}
-	}
-
-	if consumeQuota && userQuota-priceData.Quota < 0 {
-		return &dto.MidjourneyResponse{
-			Code:        4,
-			Description: "quota_not_enough",
+		defer func() {
+			if !reservationBound && relayInfo.Billing != nil {
+				relayInfo.Billing.Refund(c)
+			}
+		}()
+	} else if consumeQuota {
+		userQuota, err := model.GetUserQuota(relayInfo.UserId, false)
+		if err != nil {
+			return &dto.MidjourneyResponse{Code: 4, Description: err.Error()}
+		}
+		if userQuota-priceData.Quota < 0 {
+			return &dto.MidjourneyResponse{Code: 4, Description: "quota_not_enough"}
 		}
 	}
 
@@ -540,7 +562,7 @@ func RelayMidjourneySubmit(c *gin.Context, relayInfo *relaycommon.RelayInfo) *dt
 	midjResponse := &midjResponseWithStatus.Response
 
 	defer func() {
-		if consumeQuota && midjResponseWithStatus.StatusCode == 200 {
+		if consumeQuota && midjResponseWithStatus.StatusCode == 200 && !common.IsEdgeMode() {
 			err := service.PostConsumeQuota(relayInfo, priceData.Quota, 0, true)
 			if err != nil {
 				common.SysLog("error consuming token remain quota: " + err.Error())
@@ -587,7 +609,18 @@ func RelayMidjourneySubmit(c *gin.Context, relayInfo *relaycommon.RelayInfo) *dt
 		Progress:    "0%",
 		FailReason:  "",
 		ChannelId:   c.GetInt("channel_id"),
+		TokenId:     relayInfo.TokenId,
+		Group:       relayInfo.UsingGroup,
 		Quota:       priceData.Quota,
+	}
+	if common.IsEdgeMode() && consumeQuota && relayInfo.EdgePricingPolicy != nil {
+		midjourneyTask.EdgeReservationID = relayInfo.EdgeReservationID
+		midjourneyTask.BillingContext = &model.TaskBillingContext{
+			ModelPrice: priceData.ModelPrice, GroupRatio: priceData.GroupRatioInfo.GroupRatio,
+			ModelRatio: priceData.ModelRatio, OtherRatios: priceData.OtherRatios(), OriginModelName: modelName,
+			PerCallBilling: true, PricingPolicyID: relayInfo.EdgePricingPolicy.PolicyID,
+			PricingPolicyVersion: relayInfo.EdgePricingPolicy.Version, BillingMode: string(relayInfo.EdgePricingPolicy.BillingMode),
+		}
 	}
 	if midjResponse.Code == 3 {
 		//无实例账号自动禁用渠道（No available account instance）
@@ -637,6 +670,21 @@ func RelayMidjourneySubmit(c *gin.Context, relayInfo *relaycommon.RelayInfo) *dt
 		return &dto.MidjourneyResponse{
 			Code:        4,
 			Description: "insert_midjourney_task_failed",
+		}
+	}
+	if common.IsEdgeMode() && consumeQuota {
+		if err := model.BindEdgeLocalReservationOwner(
+			model.DB, relayInfo.EdgeReservationID, "midjourney", fmt.Sprintf("midjourney-%d", midjourneyTask.Id), time.Now().UnixMilli(),
+		); err != nil {
+			midjourneyTask.EdgeReservationID = ""
+			_ = midjourneyTask.Update()
+			return &dto.MidjourneyResponse{Code: 4, Description: "bind_midjourney_reservation_failed"}
+		}
+		reservationBound = true
+		if midjourneyTask.Status == "SUCCESS" && midjourneyTask.Progress == "100%" {
+			if err := service.FinalizeEdgeMidjourneyBilling(c, midjourneyTask); err != nil {
+				return &dto.MidjourneyResponse{Code: 4, Description: "settle_midjourney_reservation_failed"}
+			}
 		}
 	}
 

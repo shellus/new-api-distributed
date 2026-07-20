@@ -152,6 +152,10 @@ func (asyncTaskPollHandler) Run(ctx context.Context, task *model.SystemTask, run
 	finishSystemTaskHandler(task, runnerID, model.SystemTaskStatusSucceeded, summary, nil)
 }
 
+func RunEdgeMidjourneyPollingOnce(ctx context.Context) {
+	runMidjourneyTaskUpdateOnce(ctx, nil)
+}
+
 func finishSystemTaskHandler(task *model.SystemTask, runnerID string, status model.SystemTaskStatus, result any, runErr error) {
 	errorMessage := ""
 	if runErr != nil {

@@ -202,6 +202,9 @@ func ModelPriceHelper(c *gin.Context, info *relaycommon.RelayInfo, promptTokens 
 
 // ModelPriceHelperPerCall 按次/按量计费的 PriceHelper (MJ、Task)
 func ModelPriceHelperPerCall(c *gin.Context, info *relaycommon.RelayInfo) (types.PriceData, error) {
+	if common.IsEdgeMode() {
+		return edgeModelPriceHelperPerCall(c, info)
+	}
 	groupRatioInfo := HandleGroupRatio(c, info)
 
 	modelPrice, success := ratio_setting.GetModelPrice(info.OriginModelName, true)
@@ -270,6 +273,13 @@ func ModelPriceHelperPerCall(c *gin.Context, info *relaycommon.RelayInfo) (types
 }
 
 func HasModelBillingConfig(modelName string) bool {
+	if common.IsEdgeMode() {
+		if model.DB == nil {
+			return false
+		}
+		policies, err := model.GetEdgeLocalPricing(model.DB, modelName)
+		return err == nil && len(policies) == 1
+	}
 	if _, ok := ratio_setting.GetModelPrice(modelName, false); ok {
 		return true
 	}
@@ -286,6 +296,21 @@ func HasModelBillingConfig(modelName string) bool {
 func modelPriceHelperTiered(c *gin.Context, info *relaycommon.RelayInfo, promptTokens int, meta *types.TokenCountMeta, groupRatioInfo types.GroupRatioInfo) (types.PriceData, error) {
 	exprStr, ok := billing_setting.GetBillingExpr(info.OriginModelName)
 	if !ok {
+		return types.PriceData{}, fmt.Errorf("model %s is configured as tiered_expr but has no billing expression", info.OriginModelName)
+	}
+	return modelPriceHelperTieredExpression(c, info, promptTokens, meta, groupRatioInfo, exprStr, common.QuotaPerUnit)
+}
+
+func modelPriceHelperTieredExpression(
+	c *gin.Context,
+	info *relaycommon.RelayInfo,
+	promptTokens int,
+	meta *types.TokenCountMeta,
+	groupRatioInfo types.GroupRatioInfo,
+	exprStr string,
+	quotaPerUnit float64,
+) (types.PriceData, error) {
+	if strings.TrimSpace(exprStr) == "" {
 		return types.PriceData{}, fmt.Errorf("model %s is configured as tiered_expr but has no billing expression", info.OriginModelName)
 	}
 
@@ -309,7 +334,7 @@ func modelPriceHelperTiered(c *gin.Context, info *relaycommon.RelayInfo, promptT
 	}
 
 	// Expression coefficients are $/1M tokens prices; convert to quota the same way per-call billing does.
-	quotaBeforeGroup := rawCost / 1_000_000 * common.QuotaPerUnit
+	quotaBeforeGroup := rawCost / 1_000_000 * quotaPerUnit
 	preConsumedQuota, err := billingexpr.QuotaRoundStrict(quotaBeforeGroup * groupRatioInfo.GroupRatio)
 	if err != nil {
 		return types.PriceData{}, err
@@ -335,7 +360,7 @@ func modelPriceHelperTiered(c *gin.Context, info *relaycommon.RelayInfo, promptT
 		EstimatedQuotaBeforeGroup: quotaBeforeGroup,
 		EstimatedQuotaAfterGroup:  preConsumedQuota,
 		EstimatedTier:             trace.MatchedTier,
-		QuotaPerUnit:              common.QuotaPerUnit,
+		QuotaPerUnit:              quotaPerUnit,
 		ExprVersion:               billingexpr.ExprVersion(exprStr),
 	}
 	info.TieredBillingSnapshot = snapshot

@@ -14,7 +14,7 @@
 - 上游默认 `main.go` 继续构建 master，减少后续合并冲突。
 - 新增 `cmd/newapi-edge` 作为 edge 编译入口。
 - 公共启动流程提取为可复用 application package，两个入口通过运行模式选择路由和后台任务。
-- edge 首期通过运行模式关闭无关能力，不大量删除上游源码；稳定后再评估编译级裁剪。
+- edge 通过运行模式关闭管理后台等控制面能力，用户侧 AI 数据面由 master/edge 共享注册表完整注册；稳定后再评估编译级裁剪。
 - 通信概览以 [distributed-architecture.md](./distributed-architecture.md) 为准。
 - 主从配置事实来源与节点地址语义以 [distributed-configuration.md](./distributed-configuration.md) 为准。
 
@@ -155,17 +155,17 @@ edge 不实现协议适配、流式转发、OAuth 凭证调度或第二套计费
 - 零额度免费 lease、实际用量高于预扣、staged settlement 重启恢复、乱序/冲突区块回滚和孤儿 reservation fail-closed 由确定性数据库回归测试覆盖。
 - 真实 CPA 使用隔离凭证完成加载、模型发现和上游请求转发；上游账户返回 429 用量上限错误。成功响应的四种协议模式由隔离确定性 CPA 实例验证，不在仓库中保存凭证、地址或本机路径。
 
-## 首期边界
+## v1 历史边界（已由 ADR 0004 与 ADR 0005 替代）
 
-- 图片、视频、异步任务和 Realtime 在完成独立计费验证前不开放。
-- Chat/Responses 中的图片、音频、视频、截图、内置搜索等无法由 v1 usage 与价格策略完整表达的输入同样在访问 CPA 前拒绝。
+- v1 曾不开放图片、视频、异步任务和 Realtime；当前完整数据面已改用通用 Billing Receipt。
+- v1 曾按请求体形状拒绝 Chat/Responses 多模态和内置工具；当前 edge 不再维护此类白名单。
 - CPA 只允许 edge 通过本机或容器私网访问。
 - token 撤销延迟由增量同步频率、快照有效期和剩余 lease 共同限制。
 - 无本地 lease 且 master 不可用时，请求 fail closed。
 - 无健康且声明了可用模型的 CPA，或 accounting readiness 关闭时，请求 fail closed。
 - 节点由同一运营方控制；签名和认证主要防止伪造、重放和配置错误，不尝试防御恶意节点运营者。
 - master 不审批 edge 的公开访问地址。节点凭证是信任边界；未来的公网地址探测只形成观测，不能修改声明或参与 edge 本地 readiness。
-- edge v1 只执行倍率和固定价格；tiered expression 模型在进入 relay 前拒绝。
+- v1 只执行倍率和固定价格；当前快照和 master 重算已支持可表达的 tiered expression。
 
 ## 风险控制
 
@@ -173,15 +173,15 @@ edge 不实现协议适配、流式转发、OAuth 凭证调度或第二套计费
 |------|------|
 | 形成第二套网关 | 协议、relay、计费和鉴权上下文直接复用同仓库 package |
 | 上游合并困难 | 默认入口保持兼容，新增业务集中在 edge package 和少量启动分支 |
-| 多节点超卖 | master 签发 lease 时事务型预留额度 |
-| edge 本地结算失败丢账 | 精确 usage 先 staged；lease、usage event 和 outbox 再原子提交；失败时 accounting fail closed 并从 staged payload 恢复 |
-| edge 硬中断留下不确定 reservation | 不自动退款或关闭相关 lease；保留 SQLite 供恢复，并把对应故障窗口纳入真实 E2E |
+| 多节点超卖 | 每节点负余额下限、master 滑动窗口和 settlement circuit 限制风险敞口 |
+| edge 本地结算失败丢账 | 精确 usage 先 staged；余额 overlay、usage event 和 outbox 再原子提交；失败时 accounting fail closed 并从 staged payload 恢复 |
+| edge 硬中断留下不确定 reservation | 同步请求保持 fail closed；异步任务 reservation 绑定任务所有权并按终态恢复，保留 SQLite 供核查 |
 | 重复结算 | 节点代次、连续序号、持久化请求 receipt 和 master 唯一约束 |
 | 日志或统计重复投影 | durable master outbox、全局 billing event key、consume log 唯一键和 `quota_data` 事件标记 |
 | 首次请求依赖 master 鉴权 | 全量同步安全令牌指纹，鉴权始终本地完成 |
-| master 失联停服 | 用户请求不访问 master，已有 lease 内继续工作 |
-| CPA 故障仍接流量 | `HEAD /healthz` 探测、渠道原子禁用和 `/readyz` fail closed |
-| 快照切换与在途请求混用策略 | 数据面策略读写锁；reservation 固定 lease、快照和价格版本，跨快照重试被拒绝 |
+| master 失联停服 | 用户请求不访问 master，在最后余额投影、有效订阅/token 和本地负下限内继续工作 |
+| CPA 故障仍接流量 | 真实请求失败进入共享重试/渠道错误路径；缺少本地执行配置的渠道保持禁用 |
+| 快照切换与在途请求混用策略 | 数据面策略读写锁；reservation 固定快照、价格和余额版本，跨快照重试被拒绝 |
 
 ## 验证
 
@@ -199,26 +199,26 @@ go build ./cmd/newapi-edge
 (cd web/classic && bun run build)
 ```
 
-真实链路验收必须使用隔离数据库、临时环境变量和仅供测试的 CPA 凭证。结果至少记录 HTTP 状态、流式是否正常结束、CPA 是否被实际访问、edge lease/reservation/outbox 状态、master usage/lease/outbox 状态，以及 consume log 和 `quota_data` 的前后计数。凭证、真实地址和本机路径不进入项目文档或测试输出。
+真实链路验收必须使用隔离数据库、临时环境变量和仅供测试的 CPA 凭证。结果至少记录 HTTP 状态、流式是否正常结束、CPA 是否被实际访问、edge balance/reservation/task/outbox 状态、master usage/balance/outbox 状态，以及 consume log 和 `quota_data` 的前后计数。凭证、真实地址和本机路径不进入项目文档或测试输出。
 
 通过条件：
 
 - 默认 master 行为与上游基线一致。
 - master 和 edge 共用协议、计费与 relay package，没有复制实现。
 - 首次请求可以使用本地 token 指纹完成鉴权。
-- 无 lease 的请求不会访问 CPA。
+- 余额未初始化或 reservation 失败的请求不会访问 CPA。
 - master 延迟或暂时失联不进入正常用户请求路径。
-- 免费请求使用零额度 lease，不因用户钱包为零而偏离 master 计费语义。
-- 本地上游全部不可用、快照过期或 accounting 未恢复时，`/readyz` 和 admission 同时 fail closed。
+- 免费请求使用零额度 reservation，不因用户钱包为零而偏离 master 计费语义。
+- 本地上游执行条件不可用、尚无已应用快照、余额未初始化或 accounting 未恢复时，`/readyz` 和 admission 同时 fail closed；已应用快照的 TTL 过期只冻结策略变化，不中断离线数据面。
 - 已 staged 的请求不能退款；恢复后只生成一条 usage event 和一条 edge outbox。
 - 重复结算最多产生一次权威扣费、一次 consume log 和一次 `quota_data` 累加。
 - edge 关闭期间不再创建 reservation，已完成请求的 usage 在数据库关闭前进入 durable outbox。
 
 当前状态：五个阶段均已完成。真实链路、故障边界、重放幂等、重启恢复和账务数据库核对结果已形成上述验收记录；后续变更仍须重新执行本节合并门和与变更相关的故障注入测试。
 
-## 余额复制替代配额租约（Phase A-D 已实现）
+## 当前 v2 实施状态（Phase A-E 已实现）
 
-本节替代现有租约方向，设计依据见 [ADR 0004](./adr/0004-replicated-balances-and-bounded-oversell.md) 与 [分布式余额复制设计](./distributed-balance-replication.md)。第一至第五阶段保留为 v1 历史验收基线，不代表租约继续作为 v2 回退路径。Phase A-D 已完成代码与后端合并门；Phase E 的部署、真实链路和线上验收尚未执行。
+本节替代现有租约方向，设计依据见 [ADR 0004](./adr/0004-replicated-balances-and-bounded-oversell.md)、[ADR 0005](./adr/0005-complete-edge-data-plane.md) 与 [分布式余额复制设计](./distributed-balance-replication.md)。第一至第五阶段保留为 v1 历史验收基线，不代表租约继续作为 v2 回退路径。Phase A-E 已完成代码与针对性后端验证；Phase F 的完整合并门、部署、真实链路和线上验收尚未执行。
 
 ### Phase A：设计与审阅门禁（已审阅通过）
 
@@ -255,7 +255,15 @@ go build ./cmd/newapi-edge
 5. 实现人工恢复 epoch：管理员核账后清除 circuit，edge 为同一 durable block 轮换 HTTP request ID 后重试，block 内容和 digest 不变。
 6. TDD 覆盖熔断边界、并发区块、拒绝无部分扣账、旧拒绝 receipt、不同时序回放和人工恢复；测试通过并经用户确认后才提交。
 
-### Phase E：全量验收与部署
+### Phase E：完整数据面与通用 Billing Receipt（已实现）
+
+1. master 与 edge 从共享 helper 注册用户数据面路由，edge 能力声明改为可扩展的 `data_plane`，移除 Chat/Responses 专用请求形状和模型白名单。
+2. 快照覆盖全部可计费模型，并投影多模态 token 倍率、工具调用价格、请求倍率和可表达的 tiered expression；edge 形成 Billing Receipt，master 使用对应快照重新计算。
+3. edge token 鉴权兼容 OpenAI WebSocket、Anthropic、Gemini 和 Midjourney 的凭证位置，不查询 master 的 User/Token 表。
+4. 视频、Suno 和 Midjourney 等异步任务保存在 edge SQLite；reservation 与任务绑定，成功结算、失败退款、轮询和重启恢复均在 edge 本地完成。
+5. 路由一致性测试比较 master 与 edge 的完整用户数据面；结算测试覆盖无 token usage 的任务收据，恢复测试覆盖零额度任务和“账本已结算、任务指针未清理”的崩溃窗口。
+
+### Phase F：全量验收与部署
 
 1. 执行本计划“验证”中的全量后端、race、vet、build 和两套前端构建门；额外验证 SQLite、MySQL、PostgreSQL 的余额 diff 与 master 扣账事务。
 2. 升级前停止旧 edge admission，恢复 staged settlement，上传全部 outbox，关闭全部 v1 lease 并确认 master 没有非终态租约；未满足时禁止切换。
@@ -264,7 +272,7 @@ go build ./cmd/newapi-edge
 5. 恢复 master，验证 settlement 回放只扣一次权威账，后续 heartbeat diff 清除 unsettled overlay，edge 与 master 收敛。
 6. 双节点同时消费同一低余额账户，验证允许超卖、权威余额可为负、master 普通鉴权阻止继续消费，并验证负下限与节点滑动窗口熔断。
 7. 验证旧 v1 edge 无余额 full dataset 时明确失败，不静默回退租约。
-8. Phase E 前不操作生产容器或远程节点；部署和真实链路验收仍需用户单独授权。
+8. Phase F 前不操作生产容器或远程节点；部署和真实链路验收仍需用户单独授权。
 
 ## 回滚
 
