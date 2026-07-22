@@ -1370,6 +1370,12 @@ func edgeValidRoutingPolicyV1() EdgeRoutingPolicyV1 {
 				},
 			},
 		},
+		PromptSafety: &EdgePromptSafetyPolicyV1{
+			CheckSensitiveEnabled:         true,
+			CheckSensitiveOnPromptEnabled: true,
+			StopOnSensitiveEnabled:        true,
+			SensitiveWords:                []string{"fingerprint-alpha", "指纹乙"},
+		},
 	}
 }
 
@@ -1714,6 +1720,27 @@ func TestEdgeRoutingPolicyV1Validate(t *testing.T) {
 	policy.Rules = append(policy.Rules, policy.Rules[0])
 	assert.Error(t, policy.Validate())
 
+	promptSafety := *edgeValidRoutingPolicyV1().PromptSafety
+	require.NoError(t, promptSafety.Validate())
+	promptSafety.SensitiveWords = []string{""}
+	assert.Error(t, promptSafety.Validate())
+	promptSafety.SensitiveWords = []string{" surrounding whitespace "}
+	assert.Error(t, promptSafety.Validate())
+	promptSafety.SensitiveWords = []string{strings.Repeat("x", EdgeControlMaxPromptSafetyWordBytesV1+1)}
+	assert.Error(t, promptSafety.Validate())
+	promptSafety.SensitiveWords = make([]string, EdgeControlMaxPromptSafetyWordsV1+1)
+	for i := range promptSafety.SensitiveWords {
+		promptSafety.SensitiveWords[i] = "x"
+	}
+	assert.Error(t, promptSafety.Validate())
+	promptSafety.SensitiveWords = make([]string, EdgeControlMaxPromptSafetyTotalBytesV1/EdgeControlMaxPromptSafetyWordBytesV1+1)
+	for i := range promptSafety.SensitiveWords {
+		promptSafety.SensitiveWords[i] = strings.Repeat("x", EdgeControlMaxPromptSafetyWordBytesV1)
+	}
+	assert.Error(t, promptSafety.Validate())
+	promptSafety.SensitiveWords = []string{string([]byte{0xff})}
+	assert.Error(t, promptSafety.Validate())
+
 	page := edgeValidSnapshotPageResponseV1(EdgeSnapshotDatasetRoutingV1)
 	require.NoError(t, page.Validate())
 	page.Payload.Routing = append(page.Payload.Routing, edgeValidRoutingPolicyV1())
@@ -1748,6 +1775,12 @@ func TestEdgeRoutingPolicyV1StableJSON(t *testing.T) {
 				"include_model_name": false,
 				"include_rule_name": true
 			}]
+		},
+		"prompt_safety": {
+			"check_sensitive_enabled": true,
+			"check_sensitive_on_prompt_enabled": true,
+			"stop_on_sensitive_enabled": true,
+			"sensitive_words": ["fingerprint-alpha", "指纹乙"]
 		}
 	}`, string(encoded))
 	assert.NotContains(t, string(encoded), "param_override")

@@ -24,6 +24,7 @@ import (
 	"github.com/QuantumNous/new-api/pkg/edgeauth"
 	"github.com/QuantumNous/new-api/pkg/edgesnapshot"
 	"github.com/QuantumNous/new-api/pkg/edgetoken"
+	appsetting "github.com/QuantumNous/new-api/setting"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -461,14 +462,14 @@ func TestEdgeHeartbeatPersistsSettlementCircuitAndClosesAdmission(t *testing.T) 
 	assert.Equal(t, int64(3), state.SettlementCircuitEpoch)
 }
 
-func TestEdgeSnapshotApplyFailsClosedWhenRoutingInstallFails(t *testing.T) {
+func TestEdgeSnapshotApplyFailsClosedWhenDataPlanePolicyInstallFails(t *testing.T) {
 	fixture := newEdgeControlTransportFixture(t)
 	handler := &edgeControlTestHandler{t: t, fixture: fixture}
 	server := httptest.NewServer(handler)
 	defer server.Close()
 	client := newEdgeControlTestClient(t, fixture, server.URL)
 	store := newEdgeControlTestStore()
-	store.routingInstallErr = errors.New("install routing policy")
+	store.dataPlanePolicyInstallErr = errors.New("install data-plane policy")
 
 	edgeControlReady.Store(true)
 	t.Cleanup(func() {
@@ -484,13 +485,13 @@ func TestEdgeSnapshotApplyFailsClosedWhenRoutingInstallFails(t *testing.T) {
 	runner := edgeControlLoop{client: client, store: store, setReady: setReady, now: func() time.Time { return fixture.now }}
 
 	changed, err := runner.syncSnapshot(context.Background(), fixture.manifest, fixture.control)
-	require.ErrorContains(t, err, "install routing policy")
+	require.ErrorContains(t, err, "install data-plane policy")
 	assert.False(t, changed)
 	assert.Equal(t, 1, store.applyCountValue(), "the failure must cover the apply-succeeded/install-failed transition")
 	assert.False(t, EdgeControlReady(), "partially switched policy must not remain request-admissible")
 }
 
-func TestEdgeSnapshotApplyActivatesAfterRoutingInstall(t *testing.T) {
+func TestEdgeSnapshotApplyActivatesAfterDataPlanePolicyInstall(t *testing.T) {
 	fixture := newEdgeControlTransportFixture(t)
 	handler := &edgeControlTestHandler{t: t, fixture: fixture}
 	server := httptest.NewServer(handler)
@@ -522,7 +523,7 @@ func TestEdgeSnapshotApplyActivatesAfterRoutingInstall(t *testing.T) {
 	assert.True(t, EdgeControlReady())
 }
 
-func TestEdgeRoutingInstallRejectsPlaintextTokenAffinityMatcher(t *testing.T) {
+func TestEdgeDataPlanePolicyInstallRejectsPlaintextTokenAffinityMatcher(t *testing.T) {
 	db, err := model.OpenEdgeSQLite(filepath.Join(t.TempDir(), "edge-routing.db"))
 	require.NoError(t, err)
 	sqlDB, err := db.DB()
@@ -543,9 +544,48 @@ func TestEdgeRoutingInstallRejectsPlaintextTokenAffinityMatcher(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, db.Create(&model.EdgeLocalRoutingProjection{ID: 1, Payload: string(payload)}).Error)
 
-	err = (&edgeControlGormStore{db: db}).InstallRoutingPolicy(context.Background())
+	err = (&edgeControlGormStore{db: db}).InstallDataPlanePolicy(context.Background())
 	require.Error(t, err)
 	assert.ErrorIs(t, err, ErrEdgeControlProtocolViolation)
+}
+
+func TestEdgeDataPlanePolicyInstallAppliesPromptSafetyAndLegacyDefault(t *testing.T) {
+	previous := appsetting.GetSensitivePolicy()
+	t.Cleanup(func() { appsetting.ApplySensitivePolicy(previous) })
+
+	db, err := model.OpenEdgeSQLite(filepath.Join(t.TempDir(), "edge-data-plane-policy.db"))
+	require.NoError(t, err)
+	sqlDB, err := db.DB()
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, sqlDB.Close()) })
+
+	routing := dto.EdgeRoutingPolicyV1{
+		ChannelAffinity: dto.EdgeChannelAffinityPolicyV1{Enabled: false, MaxEntries: 100, DefaultTTLSeconds: 60},
+		PromptSafety: &dto.EdgePromptSafetyPolicyV1{
+			CheckSensitiveEnabled:         true,
+			CheckSensitiveOnPromptEnabled: false,
+			StopOnSensitiveEnabled:        false,
+			SensitiveWords:                []string{"fingerprint-alpha", "指纹乙"},
+		},
+	}
+	payload, err := common.Marshal(routing)
+	require.NoError(t, err)
+	require.NoError(t, db.Create(&model.EdgeLocalRoutingProjection{ID: 1, Payload: string(payload)}).Error)
+	require.NoError(t, (&edgeControlGormStore{db: db}).InstallDataPlanePolicy(context.Background()))
+	assert.Equal(t, appsetting.SensitivePolicy{
+		CheckEnabled:       true,
+		CheckPromptEnabled: false,
+		StopOnSensitive:    false,
+		Words:              []string{"fingerprint-alpha", "指纹乙"},
+	}, appsetting.GetSensitivePolicy())
+
+	appsetting.ApplySensitivePolicy(appsetting.SensitivePolicy{Words: []string{"stale"}})
+	routing.PromptSafety = nil
+	payload, err = common.Marshal(routing)
+	require.NoError(t, err)
+	require.NoError(t, db.Model(&model.EdgeLocalRoutingProjection{}).Where("id = ?", 1).Update("payload", string(payload)).Error)
+	require.NoError(t, (&edgeControlGormStore{db: db}).InstallDataPlanePolicy(context.Background()))
+	assert.Equal(t, appsetting.DefaultSensitivePolicy(), appsetting.GetSensitivePolicy())
 }
 
 type edgeControlTransportFixture struct {
@@ -908,14 +948,14 @@ func (h *edgeControlTestHandler) pageCallCount() int {
 }
 
 type edgeControlTestStore struct {
-	mu                  sync.Mutex
-	state               dto.EdgeSnapshotStateV1
-	expiresAt           int64
-	applyCount          int
-	channelRefreshCount int
-	routingInstallCount int
-	routingInstallErr   error
-	balance             model.EdgeLocalBalanceState
+	mu                          sync.Mutex
+	state                       dto.EdgeSnapshotStateV1
+	expiresAt                   int64
+	applyCount                  int
+	channelRefreshCount         int
+	dataPlanePolicyInstallCount int
+	dataPlanePolicyInstallErr   error
+	balance                     model.EdgeLocalBalanceState
 }
 
 func newEdgeControlTestStore() *edgeControlTestStore {
@@ -983,11 +1023,11 @@ func (s *edgeControlTestStore) RefreshChannelRuntime(context.Context) error {
 	return nil
 }
 
-func (s *edgeControlTestStore) InstallRoutingPolicy(context.Context) error {
+func (s *edgeControlTestStore) InstallDataPlanePolicy(context.Context) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.routingInstallCount++
-	return s.routingInstallErr
+	s.dataPlanePolicyInstallCount++
+	return s.dataPlanePolicyInstallErr
 }
 
 func (s *edgeControlTestStore) PendingSettlementBlock(context.Context) (*dto.EdgeSettlementBlockRequestV1, error) {
@@ -1015,7 +1055,7 @@ func (s *edgeControlTestStore) applyCountValue() int {
 func (s *edgeControlTestStore) runtimeRefreshCounts() (int, int) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.channelRefreshCount, s.routingInstallCount
+	return s.channelRefreshCount, s.dataPlanePolicyInstallCount
 }
 
 func edgeControlTestPayloadCount(dataset dto.EdgeSnapshotDatasetV1, payload dto.EdgeSnapshotPagePayloadV1) int {

@@ -24,6 +24,7 @@ import (
 	"github.com/QuantumNous/new-api/pkg/edgesnapshot"
 	"github.com/QuantumNous/new-api/pkg/edgetoken"
 	coreservice "github.com/QuantumNous/new-api/service"
+	appsetting "github.com/QuantumNous/new-api/setting"
 	"github.com/QuantumNous/new-api/setting/billing_setting"
 	"github.com/QuantumNous/new-api/setting/operation_setting"
 	"github.com/QuantumNous/new-api/setting/ratio_setting"
@@ -817,6 +818,18 @@ func captureEdgeSnapshotSettings(projection *edgeSnapshotProjection) error {
 	if err != nil {
 		return err
 	}
+	if edgePromptSafetySnapshotEnabled() {
+		policy := appsetting.GetSensitivePolicy()
+		routing.PromptSafety = &dto.EdgePromptSafetyPolicyV1{
+			CheckSensitiveEnabled:         policy.CheckEnabled,
+			CheckSensitiveOnPromptEnabled: policy.CheckPromptEnabled,
+			StopOnSensitiveEnabled:        policy.StopOnSensitive,
+			SensitiveWords:                append([]string(nil), policy.Words...),
+		}
+		if err := routing.Validate(); err != nil {
+			return fmt.Errorf("%w: prompt safety policy: %v", ErrEdgeSnapshotUnrepresentable, err)
+		}
+	}
 	projection.Routing = []dto.EdgeRoutingPolicyV1{routing}
 	return nil
 }
@@ -827,6 +840,10 @@ func edgeConsumeLogSnapshotFieldsEnabled() bool {
 
 func edgePreConsumedQuotaSnapshotEnabled() bool {
 	return common.GetEnvOrDefaultBool("EDGE_PRE_CONSUMED_QUOTA_SNAPSHOT_ENABLED", false)
+}
+
+func edgePromptSafetySnapshotEnabled() bool {
+	return common.GetEnvOrDefaultBool("EDGE_PROMPT_SAFETY_SNAPSHOT_ENABLED", false)
 }
 
 func filterEdgeSnapshotModelsByPricing(projection *edgeSnapshotProjection, billableModels map[string]struct{}) {

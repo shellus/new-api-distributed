@@ -14,6 +14,7 @@ import (
 	"github.com/QuantumNous/new-api/pkg/edgeauth"
 	"github.com/QuantumNous/new-api/pkg/edgesnapshot"
 	coreservice "github.com/QuantumNous/new-api/service"
+	appsetting "github.com/QuantumNous/new-api/setting"
 
 	"github.com/google/uuid"
 	"gorm.io/gorm"
@@ -46,7 +47,7 @@ type EdgeControlLocalStore interface {
 	ApplyControl(context.Context, dto.EdgeNodeControlConfigV1, int64) error
 	ApplyBalance(context.Context, dto.EdgeNodeControlConfigV1, dto.EdgeBalanceDeltaV2, int64) error
 	RefreshChannelRuntime(context.Context) error
-	InstallRoutingPolicy(context.Context) error
+	InstallDataPlanePolicy(context.Context) error
 	PendingSettlementBlock(context.Context) (*dto.EdgeSettlementBlockRequestV1, error)
 	BuildSettlementBlock(context.Context, dto.EdgeControlRequestMetaV1, string, int, int64, int64) (*dto.EdgeSettlementBlockRequestV1, error)
 	RefreshSettlementRequest(context.Context, string, dto.EdgeControlRequestMetaV1, int64) (*dto.EdgeSettlementBlockRequestV1, error)
@@ -295,7 +296,7 @@ func (r *edgeControlLoop) restoreLocalReadiness(ctx context.Context) error {
 		if err := r.store.RefreshChannelRuntime(ctx); err != nil {
 			return err
 		}
-		return r.store.InstallRoutingPolicy(ctx)
+		return r.store.InstallDataPlanePolicy(ctx)
 	}); err != nil {
 		return err
 	}
@@ -498,7 +499,7 @@ func (r *edgeControlLoop) syncSnapshot(ctx context.Context, manifest dto.EdgeSna
 			if err := r.store.RefreshChannelRuntime(ctx); err != nil {
 				return err
 			}
-			if err := r.store.InstallRoutingPolicy(ctx); err != nil {
+			if err := r.store.InstallDataPlanePolicy(ctx); err != nil {
 				return err
 			}
 			return nil
@@ -519,7 +520,7 @@ func (r *edgeControlLoop) syncSnapshot(ctx context.Context, manifest dto.EdgeSna
 		if err := r.store.ApplySnapshot(ctx, projection); err != nil {
 			return err
 		}
-		if err := r.store.InstallRoutingPolicy(ctx); err != nil {
+		if err := r.store.InstallDataPlanePolicy(ctx); err != nil {
 			return err
 		}
 		return nil
@@ -841,17 +842,33 @@ func (s *edgeControlGormStore) RefreshChannelRuntime(ctx context.Context) error 
 	return model.RefreshEdgeLocalChannelRuntime(s.db.WithContext(ctx))
 }
 
-func (s *edgeControlGormStore) InstallRoutingPolicy(ctx context.Context) error {
+func (s *edgeControlGormStore) InstallDataPlanePolicy(ctx context.Context) error {
 	routing, err := model.GetEdgeLocalRouting(s.db.WithContext(ctx))
 	if err != nil {
 		return err
+	}
+	if err := routing.Validate(); err != nil {
+		return fmt.Errorf("%w: invalid data-plane policy: %v", ErrEdgeControlProtocolViolation, err)
 	}
 	for _, rule := range routing.ChannelAffinity.Rules {
 		if err := validateEdgeChannelAffinityRuleSemantics(rule); err != nil {
 			return fmt.Errorf("%w: affinity rule %q: %v", ErrEdgeControlProtocolViolation, rule.Name, err)
 		}
 	}
-	return coreservice.SetEdgeChannelAffinityPolicy(routing.ChannelAffinity)
+	if err := coreservice.SetEdgeChannelAffinityPolicy(routing.ChannelAffinity); err != nil {
+		return err
+	}
+	promptSafety := appsetting.DefaultSensitivePolicy()
+	if routing.PromptSafety != nil {
+		promptSafety = appsetting.SensitivePolicy{
+			CheckEnabled:       routing.PromptSafety.CheckSensitiveEnabled,
+			CheckPromptEnabled: routing.PromptSafety.CheckSensitiveOnPromptEnabled,
+			StopOnSensitive:    routing.PromptSafety.StopOnSensitiveEnabled,
+			Words:              append([]string(nil), routing.PromptSafety.SensitiveWords...),
+		}
+	}
+	appsetting.ApplySensitivePolicy(promptSafety)
+	return nil
 }
 
 func (s *edgeControlGormStore) PendingSettlementBlock(ctx context.Context) (*dto.EdgeSettlementBlockRequestV1, error) {

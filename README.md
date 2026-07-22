@@ -23,7 +23,7 @@ New API Distributed 在同一个 Go module 中为 New API 增加 master/edge 分
 ## 核心能力
 
 - 保留上游兼容的 master 构建入口，关闭分布式开关时不注册 edge 控制面。
-- 使用 master 签名的最小策略快照，把用户、令牌、模型、分组、渠道和计费策略同步到 edge。
+- 使用 master 签名的最小策略快照，把用户、令牌、模型、分组、渠道、提示词安全和计费策略同步到 edge。
 - 使用 edge 本地签名令牌快照完成请求鉴权，正常请求路径不对 master 发起同步调用。
 - master 与 edge 从共享路由注册表暴露同一套用户侧 AI 数据面，包括 Responses 压缩、多模态、Realtime 和异步任务；edge 不回源 master。
 - 使用余额复制、本地 reservation、结算区块和幂等事件维护用户钱包、订阅与 token 额度一致性。

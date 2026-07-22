@@ -12,6 +12,7 @@ import (
 	"github.com/QuantumNous/new-api/dto"
 	"github.com/QuantumNous/new-api/model"
 	"github.com/QuantumNous/new-api/pkg/edgeauth"
+	appsetting "github.com/QuantumNous/new-api/setting"
 	"github.com/QuantumNous/new-api/setting/billing_setting"
 	"github.com/QuantumNous/new-api/setting/operation_setting"
 	"github.com/QuantumNous/new-api/setting/ratio_setting"
@@ -69,6 +70,7 @@ func TestEdgeSnapshotCompilerProjectsCanonicalSafePolicy(t *testing.T) {
 func TestEdgeSnapshotCompilerMasterFirstOmitsNewLogFieldsByDefault(t *testing.T) {
 	t.Setenv("EDGE_CONSUME_LOG_SNAPSHOT_FIELDS_ENABLED", "false")
 	t.Setenv("EDGE_PRE_CONSUMED_QUOTA_SNAPSHOT_ENABLED", "false")
+	t.Setenv("EDGE_PROMPT_SAFETY_SNAPSHOT_ENABLED", "false")
 	projection, err := projectEdgeSnapshotDatabaseState(edgeSnapshotCompilerTestState())
 	require.NoError(t, err)
 	require.NoError(t, captureEdgeSnapshotSettings(projection))
@@ -77,12 +79,38 @@ func TestEdgeSnapshotCompilerMasterFirstOmitsNewLogFieldsByDefault(t *testing.T)
 		Users:          projection.Users,
 		Groups:         projection.Groups,
 		Pricing:        projection.Pricing,
+		Routing:        projection.Routing,
 	})
 	require.NoError(t, err)
 	assert.NotContains(t, string(payload), `"token_name"`)
 	assert.NotContains(t, string(payload), `"record_ip_log"`)
 	assert.NotContains(t, string(payload), `"special_ratio"`)
 	assert.NotContains(t, string(payload), `"pre_consumed_quota"`)
+	assert.NotContains(t, string(payload), `"prompt_safety"`)
+}
+
+func TestEdgeSnapshotCompilerProjectsPromptSafetyAfterRollout(t *testing.T) {
+	t.Setenv("EDGE_PROMPT_SAFETY_SNAPSHOT_ENABLED", "true")
+	previous := appsetting.GetSensitivePolicy()
+	t.Cleanup(func() { appsetting.ApplySensitivePolicy(previous) })
+	appsetting.ApplySensitivePolicy(appsetting.SensitivePolicy{
+		CheckEnabled:       true,
+		CheckPromptEnabled: false,
+		StopOnSensitive:    false,
+		Words:              []string{"fingerprint-alpha", "指纹乙"},
+	})
+
+	projection, err := projectEdgeSnapshotDatabaseState(edgeSnapshotCompilerTestState())
+	require.NoError(t, err)
+	require.NoError(t, captureEdgeSnapshotSettings(projection))
+	require.Len(t, projection.Routing, 1)
+	require.NotNil(t, projection.Routing[0].PromptSafety)
+	assert.Equal(t, dto.EdgePromptSafetyPolicyV1{
+		CheckSensitiveEnabled:         true,
+		CheckSensitiveOnPromptEnabled: false,
+		StopOnSensitiveEnabled:        false,
+		SensitiveWords:                []string{"fingerprint-alpha", "指纹乙"},
+	}, *projection.Routing[0].PromptSafety)
 }
 
 func TestEdgeSnapshotCompilerProjectsPreConsumedQuotaAfterRollout(t *testing.T) {

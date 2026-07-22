@@ -17,11 +17,13 @@ edge 获取的是“能够在本地完成请求所需的最小业务快照”，
 主要包括：
 
 - 完整的令牌鉴权索引：覆盖允许访问 edge 的有效令牌安全指纹，以及鉴权所需的用户、分组、模型权限和启停状态。
-- 业务策略：模型、分组、渠道行为和计费规则的版本化快照。
+- 业务策略：模型、分组、渠道行为、提示词安全和计费规则的版本化快照。
 - 余额向量：钱包、订阅和 token 的权威余额副本，以及每节点 revision 与结算回冲水位。
 - 控制变化：令牌撤销、策略更新、节点停用和配置版本变化。
 
 edge 不接收明文 API token、中心数据库、其他节点数据或 CPA OAuth 凭证。CPA 凭证由节点本机管理。
+
+Prompt Safety Policy 由 master 后台 Option 生成，包含敏感检查开关与指纹词表。它作为签名业务快照中的类型字段下发，edge 不读取本地 Option 或维护第二份词表；快照安装与本地鉴权、路由和价格投影共用数据面策略写锁，因此一次请求只会观察到一份完整策略。
 
 用户第一次访问某个 edge 时，鉴权和余额 admission 都在本地完成，不需要查询 master。第一次 `edge-control.v2` heartbeat 必须完成余额 full 初始化；之后 heartbeat 只下发相对已确认 revision 的 delta，断档时重新 full。master 不可用时，edge 继续使用最后一份已验证策略、confirmed balance 和本地 overlay，直到任一有限账户无法在新 reservation 后保持非负。
 

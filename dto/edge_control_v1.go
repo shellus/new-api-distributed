@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"regexp"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/pkg/billingexpr"
@@ -57,6 +58,9 @@ const (
 	EdgeControlMaxAffinitySourcePathLengthV1    = 1024
 	EdgeControlMaxAffinityEntriesV1             = 10_000_000
 	EdgeControlMaxAffinityTTLSecondsV1          = int64(31_536_000)
+	EdgeControlMaxPromptSafetyWordsV1           = 10_000
+	EdgeControlMaxPromptSafetyWordBytesV1       = 4 * 1024
+	EdgeControlMaxPromptSafetyTotalBytesV1      = 1024 * 1024
 	EdgeControlMaxBalanceItemsV2                = 100_000
 	EdgeControlMaxConsumeLogSnapshotBytesV1     = 64 * 1024
 	EdgeControlMaxConsumeLogOtherBytesV1        = 48 * 1024
@@ -518,11 +522,19 @@ type EdgeChannelAffinityPolicyV1 struct {
 	Rules                 []EdgeChannelAffinityRuleV1 `json:"rules"`
 }
 
-// EdgeRoutingPolicyV1 is the single aggregate record in a routing snapshot
-// page. Keeping it typed prevents general option maps or channel overrides
-// from crossing the control plane.
+type EdgePromptSafetyPolicyV1 struct {
+	CheckSensitiveEnabled         bool     `json:"check_sensitive_enabled"`
+	CheckSensitiveOnPromptEnabled bool     `json:"check_sensitive_on_prompt_enabled"`
+	StopOnSensitiveEnabled        bool     `json:"stop_on_sensitive_enabled"`
+	SensitiveWords                []string `json:"sensitive_words"`
+}
+
+// EdgeRoutingPolicyV1 is the single aggregate record in the routing dataset.
+// It carries typed request-time policies while preventing general option maps
+// or channel overrides from crossing the control plane.
 type EdgeRoutingPolicyV1 struct {
 	ChannelAffinity EdgeChannelAffinityPolicyV1 `json:"channel_affinity"`
+	PromptSafety    *EdgePromptSafetyPolicyV1   `json:"prompt_safety,omitempty"`
 }
 
 // EdgeSnapshotPagePayloadV1 is a typed union. The Dataset field on the page
@@ -1756,7 +1768,38 @@ func (p EdgeChannelAffinityPolicyV1) Validate() error {
 }
 
 func (p EdgeRoutingPolicyV1) Validate() error {
-	return p.ChannelAffinity.Validate()
+	if err := p.ChannelAffinity.Validate(); err != nil {
+		return err
+	}
+	if p.PromptSafety != nil {
+		return p.PromptSafety.Validate()
+	}
+	return nil
+}
+
+func (p EdgePromptSafetyPolicyV1) Validate() error {
+	if len(p.SensitiveWords) > EdgeControlMaxPromptSafetyWordsV1 {
+		return fmt.Errorf("prompt_safety sensitive_words exceeds %d items", EdgeControlMaxPromptSafetyWordsV1)
+	}
+	totalBytes := 0
+	for i, word := range p.SensitiveWords {
+		if !utf8.ValidString(word) {
+			return fmt.Errorf("prompt_safety sensitive_words[%d] must be valid UTF-8", i)
+		}
+		if err := validateEdgeControlTextV1(
+			fmt.Sprintf("prompt_safety sensitive_words[%d]", i),
+			word,
+			EdgeControlMaxPromptSafetyWordBytesV1,
+			false,
+		); err != nil {
+			return err
+		}
+		totalBytes += len(word)
+		if totalBytes > EdgeControlMaxPromptSafetyTotalBytesV1 {
+			return fmt.Errorf("prompt_safety sensitive_words exceeds %d total bytes", EdgeControlMaxPromptSafetyTotalBytesV1)
+		}
+	}
+	return nil
 }
 
 // EdgeBillingExpressionHasRequestOrTimeDependenciesV1 reports whether a

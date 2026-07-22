@@ -34,6 +34,10 @@ _Avoid_: User database replica, plaintext token list
 A versioned projection of the user, group, model, channel, and pricing policy required by an edge to execute requests consistently with the master.
 _Avoid_: Database dump, runtime status
 
+**Prompt Safety Policy**:
+The master-owned sensitive prompt filter switches and fingerprint list carried by the signed Business Snapshot and installed by an edge before it relays user input.
+_Avoid_: Edge-local keyword list, arbitrary option map
+
 **Edge Channel Projection**:
 The locally generated channel state derived from a master channel and the standard edge CPA service convention.
 _Avoid_: Manually maintained edge channel
