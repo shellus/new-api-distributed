@@ -6,10 +6,11 @@ import (
 	"gorm.io/gorm"
 )
 
-// CleanupObsoleteEdgeCompiledSnapshots removes only expired retired snapshots
-// and drafts whose update time is older than staleDraftBefore. Published
-// snapshots and unexpired retired snapshots are deliberately never selected,
-// because an edge may continue retrying an old snapshot by ID until expiry.
+// CleanupObsoleteEdgeCompiledSnapshots removes only drafts whose update time is
+// older than staleDraftBefore. Published and retired snapshots are deliberately
+// never selected: an edge may keep serving with its last applied policy after
+// expiry and can therefore upload durable usage that references that snapshot
+// arbitrarily later.
 func CleanupObsoleteEdgeCompiledSnapshots(now int64, staleDraftBefore int64) (int64, error) {
 	var deleted int64
 	err := DB.Transaction(func(tx *gorm.DB) error {
@@ -33,10 +34,7 @@ func CleanupObsoleteEdgeCompiledSnapshotsTx(tx *gorm.DB, now int64, staleDraftBe
 
 	var candidates []EdgeCompiledSnapshot
 	if err := lockForUpdate(tx).
-		Where("(status = ? AND expires_at <= ?) OR (status = ? AND updated_at < ?)",
-			EdgeCompiledSnapshotStatusRetired, now,
-			EdgeCompiledSnapshotStatusDraft, staleDraftBefore,
-		).
+		Where("status = ? AND updated_at < ?", EdgeCompiledSnapshotStatusDraft, staleDraftBefore).
 		Order("id ASC").
 		Find(&candidates).Error; err != nil {
 		return 0, err
@@ -48,11 +46,9 @@ func CleanupObsoleteEdgeCompiledSnapshotsTx(tx *gorm.DB, now int64, staleDraftBe
 	withoutHooks := tx.Session(&gorm.Session{SkipHooks: true})
 	snapshotIDs := make([]int64, 0, len(candidates))
 	for i := range candidates {
-		result := withoutHooks.Where("id = ? AND ((status = ? AND expires_at <= ?) OR (status = ? AND updated_at < ?))",
-			candidates[i].ID,
-			EdgeCompiledSnapshotStatusRetired, now,
-			EdgeCompiledSnapshotStatusDraft, staleDraftBefore,
-		).Delete(&EdgeCompiledSnapshot{})
+		result := withoutHooks.Where("id = ? AND status = ? AND updated_at < ?",
+			candidates[i].ID, EdgeCompiledSnapshotStatusDraft, staleDraftBefore).
+			Delete(&EdgeCompiledSnapshot{})
 		if result.Error != nil {
 			return 0, result.Error
 		}

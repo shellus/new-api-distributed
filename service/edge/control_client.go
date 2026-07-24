@@ -587,11 +587,20 @@ func (c *EdgeControlClient) doJSON(ctx context.Context, path string, requestID s
 		if err := common.DecodeJsonStrict(bytes.NewReader(responseBody), &remote); err != nil {
 			return fmt.Errorf("%w: decode structured error: %v", ErrEdgeControlProtocolViolation, err)
 		}
-		if err := c.validateResponseMeta(remote.Meta, requestID); err != nil {
-			return err
-		}
 		if !edgeControlErrorCodeValid(remote.Error.Code) || strings.TrimSpace(remote.Error.Message) == "" {
 			return fmt.Errorf("%w: structured error is incomplete", ErrEdgeControlProtocolViolation)
+		}
+		if httpResponse.StatusCode == http.StatusRequestEntityTooLarge && remote.Meta.RequestID == "" {
+			if err := remote.Meta.Validate(); err != nil {
+				return edgeControlInvalidResponse("uncorrelated payload-too-large metadata", err)
+			}
+			if remote.Meta.ProtocolVersion != dto.EdgeControlProtocolVersionV2 {
+				return fmt.Errorf("%w: response protocol_version must be %s", ErrEdgeControlProtocolViolation, dto.EdgeControlProtocolVersionV2)
+			}
+			return edgeControlUnavailableResponse(httpResponse.StatusCode, remote.Error.Message)
+		}
+		if err := c.validateResponseMeta(remote.Meta, requestID); err != nil {
+			return err
 		}
 		return &EdgeControlRemoteError{StatusCode: httpResponse.StatusCode, Response: remote}
 	}

@@ -943,45 +943,11 @@ func AdminInvalidateUserSubscription(userSubscriptionId int) (string, error) {
 	return "", nil
 }
 
-// AdminDeleteUserSubscription hard-deletes a user subscription.
+// AdminDeleteUserSubscription keeps the historical accounting row and cancels
+// it instead of deleting it. In-flight master requests and delayed edge
+// settlement events pin the subscription ID chosen at admission time.
 func AdminDeleteUserSubscription(userSubscriptionId int) (string, error) {
-	if userSubscriptionId <= 0 {
-		return "", errors.New("invalid userSubscriptionId")
-	}
-	now := common.GetTimestamp()
-	cacheGroup := ""
-	downgradeGroup := ""
-	var userId int
-	err := DB.Transaction(func(tx *gorm.DB) error {
-		var sub UserSubscription
-		if err := lockForUpdate(tx).
-			Where("id = ?", userSubscriptionId).First(&sub).Error; err != nil {
-			return err
-		}
-		userId = sub.UserId
-		target, err := downgradeUserGroupForSubscriptionTx(tx, &sub, now)
-		if err != nil {
-			return err
-		}
-		if target != "" {
-			cacheGroup = target
-			downgradeGroup = target
-		}
-		if err := tx.Where("id = ?", userSubscriptionId).Delete(&UserSubscription{}).Error; err != nil {
-			return err
-		}
-		return nil
-	})
-	if err != nil {
-		return "", err
-	}
-	if cacheGroup != "" && userId > 0 {
-		_ = UpdateUserGroupCache(userId, cacheGroup)
-	}
-	if downgradeGroup != "" {
-		return fmt.Sprintf("用户分组将回退到 %s", downgradeGroup), nil
-	}
-	return "", nil
+	return AdminInvalidateUserSubscription(userSubscriptionId)
 }
 
 func resetUserSubscriptionTx(tx *gorm.DB, sub *UserSubscription, plan *SubscriptionPlan, now int64, advanceResetTime bool) error {

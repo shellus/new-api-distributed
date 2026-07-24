@@ -2,6 +2,7 @@ package model
 
 import (
 	"errors"
+	"fmt"
 	"math"
 
 	"github.com/QuantumNous/new-api/common"
@@ -10,7 +11,10 @@ import (
 	"gorm.io/gorm"
 )
 
-var ErrEdgeSettlementCounterOverflow = errors.New("edge settlement counter would overflow")
+var (
+	ErrEdgeSettlementCounterOverflow         = errors.New("edge settlement counter would overflow")
+	ErrEdgeSettlementSubscriptionUnavailable = errors.New("edge settlement subscription is unavailable")
+)
 
 type EdgeSettlementChargeResult struct {
 	SubscriptionID        int
@@ -59,6 +63,9 @@ func ApplyEdgeSettlementChargeTx(
 		}
 		stored := &UserSubscription{}
 		if err := lockForUpdate(tx).Where("id = ? AND user_id = ?", userSubscriptionID, userID).First(stored).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return nil, fmt.Errorf("%w: user_id=%d subscription_id=%d", ErrEdgeSettlementSubscriptionUnavailable, userID, userSubscriptionID)
+			}
 			return nil, err
 		}
 		subscription = stored

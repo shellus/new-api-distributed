@@ -271,6 +271,34 @@ func TestEdgeControlTransportRetriesTransientHTTPResponsesAcrossControlKinds(t *
 	}
 }
 
+func TestEdgeControlTransportKeepsUncorrelatedPayloadTooLargeErrorRetryable(t *testing.T) {
+	responseBody, err := common.Marshal(dto.EdgeControlErrorResponseV1{
+		Meta: dto.EdgeControlResponseMetaV1{
+			ProtocolVersion:     dto.EdgeControlProtocolVersionV2,
+			ServerRequestID:     "server-request-413",
+			ServerTimeUnixMilli: time.Now().UnixMilli(),
+		},
+		Error: dto.EdgeControlErrorV1{
+			Code:      dto.EdgeControlErrorCodeInvalidRequestV1,
+			Message:   "request body exceeds control-plane limit",
+			Retryable: false,
+		},
+	})
+	require.NoError(t, err)
+	client := newEdgeRuntimeTestControlClient(t, edgeRuntimeRoundTripper(func(*http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusRequestEntityTooLarge,
+			Header:     http.Header{"Content-Type": []string{"application/json"}},
+			Body:       io.NopCloser(bytes.NewReader(responseBody)),
+		}, nil
+	}))
+	var response map[string]interface{}
+	err = client.doJSON(context.Background(), "/control/v1/settlement/block", "settlement-request-413", map[string]interface{}{}, &response)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrEdgeControlUnavailable)
+	assert.False(t, edgeControlFatalError(err))
+}
+
 func TestEdgeControlErrorClassificationFailsClosedOnIntegrityAndProtocolErrors(t *testing.T) {
 	remote := func(code dto.EdgeControlErrorCodeV1, retryable bool) error {
 		return &EdgeControlRemoteError{StatusCode: http.StatusConflict, Response: dto.EdgeControlErrorResponseV1{

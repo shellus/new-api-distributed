@@ -218,6 +218,8 @@ master 对一个区块执行两遍处理：
 2. 在通过节点滑动窗口熔断后，第二遍在同一事务实际扣减 `users.quota` 或增加 `user_subscriptions.amount_used`，并扣减有限 `tokens.remain_quota`。余额不足不拒绝已经发生的可信 edge 消费，权威余额允许为负；所有 quota 运算继续使用项目的 int32 安全边界。
 3. 同一事务写 accepted block、usage event、统计和 consume-log outbox，并推进节点事件水位。重复区块只返回原 ack，不再次扣账。
 
+usage event 固定的订阅 ID 和快照 ID 都是账务外键，而不是可随生命周期清理的缓存键。已取消或过期的 `user_subscriptions` 行必须保留并排除在新 reservation 之外；所有曾发布的编译快照也必须继续可供 settlement 复核。当前协议没有全局“最老未结算引用”水位，因此不能仅根据订阅状态或快照 TTL 物理删除这些记录。
+
 master 普通钱包请求已经在用户余额 `<= 0` 时拒绝，有限 token 也在 `remain_quota <= 0` 时失效（`service/billing_session.go:436`、`model/token.go:216`）。订阅 `remain_quota <= 0` 后不能满足下一次订阅预扣；若策略允许钱包回退且钱包仍为正，仍可按既有规则切换资金来源（`service/billing_session.go:524`）。因此负值会阻止对应钱包、订阅或有限 token 继续消费，而不会擅自改变既有 funding fallback 语义。
 
 ### 回冲时序

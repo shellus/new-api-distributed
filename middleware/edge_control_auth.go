@@ -19,7 +19,7 @@ import (
 )
 
 const (
-	edgeControlMaxRequestBodyBytes = int64(1 << 20)
+	edgeControlMaxRequestBodyBytes = int64(8 << 20)
 	edgeControlMaxClockSkew        = 2 * time.Minute
 )
 

@@ -131,6 +131,13 @@ func writeEdgeControlFailure(c *gin.Context, err error, clientRequestID string, 
 		code = dto.EdgeControlErrorCodeUnsupportedProtocolV1
 		message = "unsupported control protocol"
 		retryable = false
+	case errors.Is(err, model.ErrEdgeSettlementSubscriptionUnavailable):
+		statusCode = http.StatusServiceUnavailable
+		code = dto.EdgeControlErrorCodeTemporarilyUnavailableV1
+		message = "authoritative settlement subscription is unavailable"
+		retryAfter := int64(5)
+		retryAfterSeconds = &retryAfter
+		common.SysError("edge settlement subscription unavailable: " + err.Error())
 	case errors.Is(err, gorm.ErrRecordNotFound):
 		statusCode = http.StatusServiceUnavailable
 		code = dto.EdgeControlErrorCodeTemporarilyUnavailableV1

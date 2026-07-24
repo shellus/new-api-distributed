@@ -45,6 +45,22 @@ func TestEdgeControlAuthStoresVerifiedPrincipal(t *testing.T) {
 	assert.Equal(t, http.StatusNoContent, recorder.Code)
 }
 
+func TestEdgeControlAuthAllowsSettlementBatchLargerThanLegacyOneMiBLimit(t *testing.T) {
+	privateKey, node, credential := newEdgeControlMiddlewareFixture(t)
+	body := []byte(`{"padding":"` + strings.Repeat("x", 1<<20) + `"}`)
+	request := newSignedEdgeControlMiddlewareRequest(t, body, privateKey, node, credential)
+
+	gin.SetMode(gin.TestMode)
+	engine := gin.New()
+	engine.Use(RequestId())
+	engine.POST("/control/v1/bootstrap", EdgeControlAuth(), func(c *gin.Context) {
+		c.Status(http.StatusNoContent)
+	})
+	recorder := httptest.NewRecorder()
+	engine.ServeHTTP(recorder, request)
+	assert.Equal(t, http.StatusNoContent, recorder.Code)
+}
+
 func TestEdgeControlAuthRejectsInvalidMediaEncodingSignatureAndSize(t *testing.T) {
 	privateKey, node, credential := newEdgeControlMiddlewareFixture(t)
 	validBody := []byte(`{"meta":{"protocol_version":"edge-control.v1","request_id":"request-2"}}`)

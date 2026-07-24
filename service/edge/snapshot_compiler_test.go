@@ -277,7 +277,7 @@ func TestEdgeSnapshotCompilerPersistsSignedSevenDatasetGraphWithoutSecrets(t *te
 	assert.Equal(t, model.EdgeCompiledSnapshotStatusPublished, snapshots[1].Status)
 }
 
-func TestEdgeSnapshotCompilerDebouncesUnchangedContentAndCleansObsoleteGraphs(t *testing.T) {
+func TestEdgeSnapshotCompilerDebouncesUnchangedContentAndPreservesSettlementGraphs(t *testing.T) {
 	db := newEdgeSnapshotCompilerTestDB(t)
 	projection, err := projectEdgeSnapshotDatabaseState(edgeSnapshotCompilerTestState())
 	require.NoError(t, err)
@@ -327,13 +327,18 @@ func TestEdgeSnapshotCompilerDebouncesUnchangedContentAndCleansObsoleteGraphs(t 
 	require.NoError(t, err)
 	assert.NotEqual(t, refreshed.Manifest.SnapshotID, changed.Manifest.SnapshotID)
 
-	var obsoleteCount int64
+	var staleDraftCount int64
 	require.NoError(t, db.Model(&model.EdgeCompiledSnapshot{}).
-		Where("snapshot_uid IN ?", []string{first.Manifest.SnapshotID, staleDraft.SnapshotUID}).
-		Count(&obsoleteCount).Error)
-	assert.Zero(t, obsoleteCount)
+		Where("snapshot_uid = ?", staleDraft.SnapshotUID).
+		Count(&staleDraftCount).Error)
+	assert.Zero(t, staleDraftCount)
+	var expiredRetiredCount int64
+	require.NoError(t, db.Model(&model.EdgeCompiledSnapshot{}).
+		Where("snapshot_uid = ?", first.Manifest.SnapshotID).
+		Count(&expiredRetiredCount).Error)
+	assert.Equal(t, int64(1), expiredRetiredCount, "expired retired snapshots remain available for delayed settlement")
 	require.NoError(t, db.Model(&model.EdgeCompiledSnapshot{}).Count(&count).Error)
-	assert.Equal(t, int64(2), count, "the unexpired retired snapshot and current published snapshot must remain")
+	assert.Equal(t, int64(3), count, "all retired snapshots and the current published snapshot must remain")
 	var orphanDatasets int64
 	require.NoError(t, db.Table("edge_compiled_snapshot_datasets AS datasets").
 		Joins("LEFT JOIN edge_compiled_snapshots AS snapshots ON snapshots.id = datasets.snapshot_id").
