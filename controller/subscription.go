@@ -400,6 +400,12 @@ type AdminResetSubscriptionRequest struct {
 	AdvanceResetTime *bool `json:"advance_reset_time"`
 }
 
+type AdminRenewUserSubscriptionRequest struct {
+	RenewBeforeSeconds int64 `json:"renew_before_seconds"`
+}
+
+const defaultSubscriptionRenewBeforeSeconds int64 = 7 * 24 * 60 * 60
+
 func resolveAdvanceResetTime(value *bool) bool {
 	if value == nil {
 		return true
@@ -525,6 +531,44 @@ func AdminInvalidateUserSubscription(c *gin.Context) {
 		return
 	}
 	common.ApiSuccess(c, nil)
+}
+
+// AdminRenewUserSubscription extends the existing subscription row when it
+// has seven days or less remaining. Keeping the row ID stable is required for
+// delayed edge settlement references and balance projection convergence.
+func AdminRenewUserSubscription(c *gin.Context) {
+	subId, _ := strconv.Atoi(c.Param("id"))
+	if subId <= 0 {
+		common.ApiErrorMsg(c, "无效的订阅ID")
+		return
+	}
+	var req AdminRenewUserSubscriptionRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		common.ApiErrorMsg(c, "参数错误")
+		return
+	}
+	if req.RenewBeforeSeconds == 0 {
+		req.RenewBeforeSeconds = defaultSubscriptionRenewBeforeSeconds
+	}
+	if req.RenewBeforeSeconds < 0 {
+		common.ApiErrorMsg(c, "renew_before_seconds 必须大于0")
+		return
+	}
+	result, err := model.AdminRenewUserSubscription(subId, req.RenewBeforeSeconds)
+	if err != nil {
+		common.ApiError(c, err)
+		return
+	}
+	if result.Renewed && result.Subscription != nil {
+		recordManageAuditFor(c, result.Subscription.UserId, "subscription.user_renew", map[string]interface{}{
+			"target_user_id":       result.Subscription.UserId,
+			"subscription_id":      result.Subscription.Id,
+			"previous_end_time":    result.PreviousEndTime,
+			"end_time":             result.Subscription.EndTime,
+			"renew_before_seconds": req.RenewBeforeSeconds,
+		})
+	}
+	common.ApiSuccess(c, result)
 }
 
 // AdminDeleteUserSubscription cancels a subscription while retaining its

@@ -36,6 +36,7 @@ const (
 var (
 	ErrSubscriptionOrderNotFound      = errors.New("subscription order not found")
 	ErrSubscriptionOrderStatusInvalid = errors.New("subscription order status invalid")
+	ErrUserSubscriptionNotActive      = errors.New("user subscription is not active")
 )
 
 const (
@@ -304,6 +305,16 @@ type SubscriptionResetResult struct {
 	AdvanceResetTime bool   `json:"advance_reset_time"`
 	PlanTitle        string `json:"-"`
 	AffectedUserIds  []int  `json:"-"`
+}
+
+// SubscriptionRenewResult describes an idempotent extension attempt for one
+// active subscription. Renewing updates the existing row instead of creating
+// another funding account, so edge nodes keep the same subscription ID.
+type SubscriptionRenewResult struct {
+	Subscription     *UserSubscription `json:"subscription"`
+	Renewed          bool              `json:"renewed"`
+	PreviousEndTime  int64             `json:"previous_end_time"`
+	RemainingSeconds int64             `json:"remaining_seconds"`
 }
 
 func calcPlanEndTime(start time.Time, plan *SubscriptionPlan) (int64, error) {
@@ -948,6 +959,64 @@ func AdminInvalidateUserSubscription(userSubscriptionId int) (string, error) {
 // settlement events pin the subscription ID chosen at admission time.
 func AdminDeleteUserSubscription(userSubscriptionId int) (string, error) {
 	return AdminInvalidateUserSubscription(userSubscriptionId)
+}
+
+// AdminRenewUserSubscription extends an active subscription when its
+// remaining lifetime is at or below renewBeforeSeconds. The new end time is
+// calculated from the subscription's plan duration and the current database
+// time. Repeating the same request after a successful renewal is a no-op.
+func AdminRenewUserSubscription(userSubscriptionId int, renewBeforeSeconds int64) (*SubscriptionRenewResult, error) {
+	if userSubscriptionId <= 0 {
+		return nil, errors.New("invalid userSubscriptionId")
+	}
+	if renewBeforeSeconds <= 0 {
+		return nil, errors.New("renewBeforeSeconds must be > 0")
+	}
+
+	now := GetDBTimestamp()
+	result := &SubscriptionRenewResult{}
+	err := DB.Transaction(func(tx *gorm.DB) error {
+		var sub UserSubscription
+		if err := lockForUpdate(tx).Where("id = ?", userSubscriptionId).First(&sub).Error; err != nil {
+			return err
+		}
+		if sub.Status != "active" || sub.EndTime <= now {
+			return ErrUserSubscriptionNotActive
+		}
+
+		result.PreviousEndTime = sub.EndTime
+		result.RemainingSeconds = sub.EndTime - now
+		if result.RemainingSeconds > renewBeforeSeconds {
+			result.Subscription = &sub
+			return nil
+		}
+
+		plan, err := getSubscriptionPlanByIdTx(tx, sub.PlanId)
+		if err != nil {
+			return err
+		}
+		endUnix, err := calcPlanEndTime(time.Unix(now, 0), plan)
+		if err != nil {
+			return err
+		}
+		if endUnix <= now {
+			return errors.New("subscription plan duration must produce a future end time")
+		}
+		if err := tx.Model(&sub).Updates(map[string]interface{}{
+			"end_time":   endUnix,
+			"updated_at": common.GetTimestamp(),
+		}).Error; err != nil {
+			return err
+		}
+		sub.EndTime = endUnix
+		result.Renewed = true
+		result.Subscription = &sub
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return result, nil
 }
 
 func resetUserSubscriptionTx(tx *gorm.DB, sub *UserSubscription, plan *SubscriptionPlan, now int64, advanceResetTime bool) error {

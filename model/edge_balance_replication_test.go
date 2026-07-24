@@ -51,7 +51,10 @@ func TestPrepareEdgeBalanceDeltaTxDiffRevisionAndSettlementWatermark(t *testing.
 		require.NoError(t, db.Model(&User{}).Where("id = ?", 1).Update("quota", 90).Error)
 		require.NoError(t, db.Delete(&Token{}, 10).Error)
 		require.NoError(t, db.Create(&User{Id: 2, Username: "balance-user-2", AffCode: "balance-aff-2", Quota: 200}).Error)
-		require.NoError(t, db.Model(&UserSubscription{}).Where("id = ?", 20).Update("amount_used", 300).Error)
+		require.NoError(t, db.Model(&UserSubscription{}).Where("id = ?", 20).Updates(map[string]interface{}{
+			"amount_used": 300,
+			"end_time":    now.Add(14 * 24 * time.Hour).Unix(),
+		}).Error)
 
 		var changed *dto.EdgeBalanceDeltaV2
 		require.NoError(t, db.Transaction(func(tx *gorm.DB) error {
@@ -66,6 +69,7 @@ func TestPrepareEdgeBalanceDeltaTxDiffRevisionAndSettlementWatermark(t *testing.
 		assert.Equal(t, []dto.EdgeWalletBalanceV2{{UserID: 1, RemainQuota: 90}, {UserID: 2, RemainQuota: 200}}, changed.Wallets)
 		assert.Equal(t, []dto.EdgeTokenBalanceV2{{TokenID: 10, UserID: 1, Deleted: true}}, changed.Tokens)
 		assert.Equal(t, int64(700), changed.Subscriptions[0].RemainQuota)
+		assert.Equal(t, now.Add(14*24*time.Hour).UnixMilli(), changed.Subscriptions[0].ExpiresAtUnixMilli)
 
 		var stable *dto.EdgeBalanceDeltaV2
 		require.NoError(t, db.Transaction(func(tx *gorm.DB) error {
