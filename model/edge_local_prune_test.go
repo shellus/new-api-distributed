@@ -86,6 +86,26 @@ func TestPruneEdgeLocalAccountingHistoryRequiresAckAndBalanceWatermark(t *testin
 	assertEdgeLocalAccountingHistoryCounts(t, db, 1, 0, 0, 0)
 }
 
+func TestEdgeLocalAccountingPruneIndexes(t *testing.T) {
+	db := openEdgeLocalTestDB(t, "accounting-prune-indexes.db")
+
+	for _, item := range []struct {
+		modelValue any
+		indexName  string
+		columns    []string
+	}{
+		{&EdgeLocalQuotaReservation{}, "idx_edge_local_prune_reservations", []string{"status", "owner_kind", "event_sequence"}},
+		{&EdgeLocalUsageEvent{}, "idx_edge_local_prune_usage", []string{"acknowledged", "sequence"}},
+		{&EdgeLocalOutbox{}, "idx_edge_local_prune_outbox", []string{"status", "sequence"}},
+		{&EdgeLocalSettlementBlock{}, "idx_edge_local_prune_blocks", []string{"status", "last_sequence"}},
+	} {
+		require.True(t, db.Migrator().HasIndex(item.modelValue, item.indexName), item.indexName)
+		var indexColumns []string
+		require.NoError(t, db.Raw("SELECT name FROM pragma_index_info(?) ORDER BY seqno", item.indexName).Scan(&indexColumns).Error)
+		assert.Equal(t, item.columns, indexColumns, item.indexName)
+	}
+}
+
 func assertEdgeLocalAccountingHistoryCounts(t *testing.T, db *gorm.DB, reservations, usageEvents, outboxEntries, settlementBlocks int64) {
 	t.Helper()
 	for _, item := range []struct {

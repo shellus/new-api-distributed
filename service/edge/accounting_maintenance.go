@@ -36,7 +36,7 @@ func RunEdgeAccountingMaintenance(ctx context.Context) {
 		pruneBatchSize = maxEdgeLocalAccountingPruneBatchSize
 	}
 
-	run := func() {
+	run := func(pruneHistory bool) {
 		if edgeAccountingBlock.Load() {
 			return
 		}
@@ -58,6 +58,9 @@ func RunEdgeAccountingMaintenance(ctx context.Context) {
 		if !edgeAccountingReady.Load() {
 			return
 		}
+		if !pruneHistory {
+			return
+		}
 		result, err := model.PruneEdgeLocalAccountingHistory(model.DB.WithContext(ctx), retentionEvents, pruneBatchSize)
 		if err != nil {
 			if ctx.Err() == nil {
@@ -72,7 +75,10 @@ func RunEdgeAccountingMaintenance(ctx context.Context) {
 			))
 		}
 	}
-	run()
+	// Startup already performs recovery and rebuilds quarantine state. Delay
+	// history pruning until the first maintenance tick so initial control-plane
+	// state and user traffic do not queue behind a background cleanup write.
+	run(false)
 	ticker := time.NewTicker(edgeAccountingMaintenanceInterval)
 	defer ticker.Stop()
 	for {
@@ -80,7 +86,7 @@ func RunEdgeAccountingMaintenance(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			run()
+			run(true)
 		}
 	}
 }

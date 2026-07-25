@@ -189,15 +189,15 @@ type EdgeLocalQuotaReservation struct {
 	PricingRevision      int64                      `gorm:"not null;default:0"`
 	BalanceRevision      int64                      `gorm:"not null;default:0"`
 	SettlementFloorQuota int64                      `gorm:"column:negative_floor_quota;not null;default:0"`
-	Status               EdgeLocalReservationStatus `gorm:"type:varchar(32);not null;index"`
+	Status               EdgeLocalReservationStatus `gorm:"type:varchar(32);not null;index;index:idx_edge_local_prune_reservations,priority:1"`
 	ReservedQuota        int64                      `gorm:"not null"`
 	ChargedQuota         int64                      `gorm:"not null"`
 	EventID              string                     `gorm:"type:varchar(64);not null;index"`
-	EventSequence        int64                      `gorm:"not null;index"`
+	EventSequence        int64                      `gorm:"not null;index;index:idx_edge_local_prune_reservations,priority:3"`
 	StagedEventID        string                     `gorm:"type:varchar(64);not null;default:'';index"`
 	StagedEventPayload   string                     `gorm:"type:text;not null;default:''"`
 	StagedAtUnixMilli    int64                      `gorm:"not null;default:0;index"`
-	OwnerKind            string                     `gorm:"type:varchar(32);not null;default:'';index"`
+	OwnerKind            string                     `gorm:"type:varchar(32);not null;default:'';index;index:idx_edge_local_prune_reservations,priority:2"`
 	OwnerID              string                     `gorm:"type:varchar(191);not null;default:'';index"`
 	CreatedAtUnixMilli   int64                      `gorm:"not null"`
 	UpdatedAtUnixMilli   int64                      `gorm:"not null"`
@@ -208,12 +208,12 @@ func (EdgeLocalQuotaReservation) TableName() string { return "edge_local_quota_r
 
 type EdgeLocalUsageEvent struct {
 	EventID                 string `gorm:"type:varchar(64);primaryKey;autoIncrement:false"`
-	Sequence                int64  `gorm:"not null;uniqueIndex"`
+	Sequence                int64  `gorm:"not null;uniqueIndex;index:idx_edge_local_prune_usage,priority:2"`
 	ReservationID           string `gorm:"type:varchar(64);not null;uniqueIndex"`
 	RequestID               string `gorm:"type:varchar(64);not null;uniqueIndex"`
 	Payload                 string `gorm:"type:text;not null"`
 	BlockID                 string `gorm:"type:varchar(64);not null;index"`
-	Acknowledged            bool   `gorm:"not null;index"`
+	Acknowledged            bool   `gorm:"not null;index;index:idx_edge_local_prune_usage,priority:1"`
 	CreatedAtUnixMilli      int64  `gorm:"not null"`
 	AcknowledgedAtUnixMilli int64  `gorm:"not null"`
 }
@@ -231,9 +231,9 @@ const (
 type EdgeLocalOutbox struct {
 	ID                      int64                 `gorm:"primaryKey"`
 	EventID                 string                `gorm:"type:varchar(64);not null;uniqueIndex"`
-	Sequence                int64                 `gorm:"not null;uniqueIndex"`
+	Sequence                int64                 `gorm:"not null;uniqueIndex;index:idx_edge_local_prune_outbox,priority:2"`
 	BlockID                 string                `gorm:"type:varchar(64);not null;index"`
-	Status                  EdgeLocalOutboxStatus `gorm:"type:varchar(32);not null;index"`
+	Status                  EdgeLocalOutboxStatus `gorm:"type:varchar(32);not null;index;index:idx_edge_local_prune_outbox,priority:1"`
 	Payload                 string                `gorm:"type:text;not null"`
 	CreatedAtUnixMilli      int64                 `gorm:"not null"`
 	UpdatedAtUnixMilli      int64                 `gorm:"not null"`
@@ -256,10 +256,10 @@ type EdgeLocalSettlementBlock struct {
 	PreviousBlockID         string                         `gorm:"type:varchar(64);not null"`
 	PreviousBlockDigest     string                         `gorm:"type:char(64);not null"`
 	FirstSequence           int64                          `gorm:"not null;uniqueIndex"`
-	LastSequence            int64                          `gorm:"not null;uniqueIndex"`
+	LastSequence            int64                          `gorm:"not null;uniqueIndex;index:idx_edge_local_prune_blocks,priority:2"`
 	EventCount              int                            `gorm:"not null"`
 	BlockDigest             string                         `gorm:"type:char(64);not null"`
-	Status                  EdgeLocalSettlementBlockStatus `gorm:"type:varchar(32);not null;index"`
+	Status                  EdgeLocalSettlementBlockStatus `gorm:"type:varchar(32);not null;index;index:idx_edge_local_prune_blocks,priority:1"`
 	RequestCircuitEpoch     int64                          `gorm:"not null;default:0"`
 	Payload                 string                         `gorm:"type:text;not null"`
 	AckPayload              string                         `gorm:"type:text;not null"`
