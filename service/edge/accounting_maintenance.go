@@ -14,7 +14,7 @@ const (
 	defaultEdgeLocalAccountingRetentionEvents int64 = 10_000
 	minEdgeLocalAccountingRetentionEvents     int64 = 1_000
 	maxEdgeLocalAccountingRetentionEvents     int64 = 1_000_000
-	defaultEdgeLocalAccountingPruneBatchSize        = 500
+	defaultEdgeLocalAccountingPruneBatchSize        = 100
 	maxEdgeLocalAccountingPruneBatchSize            = 5_000
 )
 

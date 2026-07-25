@@ -140,7 +140,7 @@ edge 的人工配置只保留部署必需信息：
 | `EDGE_BALANCE_SETTLEMENT_FLOOR_QUOTA` | `-10000000`，范围 `-common.MaxQuota..0` | 已执行请求的实际 charge 超过 reservation 时，有限资金账户和有限 token 账户仍可完成结算的最低余额；不参与新请求 admission |
 | `EDGE_BALANCE_NEGATIVE_FLOOR_QUOTA` | 兼容别名 | 仅在未设置新变量时作为 Settlement Floor 读取；后续部署应迁移到新变量名 |
 | `EDGE_LOCAL_ACCOUNTING_RETENTION_EVENTS` | `10000`，范围 `1000..1000000` | 保留最近多少条已经完成 master 确认和本地余额回冲的账务序列；更老的本地重复审计副本由维护循环分批清理 |
-| `EDGE_LOCAL_ACCOUNTING_PRUNE_BATCH_SIZE` | `500`，范围 `1..5000` | 单轮从 reservation、usage、outbox 和 settlement block 各清理的最大行数 |
+| `EDGE_LOCAL_ACCOUNTING_PRUNE_BATCH_SIZE` | `100`，范围 `1..5000` | 单轮从 reservation、usage、outbox 和 settlement block 各清理的最大行数；保守默认值用于限制后台清理持有 SQLite 写锁的时间 |
 | `EDGE_CPA_HEALTH_TIMEOUT_SECONDS` | 兼容保留 | 当前 edge 不执行本地上游合成探测，也不读取此变量 |
 | `SHUTDOWN_TIMEOUT_SECONDS` | `120` | HTTP 优雅关闭时间；超时后强制关闭连接，但仍等待 handler 完成账务收尾 |
 | `EDGE_DRAIN_TIMEOUT_SECONDS` | `30` | 停止后台循环后，最终上传 durable settlement 的时间预算 |
