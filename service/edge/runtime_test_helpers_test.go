@@ -166,6 +166,7 @@ func enableEdgeRuntimeServing(t *testing.T) {
 	edgeControlReady.Store(true)
 	edgeAccountingReady.Store(true)
 	edgeAccountingBlock.Store(false)
+	edgeAccountingQuarantine.reset()
 	edgeBalanceReady.Store(true)
 	edgeSettlementCircuitOpen.Store(false)
 	t.Cleanup(func() {
@@ -175,6 +176,7 @@ func enableEdgeRuntimeServing(t *testing.T) {
 		edgeControlReady.Store(previousReady)
 		edgeAccountingReady.Store(previousAccountingReady)
 		edgeAccountingBlock.Store(previousAccountingBlock)
+		edgeAccountingQuarantine.reset()
 		edgeBalanceReady.Store(previousBalanceReady)
 		edgeSettlementCircuitOpen.Store(previousCircuitOpen)
 	})

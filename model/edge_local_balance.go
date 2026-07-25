@@ -45,17 +45,19 @@ func BindEdgeLocalReservationOwner(db *gorm.DB, reservationID, ownerKind, ownerI
 	if nowUnixMilli <= 0 {
 		return errors.New("edge local reservation owner binding time must be positive")
 	}
-	result := db.Model(&EdgeLocalQuotaReservation{}).
-		Where("reservation_id = ? AND status = ? AND staged_event_payload = '' AND (owner_kind = '' OR (owner_kind = ? AND owner_id = ?))",
-			reservationID, EdgeLocalReservationStatusActive, ownerKind, ownerID).
-		Updates(map[string]any{"owner_kind": ownerKind, "owner_id": ownerID, "updated_at_unix_milli": nowUnixMilli})
-	if result.Error != nil {
-		return result.Error
-	}
-	if result.RowsAffected != 1 {
-		return ErrEdgeLocalReservationConflict
-	}
-	return nil
+	return withEdgeLocalWrite(db, "bind reservation owner", func() error {
+		result := db.Model(&EdgeLocalQuotaReservation{}).
+			Where("reservation_id = ? AND status = ? AND staged_event_payload = '' AND (owner_kind = '' OR (owner_kind = ? AND owner_id = ?))",
+				reservationID, EdgeLocalReservationStatusActive, ownerKind, ownerID).
+			Updates(map[string]any{"owner_kind": ownerKind, "owner_id": ownerID, "updated_at_unix_milli": nowUnixMilli})
+		if result.Error != nil {
+			return result.Error
+		}
+		if result.RowsAffected != 1 {
+			return ErrEdgeLocalReservationConflict
+		}
+		return nil
+	})
 }
 
 func ListActiveEdgeLocalOwnedReservations(db *gorm.DB, ownerKind string) ([]EdgeLocalQuotaReservation, error) {
@@ -99,19 +101,21 @@ func ApplyEdgeLocalControlConfig(db *gorm.DB, control dto.EdgeNodeControlConfigV
 	if nowUnixMilli <= 0 {
 		return errors.New("edge local control application time must be positive")
 	}
-	result := db.Model(&EdgeLocalControlState{}).Where("id = ?", edgeLocalControlStateID).Updates(map[string]any{
-		"node_id": control.NodeID, "node_generation": control.NodeGeneration,
-		"settlement_circuit_open":  control.SettlementCircuitOpen,
-		"settlement_circuit_epoch": control.SettlementCircuitEpoch,
-		"updated_at_unix_milli":    nowUnixMilli,
+	return withEdgeLocalWrite(db, "apply control config", func() error {
+		result := db.Model(&EdgeLocalControlState{}).Where("id = ?", edgeLocalControlStateID).Updates(map[string]any{
+			"node_id": control.NodeID, "node_generation": control.NodeGeneration,
+			"settlement_circuit_open":  control.SettlementCircuitOpen,
+			"settlement_circuit_epoch": control.SettlementCircuitEpoch,
+			"updated_at_unix_milli":    nowUnixMilli,
+		})
+		if result.Error != nil {
+			return result.Error
+		}
+		if result.RowsAffected != 1 {
+			return ErrEdgeLocalAccountingCorruption
+		}
+		return nil
 	})
-	if result.Error != nil {
-		return result.Error
-	}
-	if result.RowsAffected != 1 {
-		return ErrEdgeLocalAccountingCorruption
-	}
-	return nil
 }
 
 func ApplyEdgeLocalBalanceDelta(db *gorm.DB, node dto.EdgeNodeControlConfigV1, delta dto.EdgeBalanceDeltaV2, nowUnixMilli int64) error {
@@ -127,7 +131,7 @@ func ApplyEdgeLocalBalanceDelta(db *gorm.DB, node dto.EdgeNodeControlConfigV1, d
 	if err := delta.Validate(); err != nil {
 		return err
 	}
-	return db.Transaction(func(tx *gorm.DB) error {
+	return withEdgeLocalTransaction(db, "apply balance delta", func(tx *gorm.DB) error {
 		var control EdgeLocalControlState
 		if err := tx.First(&control, edgeLocalControlStateID).Error; err != nil {
 			return err
@@ -295,7 +299,7 @@ func ReserveEdgeLocalBalance(db *gorm.DB, request EdgeLocalBalanceReservationReq
 	}
 
 	var reservation *EdgeLocalQuotaReservation
-	err := db.Transaction(func(tx *gorm.DB) error {
+	err := withEdgeLocalTransaction(db, "reserve balance", func(tx *gorm.DB) error {
 		var existing EdgeLocalQuotaReservation
 		query := tx.Where("reservation_id = ? OR request_id = ?", request.ReservationID, request.RequestID).Limit(1).Find(&existing)
 		if query.Error != nil {
@@ -465,7 +469,7 @@ func AdjustEdgeLocalBalanceReservation(db *gorm.DB, reservationID string, target
 		return nil, err
 	}
 	var adjusted *EdgeLocalQuotaReservation
-	err := db.Transaction(func(tx *gorm.DB) error {
+	err := withEdgeLocalTransaction(db, "adjust balance reservation", func(tx *gorm.DB) error {
 		var reservation EdgeLocalQuotaReservation
 		if err := tx.Where("reservation_id = ?", reservationID).First(&reservation).Error; err != nil {
 			return err

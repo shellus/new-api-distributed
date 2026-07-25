@@ -80,6 +80,10 @@ _Avoid_: Audit log upload, synchronous request charge
 The durable edge-owned queue of usage events and settlement blocks that have not yet been acknowledged by the master.
 _Avoid_: In-memory usage queue
 
+**Accounting Quarantine**:
+The isolation of a user and token whose completed request has an unresolved, unstaged reservation; the durable reservation remains for review while unrelated subjects continue using the edge.
+_Avoid_: Automatic refund, global edge outage
+
 ## Addresses and configuration
 
 **Public Address**:

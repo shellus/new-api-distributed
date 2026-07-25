@@ -92,6 +92,7 @@ func resetEdgeAdmissionTestState(t *testing.T) {
 	edgeSettlementCircuitOpen.Store(false)
 	edgeAccountingReady.Store(true)
 	edgeAccountingBlock.Store(false)
+	edgeAccountingQuarantine.reset()
 	t.Cleanup(func() {
 		SetEdgeRequestAdmission(false)
 		edgeControlReady.Store(false)
@@ -99,6 +100,7 @@ func resetEdgeAdmissionTestState(t *testing.T) {
 		edgeSettlementCircuitOpen.Store(false)
 		edgeAccountingReady.Store(true)
 		edgeAccountingBlock.Store(false)
+		edgeAccountingQuarantine.reset()
 		edgeAdmission = newEdgeAdmissionGate()
 	})
 }

@@ -39,7 +39,7 @@ func StageEdgeLocalReservationSettlement(db *gorm.DB, reservationID string, even
 		return err
 	}
 
-	return db.Transaction(func(tx *gorm.DB) error {
+	return withEdgeLocalTransaction(db, "stage reservation settlement", func(tx *gorm.DB) error {
 		var reservation EdgeLocalQuotaReservation
 		if err := tx.Where("reservation_id = ?", reservationID).First(&reservation).Error; err != nil {
 			return err
@@ -126,7 +126,7 @@ func SettleStagedEdgeLocalReservation(db *gorm.DB, reservationID string) (*dto.E
 	}
 
 	var settled *dto.EdgeUsageEventV1
-	err := db.Transaction(func(tx *gorm.DB) error {
+	err := withEdgeLocalTransaction(db, "settle staged reservation", func(tx *gorm.DB) error {
 		var reservation EdgeLocalQuotaReservation
 		if err := tx.Where("reservation_id = ?", reservationID).First(&reservation).Error; err != nil {
 			return err
@@ -362,7 +362,7 @@ func BuildEdgeLocalSettlementBlock(
 	}
 
 	var request *dto.EdgeSettlementBlockRequestV1
-	err := db.Transaction(func(tx *gorm.DB) error {
+	err := withEdgeLocalTransaction(db, "build settlement block", func(tx *gorm.DB) error {
 		var pending []EdgeLocalSettlementBlock
 		if err := tx.Where("status = ?", EdgeLocalSettlementBlockStatusPending).Order("first_sequence asc").Limit(2).Find(&pending).Error; err != nil {
 			return err
@@ -492,7 +492,7 @@ func RefreshEdgeLocalSettlementRequest(
 		return nil, errors.New("settlement circuit epoch must not be negative")
 	}
 	var refreshed *dto.EdgeSettlementBlockRequestV1
-	err := db.Transaction(func(tx *gorm.DB) error {
+	err := withEdgeLocalTransaction(db, "refresh settlement request", func(tx *gorm.DB) error {
 		var block EdgeLocalSettlementBlock
 		if err := tx.Where("block_id = ?", blockID).First(&block).Error; err != nil {
 			return err
@@ -548,7 +548,7 @@ func AcknowledgeEdgeLocalSettlementBlock(db *gorm.DB, ack dto.EdgeSettlementAckV
 	if err := ack.Validate(); err != nil {
 		return err
 	}
-	return db.Transaction(func(tx *gorm.DB) error {
+	return withEdgeLocalTransaction(db, "acknowledge settlement block", func(tx *gorm.DB) error {
 		var block EdgeLocalSettlementBlock
 		if err := tx.Where("block_id = ?", ack.BlockID).First(&block).Error; err != nil {
 			return err

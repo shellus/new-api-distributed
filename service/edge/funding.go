@@ -118,6 +118,9 @@ func (f *EdgeBalanceFunding) PreConsume(amount int) error {
 	if amount < 0 || amount > common.MaxQuota {
 		return edgeFundingAPIError(errors.New("edge balance reservation quota is invalid"), http.StatusBadRequest)
 	}
+	if EdgeAccountingSubjectQuarantined(int64(f.relayInfo.UserId), int64(f.relayInfo.TokenId)) {
+		return edgeFundingAPIError(errEdgeAccountingSubjectQuarantined, http.StatusServiceUnavailable)
+	}
 	if f.hasReservation {
 		if f.reservedQuota == int64(amount) {
 			return nil
@@ -159,7 +162,11 @@ func (f *EdgeBalanceFunding) Settle(delta int) (settlementErr error) {
 	staged := false
 	defer func() {
 		if settlementErr != nil {
-			MarkEdgeAccountingFailure(staged)
+			var reservation *model.EdgeLocalQuotaReservation
+			if f != nil {
+				reservation = f.reservation
+			}
+			MarkEdgeAccountingReservationFailure(staged, reservation)
 		}
 	}()
 	if f == nil || !f.hasReservation || f.reservation == nil {
@@ -206,7 +213,7 @@ func (f *EdgeBalanceFunding) Refund() error {
 		return nil
 	}
 	if err := model.RefundEdgeLocalReservation(f.db, f.reservationID, time.Now().UnixMilli()); err != nil {
-		MarkEdgeAccountingFailure(errors.Is(err, model.ErrEdgeLocalSettlementStaged))
+		MarkEdgeAccountingReservationFailure(errors.Is(err, model.ErrEdgeLocalSettlementStaged), f.reservation)
 		return err
 	}
 	f.hasReservation = false

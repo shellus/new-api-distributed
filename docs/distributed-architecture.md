@@ -41,6 +41,8 @@ Prompt Safety Policy 由 master 后台 Option 生成，包含敏感检查开关�
 
 结算数据先可靠保存在 edge 本地，再异步上报。请求完成后先持久化精确 staged settlement，再原子更新余额 overlay、完成 reservation 并写入 usage event/outbox。网络中断后继续积压，恢复连接后从已确认位置续传；重复发送同一批数据不会重复计费。
 
+edge 本地账务历史不是无限增长的长期归档。只有同时低于 master settlement ack 水位和余额回冲水位的历史序列才允许清理，并始终保留可配置的最近审计尾部。异步任务 owner reservation 当前全部保留作为崩溃恢复证据；未确认 outbox、pending block、staged settlement 和 active reservation 也不得清理。权威长期审计保留在 master。
+
 master 在权威结算事务中重新计算 charge，按事件携带的资金来源 exactly-once 扣减钱包或订阅及有限 token，再写入 usage event 和 consume-log outbox。日志与 `quota_data` 使用同一全局 billing event key 做 exactly-once 投影，因此 outbox 重试、master 崩溃和重复区块都不能重复登记消费。
 
 master 还按节点代次和 usage event 完成时间检查滑动窗口。超限时整个区块拒收，只提交节点 settlement circuit 标记与拒绝 receipt；账务、usage、水位和日志 outbox 都不提交。edge 收到 circuit 后停止新 admission、继续 heartbeat 并保留 durable outbox。管理员核账并清除 circuit 后，edge 使用新的 HTTP request ID 重试同一 block，链式摘要和事件内容不变。
@@ -67,7 +69,7 @@ edge 的 `/healthz` 只表示进程存活；`/readyz` 同时要求：
 
 应用新快照时，edge 先关闭数据面，在策略写锁内原子替换投影，随后才恢复 readiness。请求完成余额 reservation 后固定资金来源、快照、价格和 balance revision，重试不能跨快照采用新的路由或价格。
 
-已完成上游请求但本地结算失败时，accounting readiness 立即关闭。维护循环只从 durable staged payload 恢复；已 staged 的 reservation 不能退款。启动时发现 active 但未 staged 的孤儿 reservation 也会永久关闭 readiness，保留现场等待人工核查，重启不自动退款或解除阻断。正常关闭会先停止 admission、等待在途 handler 完成，再停止后台循环和关闭数据库。
+已完成上游请求但本地结算失败时，维护循环只从 durable staged payload 恢复；已 staged 的 reservation 不能退款，并在恢复完成前关闭全局 accounting readiness。精确事件未能 staged 时，edge 不猜测结果，而是保留 active reservation 并隔离其用户与 token；其他 subject 继续服务，重启从无 owner、active 且未 staged 的 reservation 重建隔离。数据库不可用、reservation 身份不完整或账务结构损坏仍关闭全局 readiness。正常关闭会先停止 admission、等待在途 handler 完成，再停止后台循环和关闭数据库。
 
 ## 边界原则
 

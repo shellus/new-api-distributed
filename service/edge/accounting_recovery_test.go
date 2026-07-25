@@ -37,8 +37,9 @@ func TestEdgeAccountingReadinessRecoversDurableBalanceSettlement(t *testing.T) {
 	assert.Equal(t, model.EdgeLocalReservationStatusSettled, reservation.Status)
 }
 
-func TestEdgeAccountingStartupBlocksOnOrphanedBalanceReservation(t *testing.T) {
+func TestEdgeAccountingStartupQuarantinesOnlyOrphanedReservationSubject(t *testing.T) {
 	db, now := newEdgeRuntimeTestDB(t, "")
+	enableEdgeRuntimeServing(t)
 	_, err := model.ReserveEdgeLocalBalance(db, model.EdgeLocalBalanceReservationRequest{
 		ReservationID: "reservation-accounting-orphan", RequestID: "request-accounting-orphan",
 		UserID: 7, TokenID: 11, Quota: 40, SettlementFloorQuota: -10_000_000, NowUnixMilli: now.UnixMilli(),
@@ -46,9 +47,64 @@ func TestEdgeAccountingStartupBlocksOnOrphanedBalanceReservation(t *testing.T) {
 	require.NoError(t, err)
 
 	require.NoError(t, InitializeEdgeAccountingReadiness(context.Background(), db))
-	assert.True(t, edgeAccountingBlock.Load())
+	assert.False(t, edgeAccountingBlock.Load())
+	assert.True(t, edgeAccountingReady.Load())
+	assert.True(t, EdgeServingReady(), "an orphaned subject must not make the whole edge unavailable")
+	assert.True(t, EdgeAccountingSubjectQuarantined(7, 11))
+	assert.False(t, EdgeAccountingSubjectQuarantined(8, 12))
+	assert.Equal(t, 1, EdgeAccountingQuarantinedReservationCount())
+
+	blockedFunding := newEdgeBalanceFundingForTest(db, now, "reservation-accounting-blocked", "request-accounting-blocked")
+	err = blockedFunding.PreConsume(1)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), errEdgeAccountingSubjectQuarantined.Error())
+	assert.False(t, blockedFunding.HasReservation())
+
+	require.NoError(t, model.RefundEdgeLocalReservation(db, "reservation-accounting-orphan", now.Add(time.Second).UnixMilli()))
+	require.NoError(t, ReconcileEdgeAccountingQuarantine(context.Background(), db))
+	assert.False(t, EdgeAccountingSubjectQuarantined(7, 11))
+	assert.Zero(t, EdgeAccountingQuarantinedReservationCount())
+
+	recoveredFunding := newEdgeBalanceFundingForTest(db, now, "reservation-accounting-recovered", "request-accounting-recovered")
+	require.NoError(t, recoveredFunding.PreConsume(1))
+	require.NoError(t, recoveredFunding.Refund())
+}
+
+func TestEdgeAccountingRuntimeFailureQuarantinesReservationWithoutClosingReadiness(t *testing.T) {
+	db, now := newEdgeRuntimeTestDB(t, "")
+	enableEdgeRuntimeServing(t)
+	reservation, err := model.ReserveEdgeLocalBalance(db, model.EdgeLocalBalanceReservationRequest{
+		ReservationID: "reservation-accounting-runtime", RequestID: "request-accounting-runtime",
+		UserID: 7, TokenID: 11, Quota: 40, SettlementFloorQuota: -10_000_000, NowUnixMilli: now.UnixMilli(),
+	})
+	require.NoError(t, err)
+
+	MarkEdgeAccountingReservationFailure(false, reservation)
+	assert.False(t, edgeAccountingBlock.Load())
+	assert.True(t, edgeAccountingReady.Load())
+	assert.True(t, EdgeServingReady())
+	assert.True(t, EdgeAccountingSubjectQuarantined(7, 11))
+}
+
+func TestEdgeAccountingQuarantinePromotesDurablyStagedReservationToGlobalRecovery(t *testing.T) {
+	db, now := newEdgeRuntimeTestDB(t, "")
+	_, err := model.ReserveEdgeLocalBalance(db, model.EdgeLocalBalanceReservationRequest{
+		ReservationID: "reservation-accounting-promote", RequestID: "request-accounting-promote",
+		UserID: 7, TokenID: 11, Quota: 40, SettlementFloorQuota: -10_000_000, NowUnixMilli: now.UnixMilli(),
+	})
+	require.NoError(t, err)
+	require.NoError(t, InitializeEdgeAccountingReadiness(context.Background(), db))
+	assert.True(t, EdgeAccountingSubjectQuarantined(7, 11))
+
+	require.NoError(t, model.StageEdgeLocalReservationSettlement(
+		db, "reservation-accounting-promote", edgeAccountingTestUsageEvent("event-accounting-promote", 40, now),
+	))
+	require.NoError(t, ReconcileEdgeAccountingQuarantine(context.Background(), db))
 	assert.False(t, edgeAccountingReady.Load())
-	assert.ErrorIs(t, RecoverEdgeStagedSettlements(context.Background(), db), errEdgeAccountingRecoveryBlocked)
+	assert.False(t, EdgeAccountingSubjectQuarantined(7, 11))
+
+	require.NoError(t, RecoverEdgeStagedSettlements(context.Background(), db))
+	assert.True(t, edgeAccountingReady.Load())
 }
 
 func edgeAccountingTestUsageEvent(eventID string, chargedQuota int64, now time.Time) dto.EdgeUsageEventV1 {

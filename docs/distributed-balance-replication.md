@@ -188,7 +188,7 @@ available_quota = replicated_quota - reserved_quota - unsettled_quota
 2. **Reserve(delta)**：正 delta 同时扩展资金账户与有限 token 的预占；负 delta 只回滚本次扩展。任一账户更新失败时整个事务回滚。
 3. **Refund**：在没有 staged usage 时，把 reservation 的预占从两个账户原子释放，并把 reservation 标记为 refunded。
 4. **Settle**：先原样 staged 精确 usage；随后在一个事务中从 `reserved_quota` 释放原预占，把实际 charge 加入 `unsettled_quota`，完成 reservation，写 usage event/outbox 并推进事件序号。实际 charge 高于预占时，额外部分必须通过 Settlement Floor；该下限不参与 PreConsume 或 Reserve(delta)。
-5. **Recovery**：启动时 active 且未 staged 的孤儿 reservation 仍 fail closed；已 staged 的 reservation 只从 durable payload 重试。该安全边界沿用现有实现（`service/edge/accounting_recovery.go:15`、`service/edge/accounting_recovery.go:37`、`service/edge/accounting_recovery.go:60`）。
+5. **Recovery**：已 staged 的 reservation 只从 durable payload 重试，并在恢复完成前关闭全局 accounting readiness。无 owner、active 且未 staged 的孤儿 reservation 保留现场并隔离其用户与 token，不自动退款或猜测 charge；其他 subject 继续服务。数据库不可用、reservation 身份不完整或账务结构损坏仍全局 fail closed。该边界由 [ADR 0008](./adr/0008-quarantine-unstaged-accounting-by-subject.md) 固定。
 
 当前 `EdgeUserSettingV1` 明确排除了 `billing_preference`，因为资金选择由 master 租约承担（`dto/edge_control_v1.go:321`）。删除租约后必须把规范化后的 `billing_preference` 加入低频用户策略快照；它不属于余额 dataset。订阅按 `end_at_unix_milli, subscription_id` 升序选择，严格保持 `subscription_only`、`wallet_only`、`wallet_first`、`subscription_first` 和 `allow_wallet_overflow` 的现有语义（`service/billing_session.go:428`、`service/billing_session.go:492`、`model/subscription.go:1309`）。
 

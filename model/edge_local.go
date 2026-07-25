@@ -651,7 +651,7 @@ func ApplyEdgeLocalSnapshot(db *gorm.DB, snapshot EdgeLocalSnapshotProjectionDat
 		})
 	}
 
-	return db.Transaction(func(tx *gorm.DB) error {
+	return withEdgeLocalTransaction(db, "apply snapshot", func(tx *gorm.DB) error {
 		var current EdgeLocalControlState
 		if err := tx.First(&current, edgeLocalControlStateID).Error; err != nil {
 			return err
@@ -709,7 +709,9 @@ func ApplyEdgeLocalSnapshot(db *gorm.DB, snapshot EdgeLocalSnapshotProjectionDat
 // keys to the durable Channel/Ability runtime projection without changing the
 // signed business snapshot or any accounting state.
 func RefreshEdgeLocalChannelRuntime(db *gorm.DB) error {
-	return refreshEdgeLocalChannelRuntime(db)
+	return withEdgeLocalWrite(db, "refresh channel runtime", func() error {
+		return refreshEdgeLocalChannelRuntime(db)
+	})
 }
 
 func refreshEdgeLocalChannelRuntime(db *gorm.DB) error {
@@ -1260,7 +1262,7 @@ func RefundEdgeLocalReservation(db *gorm.DB, reservationID string, nowUnixMilli 
 	if nowUnixMilli <= 0 {
 		return errors.New("reservation refund time must be positive")
 	}
-	return db.Transaction(func(tx *gorm.DB) error {
+	return withEdgeLocalTransaction(db, "refund reservation", func(tx *gorm.DB) error {
 		var reservation EdgeLocalQuotaReservation
 		if err := tx.Where("reservation_id = ?", reservationID).First(&reservation).Error; err != nil {
 			return err

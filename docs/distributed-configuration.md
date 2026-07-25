@@ -139,6 +139,8 @@ edge 的人工配置只保留部署必需信息：
 | `EDGE_CHANNEL_CONFIG_DIR` | `/config/channels` | edge 本地渠道 YAML 目录；只读取顶层 `.yaml`/`.yml` 文件 |
 | `EDGE_BALANCE_SETTLEMENT_FLOOR_QUOTA` | `-10000000`，范围 `-common.MaxQuota..0` | 已执行请求的实际 charge 超过 reservation 时，有限资金账户和有限 token 账户仍可完成结算的最低余额；不参与新请求 admission |
 | `EDGE_BALANCE_NEGATIVE_FLOOR_QUOTA` | 兼容别名 | 仅在未设置新变量时作为 Settlement Floor 读取；后续部署应迁移到新变量名 |
+| `EDGE_LOCAL_ACCOUNTING_RETENTION_EVENTS` | `10000`，范围 `1000..1000000` | 保留最近多少条已经完成 master 确认和本地余额回冲的账务序列；更老的本地重复审计副本由维护循环分批清理 |
+| `EDGE_LOCAL_ACCOUNTING_PRUNE_BATCH_SIZE` | `500`，范围 `1..5000` | 单轮从 reservation、usage、outbox 和 settlement block 各清理的最大行数 |
 | `EDGE_CPA_HEALTH_TIMEOUT_SECONDS` | 兼容保留 | 当前 edge 不执行本地上游合成探测，也不读取此变量 |
 | `SHUTDOWN_TIMEOUT_SECONDS` | `120` | HTTP 优雅关闭时间；超时后强制关闭连接，但仍等待 handler 完成账务收尾 |
 | `EDGE_DRAIN_TIMEOUT_SECONDS` | `30` | 停止后台循环后，最终上传 durable settlement 的时间预算 |
@@ -244,7 +246,9 @@ edge SQLite 保存：
 2. 再在同一 SQLite 事务中调整余额 overlay、完成 reservation、写入不可变 usage event 和本地 outbox。
 3. 后台按连续序列组成持久化结算区块；同一区块重试和进程重启复用完全相同的请求内容。
 
-一旦上游请求已经完成而本地结算失败，edge 会关闭账务 readiness。已有 staged settlement 由账务维护循环确定性重试；在 staged 事件全部完成前，`/readyz` 保持 `503` 且不接受新请求。若失败发生在精确事件成功 staged 之前，或启动扫描发现 active 但未 staged 的孤儿 reservation，账务门会保持锁定并要求人工核查和处置，不能猜测请求结果后自动退款；重启不会自动清除该阻断。正常关闭会先停止 admission、等待在途 handler 完成账务收尾，再停止后台循环并执行最终 drain。
+账务维护循环只清理同时满足两个水位的历史：master 已确认的 settlement sequence，以及后续余额复制已经回冲的 settlement sequence。清理保留最近的审计尾部；异步任务 owner reservation 当前全部保留作为崩溃恢复证据，pending、in-block、未回冲 usage、staged settlement 和 active reservation 也不进入清理范围。在线清理只释放 SQLite 可复用页，不执行会长时间独占数据库的 `VACUUM`。
+
+一旦上游请求已经完成而本地结算失败，已有 staged settlement 会关闭全局账务 readiness，并由账务维护循环确定性重试；在 staged 事件全部完成前，`/readyz` 保持 `503` 且不接受新请求。若失败发生在精确事件成功 staged 之前，或启动扫描发现无 owner、active 且未 staged 的孤儿 reservation，edge 保留 reservation 和预占现场并隔离其用户与 token；相关 subject 的新请求在访问 CPA 前失败，其他 subject 继续服务。该隔离要求人工核查和处置，不能猜测请求结果后自动退款；重启会从 reservation 重建隔离。数据库不可用、reservation 身份不完整或账务结构损坏仍关闭全局 readiness。正常关闭会先停止 admission、等待在途 handler 完成账务收尾，再停止后台循环并执行最终 drain。
 
 ## Master exact-once 投影
 

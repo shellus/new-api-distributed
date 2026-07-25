@@ -152,7 +152,7 @@ edge 不实现协议适配、流式转发、OAuth 凭证调度或第二套计费
 - 最终共 16 个 usage event，权威扣费 2208，prompt/completion token 分别为 80/48；master consume log、`quota_data` 事件和请求统计均精确为 16，`quota_data` 累计额度为 2208。
 - 同一结算区块重放得到原确认结果；usage、用户/令牌额度、consume log、`quota_data` 和请求统计均未重复变化。
 - 快照截断 lease 的维护循环连续观察期间没有重复 acquire/close；CPA 故障、master 离线、结算重放、edge 重启和优雅关闭均保留账务守恒。
-- 零额度免费 lease、实际用量高于预扣、staged settlement 重启恢复、乱序/冲突区块回滚和孤儿 reservation fail-closed 由确定性数据库回归测试覆盖。
+- 零额度免费 lease、实际用量高于预扣、staged settlement 重启恢复、乱序/冲突区块回滚和孤儿 reservation subject quarantine 由确定性数据库回归测试覆盖。
 - 真实 CPA 使用隔离凭证完成加载、模型发现和上游请求转发；上游账户返回 429 用量上限错误。成功响应的四种协议模式由隔离确定性 CPA 实例验证，不在仓库中保存凭证、地址或本机路径。
 
 ## v1 历史边界（已由 ADR 0004 与 ADR 0005 替代）
@@ -245,6 +245,8 @@ go build ./cmd/newapi-edge
 6. readiness 不再检查策略快照 TTL；最后一份已验证策略过期后只冻结变化。显式 token 到期、节点禁用、accounting 故障和未初始化余额仍 fail closed。
 7. 提供旧 `edge.db` 清洁迁移检查；存在 active/staged/pending 账务时拒绝升级。
 8. TDD 覆盖断网持续扣减到零、禁止主动透支、退款、实际 charge 超预占、结算变负后拒绝下一次正额度请求、overlay 收敛、重启恢复和策略 TTL 过期继续服务；测试通过并经用户确认后才提交。
+9. 账务维护循环按 master ack 与余额回冲的共同水位分批清理旧 reservation、usage、outbox 和 settlement block，保留最近审计尾部；异步任务 owner reservation 当前全部保留作为崩溃恢复证据，避免同步请求的重复 payload 无限放大 edge SQLite。
+10. 未 staged 的同步请求孤儿 reservation 按用户与 token 隔离，不再关闭整个 edge；已 staged recovery、数据库不可用、身份不完整和账务结构损坏继续全局 fail closed。
 
 ### Phase D：Master 权威扣账与安全熔断（已实现）
 
@@ -282,3 +284,5 @@ go build ./cmd/newapi-edge
 
 - master consume-log outbox 空轮询当前会让 GORM 每两秒记录一次预期内的 `record not found`。后续应把 `gorm.ErrRecordNotFound` 作为正常空闲结果处理并抑制对应数据库错误日志，同时保留真实查询错误和 worker 重试日志。
 - edge 的 `/v1/models` 路径仍会触发一次面向 master `users` 表的用户设置查询；SQLite 中没有该表时虽然接口继续返回成功，但会产生误导性的数据库错误日志。后续应让该路径只读取 edge 用户投影，并增加“不查询 master User/Token 表”的路由回归测试。
+- `RecoverEdgeTaskBilling` 当前遇到首条 task/reservation 归属异常就中止 edge 启动。后续应增加持久化的按任务或 subject quarantine：单任务异常只冻结相关任务和账户，数据库不可用或任务账务结构损坏才关闭全局 readiness。
+- 控制循环遇到终止类协议、身份或持久化错误后会退出后台 goroutine，但 HTTP 进程继续存活且长期不 ready。后续应把可重试错误交给受监督重启循环，把不可恢复错误上升到 application 生命周期，避免形成无控制循环的僵尸 edge 进程。
