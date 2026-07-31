@@ -385,12 +385,17 @@ func TestPublishMasterConsumeLogOutboxRejectsTamperedProjection(t *testing.T) {
 		Where("id = ?", outbox.ID).
 		UpdateColumn("payload", string(tampered)).Error)
 
-	processed, err := PublishMasterConsumeLogOutboxBatch(context.Background(), fixture.now.Add(2*time.Minute), 1)
-	require.Error(t, err)
-	assert.Equal(t, 1, processed)
+	for attempt := 0; attempt < consumeLogOutboxQuarantineAfter; attempt++ {
+		processed, err := PublishMasterConsumeLogOutboxBatch(
+			context.Background(), fixture.now.Add(time.Duration(attempt+2)*time.Minute), 1,
+		)
+		require.Error(t, err)
+		assert.Equal(t, 1, processed)
+	}
 
 	require.NoError(t, fixture.db.First(&outbox, outbox.ID).Error)
-	assert.Equal(t, model.EdgeConsumeLogOutboxStatusFailed, outbox.Status)
+	assert.Equal(t, model.EdgeConsumeLogOutboxStatusQuarantined, outbox.Status)
+	assert.Equal(t, consumeLogOutboxQuarantineAfter, outbox.Attempts)
 	assert.Contains(t, outbox.LastError, "does not match the authoritative usage event")
 	var count int64
 	require.NoError(t, fixture.db.Model(&model.Log{}).Count(&count).Error)

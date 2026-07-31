@@ -86,6 +86,30 @@ func TestEdgeAccountingRuntimeFailureQuarantinesReservationWithoutClosingReadine
 	assert.True(t, EdgeAccountingSubjectQuarantined(7, 11))
 }
 
+func TestEdgeAccountingManualQuarantineRetainsUnknownStatusUntilTerminal(t *testing.T) {
+	db, now := newEdgeRuntimeTestDB(t, "")
+	reservation, err := model.ReserveEdgeLocalBalance(db, model.EdgeLocalBalanceReservationRequest{
+		ReservationID: "reservation-accounting-invalid-status", RequestID: "request-accounting-invalid-status",
+		UserID: 7, TokenID: 11, Quota: 40, SettlementFloorQuota: -10_000_000, NowUnixMilli: now.UnixMilli(),
+	})
+	require.NoError(t, err)
+	require.NoError(t, edgeAccountingQuarantine.addManual(*reservation, false))
+	require.NoError(t, db.Model(&model.EdgeLocalQuotaReservation{}).
+		Where("reservation_id = ?", reservation.ReservationID).
+		UpdateColumn("status", model.EdgeLocalReservationStatus("invalid")).Error)
+
+	require.NoError(t, ReconcileEdgeAccountingQuarantine(context.Background(), db))
+	assert.True(t, EdgeAccountingSubjectQuarantined(7, 11))
+	assert.Equal(t, 1, EdgeAccountingQuarantinedReservationCount())
+
+	require.NoError(t, db.Model(&model.EdgeLocalQuotaReservation{}).
+		Where("reservation_id = ?", reservation.ReservationID).
+		UpdateColumn("status", model.EdgeLocalReservationStatusRefunded).Error)
+	require.NoError(t, ReconcileEdgeAccountingQuarantine(context.Background(), db))
+	assert.False(t, EdgeAccountingSubjectQuarantined(7, 11))
+	assert.Zero(t, EdgeAccountingQuarantinedReservationCount())
+}
+
 func TestEdgeAccountingQuarantinePromotesDurablyStagedReservationToGlobalRecovery(t *testing.T) {
 	db, now := newEdgeRuntimeTestDB(t, "")
 	_, err := model.ReserveEdgeLocalBalance(db, model.EdgeLocalBalanceReservationRequest{

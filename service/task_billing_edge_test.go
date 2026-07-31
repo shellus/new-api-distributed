@@ -83,6 +83,70 @@ func TestRecoverEdgeTaskBillingReconcilesSettledAndZeroQuotaFailedTasks(t *testi
 	assert.Equal(t, model.EdgeLocalReservationStatusRefunded, zeroReservation.Status)
 }
 
+func TestRecoverEdgeTaskBillingQuarantinesOneOwnerMismatchAndContinues(t *testing.T) {
+	db, now := newTaskBillingEdgeTestDB(t)
+	previousDB := model.DB
+	model.DB = db
+	require.NoError(t, common.SetRuntimeMode(common.RuntimeModeEdge))
+	var quarantined []string
+	SetEdgeTaskRecoveryQuarantine(func(
+		_ context.Context,
+		reservation *model.EdgeLocalQuotaReservation,
+		_ bool,
+		_ error,
+	) {
+		quarantined = append(quarantined, reservation.ReservationID)
+	})
+	t.Cleanup(func() {
+		SetEdgeTaskRecoveryQuarantine(nil)
+		model.DB = previousDB
+		require.NoError(t, common.SetRuntimeMode(common.RuntimeModeMaster))
+	})
+
+	anomalousReservation, err := model.ReserveEdgeLocalBalance(db, model.EdgeLocalBalanceReservationRequest{
+		ReservationID: "reservation-task-owner-mismatch", RequestID: "request-task-owner-mismatch",
+		UserID: 7, TokenID: 11, Quota: 0, SettlementFloorQuota: -100, NowUnixMilli: now.UnixMilli(),
+	})
+	require.NoError(t, err)
+	anomalousTask := &model.Task{
+		TaskID: "task-owner-mismatch", UserId: 7, Group: "default", ChannelId: 31,
+		Status: model.TaskStatusFailure, Progress: "100%", FailReason: "failed",
+		Properties:  model.Properties{OriginModelName: "gpt-task"},
+		PrivateData: model.TaskPrivateData{TokenId: 11, EdgeReservationID: anomalousReservation.ReservationID},
+	}
+	require.NoError(t, anomalousTask.Insert())
+	require.NoError(t, model.BindEdgeLocalReservationOwner(
+		db, anomalousReservation.ReservationID, "task", "another-task", now.Add(time.Second).UnixMilli(),
+	))
+
+	healthyReservation, err := model.ReserveEdgeLocalBalance(db, model.EdgeLocalBalanceReservationRequest{
+		ReservationID: "reservation-task-after-anomaly", RequestID: "request-task-after-anomaly",
+		UserID: 7, TokenID: 11, Quota: 0, SettlementFloorQuota: -100, NowUnixMilli: now.Add(2 * time.Second).UnixMilli(),
+	})
+	require.NoError(t, err)
+	healthyTask := &model.Task{
+		TaskID: "task-after-anomaly", UserId: 7, Group: "default", ChannelId: 31,
+		Status: model.TaskStatusFailure, Progress: "100%", FailReason: "failed",
+		Properties:  model.Properties{OriginModelName: "gpt-task"},
+		PrivateData: model.TaskPrivateData{TokenId: 11, EdgeReservationID: healthyReservation.ReservationID},
+	}
+	require.NoError(t, healthyTask.Insert())
+	require.NoError(t, model.BindEdgeLocalReservationOwner(
+		db, healthyReservation.ReservationID, "task", healthyTask.TaskID, now.Add(3*time.Second).UnixMilli(),
+	))
+
+	require.NoError(t, RecoverEdgeTaskBilling(context.Background()))
+	assert.Equal(t, []string{anomalousReservation.ReservationID}, quarantined)
+	reloadedAnomalous, exists, err := model.GetByOnlyTaskId(anomalousTask.TaskID)
+	require.NoError(t, err)
+	require.True(t, exists)
+	assert.Equal(t, anomalousReservation.ReservationID, reloadedAnomalous.PrivateData.EdgeReservationID)
+	reloadedHealthy, exists, err := model.GetByOnlyTaskId(healthyTask.TaskID)
+	require.NoError(t, err)
+	require.True(t, exists)
+	assert.Empty(t, reloadedHealthy.PrivateData.EdgeReservationID)
+}
+
 func TestFinalizeEdgeTaskBillingUsesSettlementFloorWithoutExpandingAdmission(t *testing.T) {
 	db, now := newTaskBillingEdgeTestDB(t)
 	previousDB := model.DB

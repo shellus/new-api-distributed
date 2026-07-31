@@ -69,13 +69,37 @@ func MarkEdgeAccountingReservationFailure(recoverable bool, reservation *model.E
 		MarkEdgeAccountingFailure(true)
 		return
 	}
-	if reservation == nil || edgeAccountingQuarantine.add(*reservation) != nil {
+	if reservation == nil || edgeAccountingQuarantine.addManual(*reservation, false) != nil {
 		MarkEdgeAccountingFailure(false)
 		return
 	}
 	common.SysError(fmt.Sprintf(
 		"edge accounting quarantined reservation %s for user %d token %d; operator review is required",
 		reservation.ReservationID, reservation.UserID, reservation.TokenID,
+	))
+}
+
+// QuarantineEdgeTaskReservation isolates a single task subject. Missing
+// reservation references remain quarantined until restart/operator repair;
+// existing reservation rows clear automatically after reaching a terminal
+// accounting state.
+func QuarantineEdgeTaskReservation(
+	_ context.Context,
+	reservation *model.EdgeLocalQuotaReservation,
+	retainWhenMissing bool,
+	cause error,
+) {
+	if reservation == nil || edgeAccountingQuarantine.addManual(*reservation, retainWhenMissing) != nil {
+		MarkEdgeAccountingFailure(false)
+		return
+	}
+	reason := "unknown task accounting anomaly"
+	if cause != nil {
+		reason = cause.Error()
+	}
+	common.SysError(fmt.Sprintf(
+		"edge task accounting quarantined reservation %s for user %d token %d: %s",
+		reservation.ReservationID, reservation.UserID, reservation.TokenID, reason,
 	))
 }
 

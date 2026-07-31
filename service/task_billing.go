@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/QuantumNous/new-api/common"
@@ -18,7 +19,40 @@ import (
 	"github.com/QuantumNous/new-api/types"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
+	"gorm.io/gorm"
 )
+
+type EdgeTaskRecoveryQuarantineFunc func(
+	context.Context,
+	*model.EdgeLocalQuotaReservation,
+	bool,
+	error,
+)
+
+var (
+	edgeTaskRecoveryQuarantineMu sync.RWMutex
+	edgeTaskRecoveryQuarantine   EdgeTaskRecoveryQuarantineFunc
+)
+
+func SetEdgeTaskRecoveryQuarantine(callback EdgeTaskRecoveryQuarantineFunc) {
+	edgeTaskRecoveryQuarantineMu.Lock()
+	edgeTaskRecoveryQuarantine = callback
+	edgeTaskRecoveryQuarantineMu.Unlock()
+}
+
+func quarantineEdgeTaskRecovery(
+	ctx context.Context,
+	reservation *model.EdgeLocalQuotaReservation,
+	retainWhenMissing bool,
+	cause error,
+) {
+	edgeTaskRecoveryQuarantineMu.RLock()
+	callback := edgeTaskRecoveryQuarantine
+	edgeTaskRecoveryQuarantineMu.RUnlock()
+	if callback != nil {
+		callback(ctx, reservation, retainWhenMissing, cause)
+	}
+}
 
 // LogTaskConsumption 记录任务消费日志和统计信息（仅记录，不涉及实际扣费）。
 // 实际扣费已由 BillingSession（PreConsumeBilling + SettleBilling）完成。
@@ -426,13 +460,33 @@ func RecoverEdgeTaskBilling(ctx context.Context) error {
 		return err
 	}
 	taskReservations := make(map[string]*model.Task, len(tasks))
+	quarantined := 0
+	quarantinedReservations := make(map[string]struct{})
 	for _, task := range tasks {
 		reservation, err := model.GetEdgeLocalReservation(model.DB, task.PrivateData.EdgeReservationID)
 		if err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				missing := &model.EdgeLocalQuotaReservation{
+					ReservationID: task.PrivateData.EdgeReservationID,
+					UserID:        int64(task.UserId), TokenID: int64(task.PrivateData.TokenId),
+					Status: model.EdgeLocalReservationStatusActive,
+				}
+				cause := fmt.Errorf("edge task %s references a missing reservation", task.TaskID)
+				quarantineEdgeTaskRecovery(ctx, missing, true, cause)
+				logger.LogError(ctx, cause.Error())
+				quarantined++
+				quarantinedReservations[missing.ReservationID] = struct{}{}
+				continue
+			}
 			return err
 		}
 		if reservation.OwnerKind != "task" || reservation.OwnerID != task.TaskID {
-			return fmt.Errorf("edge task reservation %s owner does not match task %s", reservation.ReservationID, task.TaskID)
+			cause := fmt.Errorf("edge task reservation %s owner does not match task %s", reservation.ReservationID, task.TaskID)
+			quarantineEdgeTaskRecovery(ctx, reservation, false, cause)
+			logger.LogError(ctx, cause.Error())
+			quarantined++
+			quarantinedReservations[reservation.ReservationID] = struct{}{}
+			continue
 		}
 		taskReservations[reservation.ReservationID] = task
 		switch reservation.Status {
@@ -473,7 +527,11 @@ func RecoverEdgeTaskBilling(ctx context.Context) error {
 				}
 			}
 		default:
-			return fmt.Errorf("edge task reservation %s has invalid status %q", reservation.ReservationID, reservation.Status)
+			cause := fmt.Errorf("edge task reservation %s has invalid status %q", reservation.ReservationID, reservation.Status)
+			quarantineEdgeTaskRecovery(ctx, reservation, false, cause)
+			logger.LogError(ctx, cause.Error())
+			quarantined++
+			quarantinedReservations[reservation.ReservationID] = struct{}{}
 		}
 	}
 	activeTaskReservations, err := model.ListActiveEdgeLocalOwnedReservations(model.DB, "task")
@@ -481,9 +539,16 @@ func RecoverEdgeTaskBilling(ctx context.Context) error {
 		return err
 	}
 	for _, reservation := range activeTaskReservations {
+		if _, exists := quarantinedReservations[reservation.ReservationID]; exists {
+			continue
+		}
 		task, exists := taskReservations[reservation.ReservationID]
 		if !exists || task == nil || task.TaskID != reservation.OwnerID {
-			return fmt.Errorf("edge task reservation %s has no matching task", reservation.ReservationID)
+			cause := fmt.Errorf("edge task reservation %s has no matching task", reservation.ReservationID)
+			quarantineEdgeTaskRecovery(ctx, &reservation, false, cause)
+			logger.LogError(ctx, cause.Error())
+			quarantined++
+			quarantinedReservations[reservation.ReservationID] = struct{}{}
 		}
 	}
 
@@ -495,11 +560,29 @@ func RecoverEdgeTaskBilling(ctx context.Context) error {
 	for _, task := range midjourneyTasks {
 		reservation, err := model.GetEdgeLocalReservation(model.DB, task.EdgeReservationID)
 		if err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				missing := &model.EdgeLocalQuotaReservation{
+					ReservationID: task.EdgeReservationID,
+					UserID:        int64(task.UserId), TokenID: int64(task.TokenId),
+					Status: model.EdgeLocalReservationStatusActive,
+				}
+				cause := fmt.Errorf("edge Midjourney task %d references a missing reservation", task.Id)
+				quarantineEdgeTaskRecovery(ctx, missing, true, cause)
+				logger.LogError(ctx, cause.Error())
+				quarantined++
+				quarantinedReservations[missing.ReservationID] = struct{}{}
+				continue
+			}
 			return err
 		}
 		expectedOwner := fmt.Sprintf("midjourney-%d", task.Id)
 		if reservation.OwnerKind != "midjourney" || reservation.OwnerID != expectedOwner {
-			return fmt.Errorf("edge Midjourney reservation %s owner does not match task %d", reservation.ReservationID, task.Id)
+			cause := fmt.Errorf("edge Midjourney reservation %s owner does not match task %d", reservation.ReservationID, task.Id)
+			quarantineEdgeTaskRecovery(ctx, reservation, false, cause)
+			logger.LogError(ctx, cause.Error())
+			quarantined++
+			quarantinedReservations[reservation.ReservationID] = struct{}{}
+			continue
 		}
 		midjourneyReservations[reservation.ReservationID] = task
 		switch reservation.Status {
@@ -538,7 +621,11 @@ func RecoverEdgeTaskBilling(ctx context.Context) error {
 				}
 			}
 		default:
-			return fmt.Errorf("edge Midjourney reservation %s has invalid status %q", reservation.ReservationID, reservation.Status)
+			cause := fmt.Errorf("edge Midjourney reservation %s has invalid status %q", reservation.ReservationID, reservation.Status)
+			quarantineEdgeTaskRecovery(ctx, reservation, false, cause)
+			logger.LogError(ctx, cause.Error())
+			quarantined++
+			quarantinedReservations[reservation.ReservationID] = struct{}{}
 		}
 	}
 	activeMidjourneyReservations, err := model.ListActiveEdgeLocalOwnedReservations(model.DB, "midjourney")
@@ -546,14 +633,27 @@ func RecoverEdgeTaskBilling(ctx context.Context) error {
 		return err
 	}
 	for _, reservation := range activeMidjourneyReservations {
+		if _, exists := quarantinedReservations[reservation.ReservationID]; exists {
+			continue
+		}
 		task, exists := midjourneyReservations[reservation.ReservationID]
 		if !exists || task == nil || fmt.Sprintf("midjourney-%d", task.Id) != reservation.OwnerID {
-			return fmt.Errorf("edge Midjourney reservation %s has no matching task", reservation.ReservationID)
+			cause := fmt.Errorf("edge Midjourney reservation %s has no matching task", reservation.ReservationID)
+			quarantineEdgeTaskRecovery(ctx, &reservation, false, cause)
+			logger.LogError(ctx, cause.Error())
+			quarantined++
+			quarantinedReservations[reservation.ReservationID] = struct{}{}
 		}
 	}
 	// The owner scans deliberately cover finalized reservations as well as
 	// active ones. This closes the crash window between durable ledger settlement
 	// and clearing the task's reservation pointer.
+	if quarantined > 0 {
+		common.SysError(fmt.Sprintf(
+			"edge task accounting recovery quarantined %d anomalous reservations; unaffected tasks continue",
+			quarantined,
+		))
+	}
 	return nil
 }
 

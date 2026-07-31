@@ -71,6 +71,147 @@ func TestMasterSettlementChargesSubscriptionAndAllowsActualAboveReserve(t *testi
 	assert.Equal(t, int64(220), stored.AmountUsed)
 }
 
+func TestMasterSettlementMissingCurrentChannelKeepsChargeAndAdvancesSequence(t *testing.T) {
+	fixture := newMasterSettlementTestFixture(t, "missing-current-channel", 5_000, 5_000)
+	require.NoError(t, fixture.db.Delete(&model.Channel{}, fixture.channel.Id).Error)
+
+	first := masterSettlementBlockForTest(t, fixture, 1, "wallet", 0, false)
+	ack := settleMasterBlockForTest(t, fixture, first, "settlement-missing-current-channel-1")
+	assert.Equal(t, int64(1), ack.AckedThroughSequence)
+
+	var user model.User
+	var token model.Token
+	require.NoError(t, fixture.db.First(&user, fixture.user.Id).Error)
+	require.NoError(t, fixture.db.First(&token, fixture.token.Id).Error)
+	assert.Equal(t, 4_880, user.Quota)
+	assert.Zero(t, user.UsedQuota, "all auxiliary statistics roll back together when the channel projection is unavailable")
+	assert.Equal(t, 4_880, token.RemainQuota)
+	assert.Zero(t, token.UsedQuota)
+
+	var block model.EdgeSettlementBlock
+	require.NoError(t, fixture.db.First(&block).Error)
+	assert.Equal(t, 1, block.AppliedEventCount)
+	assert.Zero(t, block.SkippedEventCount)
+	var skipped int64
+	require.NoError(t, fixture.db.Model(&model.EdgeSettlementSkippedEvent{}).Count(&skipped).Error)
+	assert.Zero(t, skipped)
+
+	second := masterSettlementBlockForTest(t, fixture, 2, "wallet", 0, false)
+	second.PreviousBlockID = first.BlockID
+	second.PreviousBlockDigest = first.BlockDigest
+	require.NoError(t, edgesettlement.SetBlockDigestV1(fixture.node.NodeUID, fixture.node.Generation, &second))
+	ack = settleMasterBlockForTest(t, fixture, second, "settlement-missing-current-channel-2")
+	assert.Equal(t, int64(2), ack.AckedThroughSequence)
+	require.NoError(t, fixture.db.First(&user, fixture.user.Id).Error)
+	assert.Equal(t, 4_760, user.Quota)
+}
+
+func TestMasterSettlementMissingCurrentSubscriptionSkipsEventAndContinues(t *testing.T) {
+	fixture := newMasterSettlementTestFixture(t, "missing-current-subscription", 5_000, 5_000)
+	subscription := &model.UserSubscription{
+		UserId: fixture.user.Id, AmountTotal: 1_000, AmountUsed: 100,
+		StartTime: fixture.now.Add(-time.Hour).Unix(), EndTime: fixture.now.Add(time.Hour).Unix(), Status: "active",
+	}
+	require.NoError(t, fixture.db.Create(subscription).Error)
+	first := masterSettlementBlockForTest(t, fixture, 1, "subscription", int64(subscription.Id), false)
+	require.NoError(t, fixture.db.Unscoped().Delete(&model.UserSubscription{}, subscription.Id).Error)
+
+	ack := settleMasterBlockForTest(t, fixture, first, "settlement-missing-current-subscription")
+	assert.Equal(t, int64(1), ack.AckedThroughSequence)
+	assertMasterSettlementBalances(t, fixture, 5_000, 0, 5_000, 0, 0)
+
+	var block model.EdgeSettlementBlock
+	require.NoError(t, fixture.db.First(&block).Error)
+	assert.Zero(t, block.AppliedEventCount)
+	assert.Equal(t, 1, block.SkippedEventCount)
+	var skipped model.EdgeSettlementSkippedEvent
+	require.NoError(t, fixture.db.First(&skipped).Error)
+	assert.Equal(t, "current_subscription_missing_or_reassigned", skipped.ReasonCode)
+	assert.Equal(t, first.Events[0].EventID, skipped.EventUID)
+	assert.NotEmpty(t, skipped.EventPayloadSHA256)
+
+	duplicate := settleMasterBlockForTest(t, fixture, first, "settlement-missing-current-subscription")
+	assert.Equal(t, dto.EdgeSettlementAckDuplicateV1, duplicate.Status)
+	var skippedCount int64
+	require.NoError(t, fixture.db.Model(&model.EdgeSettlementSkippedEvent{}).Count(&skippedCount).Error)
+	assert.Equal(t, int64(1), skippedCount)
+
+	second := masterSettlementBlockForTest(t, fixture, 2, "wallet", 0, false)
+	second.PreviousBlockID = first.BlockID
+	second.PreviousBlockDigest = first.BlockDigest
+	require.NoError(t, edgesettlement.SetBlockDigestV1(fixture.node.NodeUID, fixture.node.Generation, &second))
+	settleMasterBlockForTest(t, fixture, second, "settlement-after-missing-subscription")
+	assertMasterSettlementBalances(t, fixture, 4_880, 120, 4_880, 120, 120)
+}
+
+func TestMasterSettlementSkippedEventStillCountsTowardCircuitWindow(t *testing.T) {
+	fixture := newMasterSettlementTestFixture(t, "skipped-circuit-window", 5_000, 5_000)
+	subscription := &model.UserSubscription{
+		UserId: fixture.user.Id, AmountTotal: 1_000, AmountUsed: 100,
+		StartTime: fixture.now.Add(-time.Hour).Unix(), EndTime: fixture.now.Add(time.Hour).Unix(), Status: "active",
+	}
+	require.NoError(t, fixture.db.Create(subscription).Error)
+	first := masterSettlementBlockForTest(t, fixture, 1, "subscription", int64(subscription.Id), false)
+	require.NoError(t, fixture.db.Unscoped().Delete(&model.UserSubscription{}, subscription.Id).Error)
+	settleMasterBlockForTest(t, fixture, first, "settlement-skipped-circuit-window")
+
+	second := masterSettlementBlockForTest(t, fixture, 2, "wallet", 0, false)
+	exceeded, _, err := masterSettlementWindowExceededTx(
+		fixture.db,
+		fixture.node,
+		[]masterSettlementCharge{{event: &second.Events[0], chargedQuota: second.Events[0].Billing.ChargedQuota}},
+		60,
+		200,
+	)
+	require.NoError(t, err)
+	assert.True(t, exceeded)
+}
+
+func TestMasterSettlementCurrentSubjectDriftIsolatedPerEvent(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		reasonCode string
+		mutate     func(*testing.T, *masterSettlementTestFixture)
+	}{
+		{
+			name: "hard deleted user", reasonCode: "current_user_missing",
+			mutate: func(t *testing.T, fixture *masterSettlementTestFixture) {
+				require.NoError(t, fixture.db.Unscoped().Delete(&model.User{}, fixture.user.Id).Error)
+			},
+		},
+		{
+			name: "hard deleted token", reasonCode: "current_token_missing_or_reassigned",
+			mutate: func(t *testing.T, fixture *masterSettlementTestFixture) {
+				require.NoError(t, fixture.db.Unscoped().Delete(&model.Token{}, fixture.token.Id).Error)
+			},
+		},
+		{
+			name: "token quota mode changed", reasonCode: "current_token_quota_mode_changed",
+			mutate: func(t *testing.T, fixture *masterSettlementTestFixture) {
+				require.NoError(t, fixture.db.Unscoped().Model(&model.Token{}).
+					Where("id = ?", fixture.token.Id).Update("unlimited_quota", true).Error)
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			fixture := newMasterSettlementTestFixture(t, "subject-drift-"+strings.ReplaceAll(test.name, " ", "-"), 5_000, 5_000)
+			request := masterSettlementBlockForTest(t, fixture, 1, "wallet", 0, false)
+			test.mutate(t, fixture)
+
+			ack := settleMasterBlockForTest(t, fixture, request, "settlement-subject-drift")
+			assert.Equal(t, int64(1), ack.AckedThroughSequence)
+			var skipped model.EdgeSettlementSkippedEvent
+			require.NoError(t, fixture.db.First(&skipped).Error)
+			assert.Equal(t, test.reasonCode, skipped.ReasonCode)
+			for _, target := range []any{&model.EdgeUsageEvent{}, &model.EdgeConsumeLogOutbox{}} {
+				var count int64
+				require.NoError(t, fixture.db.Model(target).Count(&count).Error)
+				assert.Zero(t, count)
+			}
+		})
+	}
+}
+
 func TestMasterSettlementZeroUsageCreatesEventWithoutConsumptionStatistics(t *testing.T) {
 	fixture := newMasterSettlementTestFixture(t, "zero-usage-log", 5_000, 5_000)
 	request := masterSettlementBlockForTest(t, fixture, 1, "wallet", 0, false)
@@ -390,7 +531,7 @@ func newMasterSettlementTestFixture(t *testing.T, name string, userQuota int, to
 		&model.EdgeNode{}, &model.EdgeNodeCredential{}, &model.User{}, &model.Token{}, &model.Channel{},
 		&model.EdgeRequestReceipt{}, &model.EdgeRequestNonceClaim{},
 		&model.EdgeCompiledSnapshot{}, &model.EdgeCompiledSnapshotDataset{}, &model.EdgeCompiledSnapshotPage{},
-		&model.UserSubscription{}, &model.EdgeSettlementBlock{}, &model.EdgeUsageEvent{}, &model.EdgeConsumeLogOutbox{},
+		&model.UserSubscription{}, &model.EdgeSettlementBlock{}, &model.EdgeUsageEvent{}, &model.EdgeSettlementSkippedEvent{}, &model.EdgeConsumeLogOutbox{},
 		&model.QuotaData{}, &model.EdgeQuotaDataEvent{}, &model.EdgeQuotaDataBucket{},
 	))
 	model.DB = db

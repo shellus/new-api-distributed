@@ -233,6 +233,7 @@ func SettleMasterUsageBlockTx(tx *gorm.DB, identity *model.EdgeControlIdentity, 
 		FirstSequence:           command.Request.FirstSequence,
 		LastSequence:            command.Request.LastSequence,
 		EventCount:              len(command.Request.Events),
+		AppliedEventCount:       len(command.Request.Events),
 		BlockDigest:             command.Request.BlockDigest,
 		Status:                  model.EdgeSettlementBlockStatusAccepted,
 		EdgeCreatedAtUnixMilli:  command.Request.CreatedAtUnixMilli,
@@ -242,105 +243,53 @@ func SettleMasterUsageBlockTx(tx *gorm.DB, identity *model.EdgeControlIdentity, 
 		return nil, err
 	}
 
+	appliedEventCount := 0
+	skippedEventCount := 0
 	for _, charge := range charges {
-		event := charge.event
-		chargeResult, err := model.ApplyEdgeSettlementChargeTx(
-			tx, int(event.UserID), int(event.TokenID), event.FundingSource, int(event.UserSubscriptionID),
-			event.TokenUnlimitedQuota, charge.chargedQuota,
-		)
-		if err != nil {
-			return nil, err
-		}
-		promptTokens, completionTokens := masterUsageTokenTotals(charge.normalizedUsage)
-		usagePayload, err := common.Marshal(event.Usage)
-		if err != nil {
-			return nil, err
-		}
-		billingPayload, err := common.Marshal(event.Billing)
-		if err != nil {
-			return nil, err
-		}
-		var consumeLogSnapshotPayload *string
-		if event.ConsumeLogSnapshot != nil {
-			payload, err := common.Marshal(event.ConsumeLogSnapshot)
-			if err != nil {
-				return nil, err
-			}
-			value := string(payload)
-			consumeLogSnapshotPayload = &value
-		}
-		settlementFacts := coreservice.TextConsumeLogSettlementFacts{
-			BillingSource: event.FundingSource, BillingPreference: charge.billingPreference,
-		}
-		if event.FundingSource == coreservice.BillingSourceSubscription {
-			settlementFacts.SubscriptionID = chargeResult.SubscriptionID
-			settlementFacts.SubscriptionPreConsumed = event.Billing.ReservedQuota
-			settlementFacts.SubscriptionPostDelta = charge.chargedQuota - event.Billing.ReservedQuota
-			settlementFacts.SubscriptionPlanID = chargeResult.SubscriptionPlanID
-			settlementFacts.SubscriptionPlanTitle = chargeResult.SubscriptionPlanTitle
-			settlementFacts.SubscriptionTotal = chargeResult.SubscriptionTotal
-			settlementFacts.SubscriptionUsed = chargeResult.SubscriptionUsed
-		}
-		settlementPayload, err := common.Marshal(settlementFacts)
-		if err != nil {
-			return nil, err
-		}
-		settlementValue := string(settlementPayload)
-		httpStatus := 0
-		if event.HTTPStatus != nil {
-			httpStatus = *event.HTTPStatus
-		}
-		storedEvent := &model.EdgeUsageEvent{
-			NodeID: node.ID, NodeGeneration: node.Generation, BlockID: block.ID,
-			EventUID: event.EventID, ReservationUID: event.ReservationID, RequestUID: event.RequestID,
-			Sequence: event.Sequence, UserID: int(event.UserID), TokenID: int(event.TokenID),
-			SnapshotID: charge.snapshotID, SnapshotRevision: event.SnapshotRevision,
-			PricingRevision: event.PricingRevision, BalanceRevision: event.BalanceRevision,
-			FundingSource: event.FundingSource, UserSubscriptionID: int(event.UserSubscriptionID),
-			TokenUnlimitedQuota: event.TokenUnlimitedQuota,
-			ChannelID:           int(event.ChannelID), Endpoint: string(event.Endpoint), Streaming: event.Streaming,
-			Model: event.Model, Group: event.Group, Outcome: string(event.Outcome), HTTPStatus: httpStatus,
-			ErrorCode: event.ErrorCode, StartedAtUnixMilli: event.StartedAtUnixMilli,
-			FirstResponseAtUnixMilli: event.FirstResponseAtUnixMilli,
-			FinishedAtUnixMilli:      event.FinishedAtUnixMilli, PromptTokens: promptTokens,
-			CompletionTokens: completionTokens, ReservedQuota: event.Billing.ReservedQuota,
-			ChargedQuota: charge.chargedQuota, PricingPolicyID: event.Billing.PricingPolicyID,
-			PricingPolicyVersion: event.Billing.PricingPolicyVersion,
-			UsagePayload:         string(usagePayload), BillingPayload: string(billingPayload),
-			ConsumeLogSnapshotPayload:   consumeLogSnapshotPayload,
-			ConsumeLogSettlementPayload: &settlementValue,
-		}
-		if err := tx.Create(storedEvent).Error; err != nil {
-			return nil, err
-		}
-		if promptTokens+completionTokens > 0 {
-			if err := model.AddEdgeSettlementStatsTx(tx, int(event.UserID), int(event.TokenID), int(event.ChannelID), charge.chargedQuota, event.FinishedAtUnixMilli/1000); err != nil {
-				return nil, err
-			}
-		}
-		outboxPayload, err := common.Marshal(edgeConsumeLogOutboxPayload{
-			EventID: event.EventID, NodeID: node.NodeUID, NodeGeneration: node.Generation,
-			RequestID: event.RequestID, UserID: int(event.UserID), TokenID: int(event.TokenID),
-			ChannelID: int(event.ChannelID), Endpoint: event.Endpoint, Streaming: event.Streaming,
-			Model: event.Model, Group: event.Group, Outcome: event.Outcome, HTTPStatus: httpStatus,
-			ErrorCode: event.ErrorCode, PromptTokens: promptTokens, CompletionTokens: completionTokens,
-			Quota: charge.chargedQuota, StartedAtUnixMilli: event.StartedAtUnixMilli,
-			FirstResponseAtUnixMilli: event.FirstResponseAtUnixMilli,
-			FinishedAtUnixMilli:      event.FinishedAtUnixMilli,
+		err := tx.Transaction(func(eventTx *gorm.DB) error {
+			return applyMasterSettlementEventTx(eventTx, node, block, charge, now)
 		})
-		if err != nil {
+		if err == nil {
+			appliedEventCount++
+			continue
+		}
+		reasonCode, skippable := model.EdgeSettlementStateConflictCode(err)
+		if !skippable {
 			return nil, err
 		}
-		billingEventKey, err := model.EdgeConsumeLogBillingEventKey(node.NodeUID, node.Generation, event.EventID)
-		if err != nil {
-			return nil, err
+		eventPayload, marshalErr := common.Marshal(charge.event)
+		if marshalErr != nil {
+			return nil, marshalErr
 		}
-		if err := tx.Create(&model.EdgeConsumeLogOutbox{
-			EventID: storedEvent.ID, EventUID: billingEventKey, Payload: string(outboxPayload),
-			Status: model.EdgeConsumeLogOutboxStatusPending, AvailableAt: now.Unix(),
+		reason := strings.TrimSpace(err.Error())
+		if len(reason) > 4096 {
+			reason = reason[:4096]
+		}
+		event := charge.event
+		if err := tx.Create(&model.EdgeSettlementSkippedEvent{
+			NodeID: node.ID, NodeGeneration: node.Generation, BlockID: block.ID,
+			EventUID: event.EventID, ReservationUID: event.ReservationID, Sequence: event.Sequence,
+			UserID: int(event.UserID), TokenID: int(event.TokenID), ChannelID: int(event.ChannelID),
+			UserSubscriptionID: int(event.UserSubscriptionID), SnapshotID: charge.snapshotID,
+			SnapshotRevision: event.SnapshotRevision, ChargedQuota: charge.chargedQuota,
+			FinishedAtUnixMilli: event.FinishedAtUnixMilli, ReasonCode: reasonCode, Reason: reason,
+			EventPayload: string(eventPayload), EventPayloadSHA256: edgeauth.BodySHA256(eventPayload),
 		}).Error; err != nil {
 			return nil, err
 		}
+		skippedEventCount++
+		common.SysError(fmt.Sprintf(
+			"edge settlement skipped trusted event node=%s generation=%d sequence=%d event=%s reason=%s",
+			node.NodeUID, node.Generation, event.Sequence, event.EventID, reasonCode,
+		))
+	}
+	block.AppliedEventCount = appliedEventCount
+	block.SkippedEventCount = skippedEventCount
+	if err := tx.Model(&model.EdgeSettlementBlock{}).Where("id = ?", block.ID).Updates(map[string]any{
+		"applied_event_count": appliedEventCount,
+		"skipped_event_count": skippedEventCount,
+	}).Error; err != nil {
+		return nil, err
 	}
 
 	node.LastEventSeq = command.Request.LastSequence
@@ -359,6 +308,127 @@ func SettleMasterUsageBlockTx(tx *gorm.DB, identity *model.EdgeControlIdentity, 
 		AcceptedEventCount:      block.EventCount,
 		AcknowledgedAtUnixMilli: block.AcknowledgedAtUnixMilli,
 	}, nil
+}
+
+func applyMasterSettlementEventTx(
+	tx *gorm.DB,
+	node *model.EdgeNode,
+	block *model.EdgeSettlementBlock,
+	charge masterSettlementCharge,
+	now time.Time,
+) error {
+	if tx == nil || node == nil || block == nil || charge.event == nil {
+		return errors.New("invalid master settlement event application")
+	}
+	event := charge.event
+	chargeResult, err := model.ApplyEdgeSettlementChargeTx(
+		tx, int(event.UserID), int(event.TokenID), event.FundingSource, int(event.UserSubscriptionID),
+		event.TokenUnlimitedQuota, charge.chargedQuota,
+	)
+	if err != nil {
+		return err
+	}
+	promptTokens, completionTokens := masterUsageTokenTotals(charge.normalizedUsage)
+	usagePayload, err := common.Marshal(event.Usage)
+	if err != nil {
+		return err
+	}
+	billingPayload, err := common.Marshal(event.Billing)
+	if err != nil {
+		return err
+	}
+	var consumeLogSnapshotPayload *string
+	if event.ConsumeLogSnapshot != nil {
+		payload, err := common.Marshal(event.ConsumeLogSnapshot)
+		if err != nil {
+			return err
+		}
+		value := string(payload)
+		consumeLogSnapshotPayload = &value
+	}
+	settlementFacts := coreservice.TextConsumeLogSettlementFacts{
+		BillingSource: event.FundingSource, BillingPreference: charge.billingPreference,
+	}
+	if event.FundingSource == coreservice.BillingSourceSubscription {
+		settlementFacts.SubscriptionID = chargeResult.SubscriptionID
+		settlementFacts.SubscriptionPreConsumed = event.Billing.ReservedQuota
+		settlementFacts.SubscriptionPostDelta = charge.chargedQuota - event.Billing.ReservedQuota
+		settlementFacts.SubscriptionPlanID = chargeResult.SubscriptionPlanID
+		settlementFacts.SubscriptionPlanTitle = chargeResult.SubscriptionPlanTitle
+		settlementFacts.SubscriptionTotal = chargeResult.SubscriptionTotal
+		settlementFacts.SubscriptionUsed = chargeResult.SubscriptionUsed
+	}
+	settlementPayload, err := common.Marshal(settlementFacts)
+	if err != nil {
+		return err
+	}
+	settlementValue := string(settlementPayload)
+	httpStatus := 0
+	if event.HTTPStatus != nil {
+		httpStatus = *event.HTTPStatus
+	}
+	storedEvent := &model.EdgeUsageEvent{
+		NodeID: node.ID, NodeGeneration: node.Generation, BlockID: block.ID,
+		EventUID: event.EventID, ReservationUID: event.ReservationID, RequestUID: event.RequestID,
+		Sequence: event.Sequence, UserID: int(event.UserID), TokenID: int(event.TokenID),
+		SnapshotID: charge.snapshotID, SnapshotRevision: event.SnapshotRevision,
+		PricingRevision: event.PricingRevision, BalanceRevision: event.BalanceRevision,
+		FundingSource: event.FundingSource, UserSubscriptionID: int(event.UserSubscriptionID),
+		TokenUnlimitedQuota: event.TokenUnlimitedQuota,
+		ChannelID:           int(event.ChannelID), Endpoint: string(event.Endpoint), Streaming: event.Streaming,
+		Model: event.Model, Group: event.Group, Outcome: string(event.Outcome), HTTPStatus: httpStatus,
+		ErrorCode: event.ErrorCode, StartedAtUnixMilli: event.StartedAtUnixMilli,
+		FirstResponseAtUnixMilli: event.FirstResponseAtUnixMilli,
+		FinishedAtUnixMilli:      event.FinishedAtUnixMilli, PromptTokens: promptTokens,
+		CompletionTokens: completionTokens, ReservedQuota: event.Billing.ReservedQuota,
+		ChargedQuota: charge.chargedQuota, PricingPolicyID: event.Billing.PricingPolicyID,
+		PricingPolicyVersion: event.Billing.PricingPolicyVersion,
+		UsagePayload:         string(usagePayload), BillingPayload: string(billingPayload),
+		ConsumeLogSnapshotPayload:   consumeLogSnapshotPayload,
+		ConsumeLogSettlementPayload: &settlementValue,
+	}
+	if err := tx.Create(storedEvent).Error; err != nil {
+		return err
+	}
+	if promptTokens+completionTokens > 0 {
+		statsErr := tx.Transaction(func(statsTx *gorm.DB) error {
+			return model.AddEdgeSettlementStatsTx(
+				statsTx, int(event.UserID), int(event.TokenID), int(event.ChannelID),
+				charge.chargedQuota, event.FinishedAtUnixMilli/1000,
+			)
+		})
+		if statsErr != nil {
+			if reasonCode, skippable := model.EdgeSettlementStateConflictCode(statsErr); skippable {
+				common.SysError(fmt.Sprintf(
+					"edge settlement accepted event with statistics skipped node=%s generation=%d sequence=%d event=%s reason=%s",
+					node.NodeUID, node.Generation, event.Sequence, event.EventID, reasonCode,
+				))
+			} else {
+				return statsErr
+			}
+		}
+	}
+	outboxPayload, err := common.Marshal(edgeConsumeLogOutboxPayload{
+		EventID: event.EventID, NodeID: node.NodeUID, NodeGeneration: node.Generation,
+		RequestID: event.RequestID, UserID: int(event.UserID), TokenID: int(event.TokenID),
+		ChannelID: int(event.ChannelID), Endpoint: event.Endpoint, Streaming: event.Streaming,
+		Model: event.Model, Group: event.Group, Outcome: event.Outcome, HTTPStatus: httpStatus,
+		ErrorCode: event.ErrorCode, PromptTokens: promptTokens, CompletionTokens: completionTokens,
+		Quota: charge.chargedQuota, StartedAtUnixMilli: event.StartedAtUnixMilli,
+		FirstResponseAtUnixMilli: event.FirstResponseAtUnixMilli,
+		FinishedAtUnixMilli:      event.FinishedAtUnixMilli,
+	})
+	if err != nil {
+		return err
+	}
+	billingEventKey, err := model.EdgeConsumeLogBillingEventKey(node.NodeUID, node.Generation, event.EventID)
+	if err != nil {
+		return err
+	}
+	return tx.Create(&model.EdgeConsumeLogOutbox{
+		EventID: storedEvent.ID, EventUID: billingEventKey, Payload: string(outboxPayload),
+		Status: model.EdgeConsumeLogOutboxStatusPending, AvailableAt: now.Unix(),
+	}).Error
 }
 
 func validateMasterSettlementTimes(request dto.EdgeSettlementBlockRequestV1, now time.Time) error {

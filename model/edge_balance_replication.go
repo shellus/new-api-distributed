@@ -235,8 +235,13 @@ func readAuthoritativeEdgeBalanceVectorTx(tx *gorm.DB, now time.Time) (edgeBalan
 	}
 	for i := range users {
 		quota := int64(users[i].Quota)
+		if users[i].Id <= 0 {
+			common.SysError(fmt.Sprintf("edge balance projection omitted invalid wallet user_id=%d", users[i].Id))
+			continue
+		}
 		if err := validateAuthoritativeEdgeBalanceQuota("user quota", quota); err != nil {
-			return vector, fmt.Errorf("user %d: %w", users[i].Id, err)
+			common.SysError(fmt.Sprintf("edge balance projection omitted wallet user_id=%d: %v", users[i].Id, err))
+			continue
 		}
 		vector.Wallets = append(vector.Wallets, dto.EdgeWalletBalanceV2{UserID: int64(users[i].Id), RemainQuota: quota})
 	}
@@ -246,11 +251,19 @@ func readAuthoritativeEdgeBalanceVectorTx(tx *gorm.DB, now time.Time) (edgeBalan
 		return vector, err
 	}
 	for i := range tokens {
+		if tokens[i].Id <= 0 || tokens[i].UserId <= 0 {
+			common.SysError(fmt.Sprintf(
+				"edge balance projection omitted invalid token token_id=%d user_id=%d",
+				tokens[i].Id, tokens[i].UserId,
+			))
+			continue
+		}
 		quota := int64(tokens[i].RemainQuota)
 		if tokens[i].UnlimitedQuota {
 			quota = 0
 		} else if err := validateAuthoritativeEdgeBalanceQuota("token quota", quota); err != nil {
-			return vector, fmt.Errorf("token %d: %w", tokens[i].Id, err)
+			common.SysError(fmt.Sprintf("edge balance projection omitted token token_id=%d: %v", tokens[i].Id, err))
+			continue
 		}
 		vector.Tokens = append(vector.Tokens, dto.EdgeTokenBalanceV2{
 			TokenID:        int64(tokens[i].Id),
@@ -268,16 +281,35 @@ func readAuthoritativeEdgeBalanceVectorTx(tx *gorm.DB, now time.Time) (edgeBalan
 	}
 	for i := range subscriptions {
 		subscription := subscriptions[i]
+		if subscription.Id <= 0 || subscription.UserId <= 0 {
+			common.SysError(fmt.Sprintf(
+				"edge balance projection omitted invalid subscription subscription_id=%d user_id=%d",
+				subscription.Id, subscription.UserId,
+			))
+			continue
+		}
 		if subscription.AmountTotal < 0 || subscription.AmountUsed < 0 {
-			return vector, fmt.Errorf("subscription %d quotas must not be negative", subscription.Id)
+			common.SysError(fmt.Sprintf(
+				"edge balance projection omitted subscription subscription_id=%d: quotas must not be negative",
+				subscription.Id,
+			))
+			continue
 		}
 		expiresAt, err := edgeBalanceUnixMilli(subscription.EndTime)
 		if err != nil {
-			return vector, fmt.Errorf("subscription %d expiry: %w", subscription.Id, err)
+			common.SysError(fmt.Sprintf(
+				"edge balance projection omitted subscription subscription_id=%d expiry: %v",
+				subscription.Id, err,
+			))
+			continue
 		}
 		nextResetAt, err := edgeBalanceUnixMilli(subscription.NextResetTime)
 		if err != nil {
-			return vector, fmt.Errorf("subscription %d reset: %w", subscription.Id, err)
+			common.SysError(fmt.Sprintf(
+				"edge balance projection omitted subscription subscription_id=%d reset: %v",
+				subscription.Id, err,
+			))
+			continue
 		}
 		item := dto.EdgeSubscriptionBalanceV2{
 			SubscriptionID:       int64(subscription.Id),
@@ -290,12 +322,20 @@ func readAuthoritativeEdgeBalanceVectorTx(tx *gorm.DB, now time.Time) (edgeBalan
 			item.UnlimitedQuota = true
 		} else {
 			if err := validateAuthoritativeEdgeBalanceQuota("subscription total quota", subscription.AmountTotal); err != nil {
-				return vector, fmt.Errorf("subscription %d total quota: %w", subscription.Id, err)
+				common.SysError(fmt.Sprintf(
+					"edge balance projection omitted subscription subscription_id=%d total quota: %v",
+					subscription.Id, err,
+				))
+				continue
 			}
 			item.TotalQuota = subscription.AmountTotal
 			item.RemainQuota = subscription.AmountTotal - subscription.AmountUsed
 			if err := validateAuthoritativeEdgeBalanceQuota("subscription remain quota", item.RemainQuota); err != nil {
-				return vector, fmt.Errorf("subscription %d: %w", subscription.Id, err)
+				common.SysError(fmt.Sprintf(
+					"edge balance projection omitted subscription subscription_id=%d: %v",
+					subscription.Id, err,
+				))
+				continue
 			}
 		}
 		vector.Subscriptions = append(vector.Subscriptions, item)

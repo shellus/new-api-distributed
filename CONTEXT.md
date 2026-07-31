@@ -76,6 +76,10 @@ _Avoid_: Consume log snapshot, raw request body
 An ordered, idempotent batch of usage events submitted by an edge and acknowledged by the master.
 _Avoid_: Audit log upload, synchronous request charge
 
+**Settlement Skip**:
+A trusted usage event acknowledged in the settlement sequence but not applied to the current authoritative balance because its referenced business subject can no longer be charged. The master keeps a durable audit record and continues later events.
+_Avoid_: Accounting Quarantine, silent data loss, integrity bypass
+
 **Outbox**:
 The durable edge-owned queue of usage events and settlement blocks that have not yet been acknowledged by the master.
 _Avoid_: In-memory usage queue

@@ -15,8 +15,10 @@ var errEdgeAccountingSubjectQuarantined = errors.New("edge accounting subject re
 var edgeAccountingQuarantine = newEdgeAccountingQuarantineState()
 
 type edgeAccountingQuarantineSubject struct {
-	userID  int64
-	tokenID int64
+	userID            int64
+	tokenID           int64
+	manual            bool
+	retainWhenMissing bool
 }
 
 type edgeAccountingQuarantineState struct {
@@ -35,12 +37,25 @@ func (state *edgeAccountingQuarantineState) reset() {
 }
 
 func (state *edgeAccountingQuarantineState) add(reservation model.EdgeLocalQuotaReservation) error {
+	return state.addWithPolicy(reservation, false, false)
+}
+
+func (state *edgeAccountingQuarantineState) addManual(reservation model.EdgeLocalQuotaReservation, retainWhenMissing bool) error {
+	return state.addWithPolicy(reservation, true, retainWhenMissing)
+}
+
+func (state *edgeAccountingQuarantineState) addWithPolicy(
+	reservation model.EdgeLocalQuotaReservation,
+	manual bool,
+	retainWhenMissing bool,
+) error {
 	if reservation.ReservationID == "" || reservation.UserID <= 0 || reservation.TokenID <= 0 {
 		return errors.New("edge accounting quarantine reservation identity is incomplete")
 	}
 	state.mu.Lock()
 	state.reservations[reservation.ReservationID] = edgeAccountingQuarantineSubject{
 		userID: reservation.UserID, tokenID: reservation.TokenID,
+		manual: manual, retainWhenMissing: retainWhenMissing,
 	}
 	state.mu.Unlock()
 	return nil
@@ -74,9 +89,44 @@ func (state *edgeAccountingQuarantineState) reservationIDs() []string {
 }
 
 func (state *edgeAccountingQuarantineState) reconcile(reservationIDs []string, reservations []model.EdgeLocalQuotaReservation) (bool, error) {
-	retained := make(map[string]edgeAccountingQuarantineSubject, len(reservations))
+	state.mu.RLock()
+	current := make(map[string]edgeAccountingQuarantineSubject, len(reservationIDs))
+	for _, reservationID := range reservationIDs {
+		if subject, exists := state.reservations[reservationID]; exists {
+			current[reservationID] = subject
+		}
+	}
+	state.mu.RUnlock()
+	retained := make(map[string]edgeAccountingQuarantineSubject, len(current))
+	found := make(map[string]struct{}, len(reservations))
 	stagedFound := false
 	for _, reservation := range reservations {
+		found[reservation.ReservationID] = struct{}{}
+		subject := current[reservation.ReservationID]
+		if subject.manual {
+			switch reservation.Status {
+			case model.EdgeLocalReservationStatusSettled, model.EdgeLocalReservationStatusRefunded:
+				continue
+			case model.EdgeLocalReservationStatusActive:
+				// Continue below and retain an active anomaly unless it has
+				// already crossed into the durable staged-recovery frontier.
+			default:
+				retained[reservation.ReservationID] = subject
+				continue
+			}
+			hasStagedID := reservation.StagedEventID != ""
+			hasStagedPayload := reservation.StagedEventPayload != ""
+			hasStagedTime := reservation.StagedAtUnixMilli > 0
+			if hasStagedID || hasStagedPayload || hasStagedTime {
+				if !hasStagedID || !hasStagedPayload || !hasStagedTime {
+					return false, model.ErrEdgeLocalAccountingCorruption
+				}
+				stagedFound = true
+				continue
+			}
+			retained[reservation.ReservationID] = subject
+			continue
+		}
 		requiresQuarantine, staged, err := edgeReservationAccountingQuarantineState(reservation)
 		if err != nil {
 			return false, err
@@ -92,6 +142,11 @@ func (state *edgeAccountingQuarantineState) reconcile(reservationIDs []string, r
 		}
 		retained[reservation.ReservationID] = edgeAccountingQuarantineSubject{
 			userID: reservation.UserID, tokenID: reservation.TokenID,
+		}
+	}
+	for reservationID, subject := range current {
+		if _, exists := found[reservationID]; !exists && subject.manual && subject.retainWhenMissing {
+			retained[reservationID] = subject
 		}
 	}
 	state.mu.Lock()

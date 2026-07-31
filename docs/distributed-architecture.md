@@ -43,7 +43,7 @@ Prompt Safety Policy 由 master 后台 Option 生成，包含敏感检查开关�
 
 edge 本地账务历史不是无限增长的长期归档。只有同时低于 master settlement ack 水位和余额回冲水位的历史序列才允许清理，并始终保留可配置的最近审计尾部。异步任务 owner reservation 当前全部保留作为崩溃恢复证据；未确认 outbox、pending block、staged settlement 和 active reservation 也不得清理。权威长期审计保留在 master。
 
-master 在权威结算事务中重新计算 charge，按事件携带的资金来源 exactly-once 扣减钱包或订阅及有限 token，再写入 usage event 和 consume-log outbox。日志与 `quota_data` 使用同一全局 billing event key 做 exactly-once 投影，因此 outbox 重试、master 崩溃和重复区块都不能重复登记消费。
+master 在权威结算事务中重新计算 charge，按事件携带的资金来源 exactly-once 扣减钱包或订阅及有限 token，再写入 usage event 和 consume-log outbox。区块的身份、签名、摘要、序列、不可变快照和 charge 复核失败时仍拒绝整个区块；事件通过这些可信性检查后，当前业务对象已经删除、变更或越界时按事件写入 Settlement Skip 并继续推进区块序列。渠道累计、消费统计等辅助投影使用独立保存点，投影缺失不能回滚已经完成的权威扣账。日志与 `quota_data` 使用同一全局 billing event key 做 exactly-once 投影，因此 outbox 重试、master 崩溃和重复区块都不能重复登记消费。
 
 master 还按节点代次和 usage event 完成时间检查滑动窗口。超限时整个区块拒收，只提交节点 settlement circuit 标记与拒绝 receipt；账务、usage、水位和日志 outbox 都不提交。edge 收到 circuit 后停止新 admission、继续 heartbeat 并保留 durable outbox。管理员核账并清除 circuit 后，edge 使用新的 HTTP request ID 重试同一 block，链式摘要和事件内容不变。
 

@@ -12,9 +12,46 @@ import (
 )
 
 var (
-	ErrEdgeSettlementCounterOverflow         = errors.New("edge settlement counter would overflow")
 	ErrEdgeSettlementSubscriptionUnavailable = errors.New("edge settlement subscription is unavailable")
 )
+
+// EdgeSettlementStateConflict describes a verified edge event that cannot be
+// applied to the current authoritative business state. It is intentionally
+// distinct from database/integrity errors so the caller can skip only this
+// event without advancing past an untrusted or uncommitted block.
+type EdgeSettlementStateConflict struct {
+	Code  string
+	Cause error
+}
+
+func (e *EdgeSettlementStateConflict) Error() string {
+	if e == nil {
+		return "edge settlement authoritative state conflict"
+	}
+	if e.Cause == nil {
+		return fmt.Sprintf("edge settlement authoritative state conflict: %s", e.Code)
+	}
+	return fmt.Sprintf("edge settlement authoritative state conflict: %s: %v", e.Code, e.Cause)
+}
+
+func (e *EdgeSettlementStateConflict) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.Cause
+}
+
+func NewEdgeSettlementStateConflict(code string, cause error) error {
+	return &EdgeSettlementStateConflict{Code: code, Cause: cause}
+}
+
+func EdgeSettlementStateConflictCode(err error) (string, bool) {
+	var conflict *EdgeSettlementStateConflict
+	if !errors.As(err, &conflict) || conflict == nil || conflict.Code == "" {
+		return "", false
+	}
+	return conflict.Code, true
+}
 
 type EdgeSettlementChargeResult struct {
 	SubscriptionID        int
@@ -41,14 +78,23 @@ func ApplyEdgeSettlementChargeTx(
 	}
 	var user User
 	if err := lockForUpdate(tx.Unscoped()).First(&user, userID).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, NewEdgeSettlementStateConflict("current_user_missing", err)
+		}
 		return nil, err
 	}
 	var token Token
 	if err := lockForUpdate(tx.Unscoped()).Where("id = ? AND user_id = ?", tokenID, userID).First(&token).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, NewEdgeSettlementStateConflict("current_token_missing_or_reassigned", err)
+		}
 		return nil, err
 	}
 	if token.UnlimitedQuota != tokenUnlimitedQuota {
-		return nil, errors.New("edge settlement token quota mode conflicts with authoritative state")
+		return nil, NewEdgeSettlementStateConflict(
+			"current_token_quota_mode_changed",
+			errors.New("edge settlement token quota mode conflicts with authoritative state"),
+		)
 	}
 	result := &EdgeSettlementChargeResult{SubscriptionID: userSubscriptionID}
 	var subscription *UserSubscription
@@ -64,7 +110,10 @@ func ApplyEdgeSettlementChargeTx(
 		stored := &UserSubscription{}
 		if err := lockForUpdate(tx).Where("id = ? AND user_id = ?", userSubscriptionID, userID).First(stored).Error; err != nil {
 			if errors.Is(err, gorm.ErrRecordNotFound) {
-				return nil, fmt.Errorf("%w: user_id=%d subscription_id=%d", ErrEdgeSettlementSubscriptionUnavailable, userID, userSubscriptionID)
+				return nil, NewEdgeSettlementStateConflict(
+					"current_subscription_missing_or_reassigned",
+					fmt.Errorf("%w: user_id=%d subscription_id=%d", ErrEdgeSettlementSubscriptionUnavailable, userID, userSubscriptionID),
+				)
 			}
 			return nil, err
 		}
@@ -73,10 +122,13 @@ func ApplyEdgeSettlementChargeTx(
 		result.SubscriptionTotal = stored.AmountTotal
 		if stored.PlanId > 0 {
 			var plan SubscriptionPlan
-			if err := tx.Select("id", "title").First(&plan, stored.PlanId).Error; err != nil {
-				return nil, err
+			query := tx.Select("id", "title").Limit(1).Find(&plan, stored.PlanId)
+			if query.Error != nil {
+				return nil, query.Error
 			}
-			result.SubscriptionPlanTitle = plan.Title
+			if query.RowsAffected == 1 {
+				result.SubscriptionPlanTitle = plan.Title
+			}
 		}
 	default:
 		return nil, errors.New("invalid edge settlement funding source")
@@ -87,7 +139,7 @@ func ApplyEdgeSettlementChargeTx(
 		case "wallet":
 			updated, clamp := common.QuotaFromDecimalChecked(decimal.NewFromInt(int64(user.Quota)).Sub(decimal.NewFromInt(quota)))
 			if clamp != nil {
-				return nil, clamp
+				return nil, NewEdgeSettlementStateConflict("current_wallet_quota_out_of_range", clamp)
 			}
 			user.Quota = updated
 			if err := tx.Unscoped().Save(&user).Error; err != nil {
@@ -96,7 +148,7 @@ func ApplyEdgeSettlementChargeTx(
 		case "subscription":
 			updated, clamp := common.QuotaFromDecimalChecked(decimal.NewFromInt(subscription.AmountUsed).Add(decimal.NewFromInt(quota)))
 			if clamp != nil {
-				return nil, clamp
+				return nil, NewEdgeSettlementStateConflict("current_subscription_quota_out_of_range", clamp)
 			}
 			subscription.AmountUsed = int64(updated)
 			subscription.UpdatedAt = common.GetTimestamp()
@@ -107,7 +159,7 @@ func ApplyEdgeSettlementChargeTx(
 		if !tokenUnlimitedQuota {
 			updated, clamp := common.QuotaFromDecimalChecked(decimal.NewFromInt(int64(token.RemainQuota)).Sub(decimal.NewFromInt(quota)))
 			if clamp != nil {
-				return nil, clamp
+				return nil, NewEdgeSettlementStateConflict("current_token_quota_out_of_range", clamp)
 			}
 			token.RemainQuota = updated
 			if err := tx.Unscoped().Save(&token).Error; err != nil {
@@ -140,7 +192,7 @@ func AddEdgeSettlementStatsTx(tx *gorm.DB, userID int, tokenID int, channelID in
 		return userResult.Error
 	}
 	if userResult.RowsAffected != 1 {
-		return ErrEdgeSettlementCounterOverflow
+		return NewEdgeSettlementStateConflict("user_statistics_unavailable", nil)
 	}
 
 	tokenResult := tx.Unscoped().Model(&Token{}).
@@ -153,7 +205,7 @@ func AddEdgeSettlementStatsTx(tx *gorm.DB, userID int, tokenID int, channelID in
 		return tokenResult.Error
 	}
 	if tokenResult.RowsAffected != 1 {
-		return ErrEdgeSettlementCounterOverflow
+		return NewEdgeSettlementStateConflict("token_statistics_unavailable", nil)
 	}
 
 	channelResult := tx.Model(&Channel{}).
@@ -163,7 +215,7 @@ func AddEdgeSettlementStatsTx(tx *gorm.DB, userID int, tokenID int, channelID in
 		return channelResult.Error
 	}
 	if channelResult.RowsAffected != 1 {
-		return ErrEdgeSettlementCounterOverflow
+		return NewEdgeSettlementStateConflict("channel_statistics_unavailable", nil)
 	}
 	return nil
 }

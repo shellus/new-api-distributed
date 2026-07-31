@@ -163,6 +163,50 @@ func MarkEdgeConsumeLogOutboxFailed(ctx context.Context, claim *EdgeConsumeLogOu
 	return nil
 }
 
+func MarkEdgeConsumeLogOutboxQuarantined(ctx context.Context, claim *EdgeConsumeLogOutbox, publishErr error, now time.Time) error {
+	if DB == nil {
+		return errors.New("database is nil")
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := validateEdgeConsumeLogOutboxClaim(claim); err != nil {
+		return err
+	}
+	if publishErr == nil {
+		return errors.New("edge consume-log outbox quarantine error is nil")
+	}
+	if now.IsZero() {
+		now = time.Now()
+	}
+	if now.Unix() <= 0 {
+		return errors.New("edge consume-log outbox quarantine time must be positive")
+	}
+	errorText := strings.TrimSpace(publishErr.Error())
+	if errorText == "" {
+		errorText = "unknown permanent projection error"
+	}
+	if len(errorText) > 4096 {
+		errorText = errorText[:4096]
+	}
+	result := DB.WithContext(ctx).Model(&EdgeConsumeLogOutbox{}).
+		Where("id = ? AND status IN ? AND attempts = ? AND available_at = ?", claim.ID,
+			[]EdgeConsumeLogOutboxStatus{EdgeConsumeLogOutboxStatusPending, EdgeConsumeLogOutboxStatusFailed},
+			claim.Attempts, claim.AvailableAt).
+		UpdateColumns(map[string]any{
+			"status":     EdgeConsumeLogOutboxStatusQuarantined,
+			"last_error": errorText,
+			"updated_at": now.Unix(),
+		})
+	if result.Error != nil {
+		return result.Error
+	}
+	if result.RowsAffected != 1 {
+		return ErrEdgeConsumeLogOutboxClaimLost
+	}
+	return nil
+}
+
 func validateEdgeConsumeLogOutboxClaim(claim *EdgeConsumeLogOutbox) error {
 	if claim == nil || claim.ID <= 0 || claim.Attempts <= 0 || claim.AvailableAt <= 0 {
 		return fmt.Errorf("%w: invalid claim", ErrEdgeConsumeLogOutboxClaimLost)

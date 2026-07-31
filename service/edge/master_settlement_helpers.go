@@ -247,6 +247,15 @@ func masterSettlementWindowExceededTx(
 		Find(&historical).Error; err != nil {
 		return false, "", err
 	}
+	var skippedHistorical []usagePoint
+	if err := tx.Model(&model.EdgeSettlementSkippedEvent{}).
+		Select("finished_at_unix_milli", "charged_quota").
+		Where("node_id = ? AND node_generation = ? AND finished_at_unix_milli > ? AND finished_at_unix_milli <= ?",
+			node.ID, node.Generation, minFinished-windowMillis, maxFinished).
+		Find(&skippedHistorical).Error; err != nil {
+		return false, "", err
+	}
+	historical = append(historical, skippedHistorical...)
 	for _, point := range historical {
 		if point.ChargedQuota < 0 || point.ChargedQuota > int64(common.MaxQuota) {
 			return false, "", ErrMasterSettlementConflict
@@ -295,6 +304,15 @@ func validateMasterSettlementSubject(policies *masterSnapshotPolicies, event *dt
 func rejectDuplicateMasterUsageEventTx(tx *gorm.DB, node *model.EdgeNode, event *dto.EdgeUsageEventV1) error {
 	var count int64
 	if err := tx.Model(&model.EdgeUsageEvent{}).
+		Where("node_id = ? AND node_generation = ? AND (sequence = ? OR event_uid = ? OR reservation_uid = ?)",
+			node.ID, node.Generation, event.Sequence, event.EventID, event.ReservationID).
+		Count(&count).Error; err != nil {
+		return err
+	}
+	if count != 0 {
+		return ErrMasterSettlementConflict
+	}
+	if err := tx.Model(&model.EdgeSettlementSkippedEvent{}).
 		Where("node_id = ? AND node_generation = ? AND (sequence = ? OR event_uid = ? OR reservation_uid = ?)",
 			node.ID, node.Generation, event.Sequence, event.EventID, event.ReservationID).
 		Count(&count).Error; err != nil {

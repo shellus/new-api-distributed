@@ -265,6 +265,15 @@ go build ./cmd/newapi-edge
 4. 视频、Suno 和 Midjourney 等异步任务保存在 edge SQLite；reservation 与任务绑定，成功结算、失败退款、轮询和重启恢复均在 edge 本地完成。
 5. 路由一致性测试比较 master 与 edge 的完整用户数据面；结算测试覆盖无 token usage 的任务收据，恢复测试覆盖零额度任务和“账本已结算、任务指针未清理”的崩溃窗口。
 
+### 结算链毒丸隔离（已实现）
+
+1. 增加 ADR 0009，将错误统一分为可信性错误、暂时性基础设施错误和当前业务状态差异；前两类继续阻断或重试，第三类不得阻塞后续结算序列。
+2. master 先完整复核区块和所有 charge，再按事件保存点扣账；当前用户、token、订阅或数值状态无法应用时写入 Settlement Skip，渠道与统计投影失败不回滚权威扣账。
+3. Settlement Skip 与 accepted usage 共同参与节点滑动窗口，并纳入事件/预约/序列去重；区块记录 applied/skipped 数量，重放不重复扣账或重复 skip。
+4. 余额向量遇到单个越界钱包、token 或订阅时省略该账户并向 edge 发送 tombstone，其他账户继续同步；数据库查询失败仍使本次 heartbeat 重试。
+5. 异步任务恢复按 reservation 隔离 owner 缺失或不匹配的任务，其他任务继续恢复；确定性消费日志投影连续失败后进入 quarantine，不阻塞正常 outbox。
+6. edge 控制循环继续在内部重试暂时性故障；终止类身份、协议和持久化错误会上升到 application 生命周期，使容器退出并由进程监督器重启，不保留无控制循环的僵尸进程。
+
 ### Phase F：全量验收与部署
 
 1. 执行本计划“验证”中的全量后端、race、vet、build 和两套前端构建门；额外验证 SQLite、MySQL、PostgreSQL 的余额 diff 与 master 扣账事务。
@@ -282,7 +291,4 @@ go build ./cmd/newapi-edge
 
 ## 后续维护
 
-- master consume-log outbox 空轮询当前会让 GORM 每两秒记录一次预期内的 `record not found`。后续应把 `gorm.ErrRecordNotFound` 作为正常空闲结果处理并抑制对应数据库错误日志，同时保留真实查询错误和 worker 重试日志。
 - edge 的 `/v1/models` 路径仍会触发一次面向 master `users` 表的用户设置查询；SQLite 中没有该表时虽然接口继续返回成功，但会产生误导性的数据库错误日志。后续应让该路径只读取 edge 用户投影，并增加“不查询 master User/Token 表”的路由回归测试。
-- `RecoverEdgeTaskBilling` 当前遇到首条 task/reservation 归属异常就中止 edge 启动。后续应增加持久化的按任务或 subject quarantine：单任务异常只冻结相关任务和账户，数据库不可用或任务账务结构损坏才关闭全局 readiness。
-- 控制循环遇到终止类协议、身份或持久化错误后会退出后台 goroutine，但 HTTP 进程继续存活且长期不 ready。后续应把可重试错误交给受监督重启循环，把不可恢复错误上升到 application 生命周期，避免形成无控制循环的僵尸 edge 进程。

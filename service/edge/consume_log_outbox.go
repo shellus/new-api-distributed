@@ -11,6 +11,8 @@ import (
 	"github.com/QuantumNous/new-api/dto"
 	"github.com/QuantumNous/new-api/model"
 	coreservice "github.com/QuantumNous/new-api/service"
+
+	"gorm.io/gorm"
 )
 
 const (
@@ -19,7 +21,10 @@ const (
 	consumeLogOutboxClaimTTL         = 30 * time.Second
 	consumeLogOutboxBaseBackoff      = 2 * time.Second
 	consumeLogOutboxMaxBackoff       = 5 * time.Minute
+	consumeLogOutboxQuarantineAfter  = 3
 )
+
+var errConsumeLogProjectionInvalid = errors.New("edge consume-log projection is permanently invalid")
 
 // RunMasterConsumeLogOutbox materializes authoritative settlement events into
 // the existing consume-log table. Claims are durable and expire, so another
@@ -98,9 +103,20 @@ func PublishMasterConsumeLogOutboxBatch(ctx context.Context, now time.Time, batc
 			if useWallClock {
 				markNow = time.Now()
 			}
-			retryAt := markNow.Add(consumeLogOutboxBackoff(claim.Attempts))
-			if markErr := model.MarkEdgeConsumeLogOutboxFailed(ctx, claim, err, retryAt, markNow); markErr != nil {
-				err = errors.Join(err, markErr)
+			if errors.Is(err, errConsumeLogProjectionInvalid) && claim.Attempts >= consumeLogOutboxQuarantineAfter {
+				if markErr := model.MarkEdgeConsumeLogOutboxQuarantined(ctx, claim, err, markNow); markErr != nil {
+					err = errors.Join(err, markErr)
+				} else {
+					common.SysError(fmt.Sprintf(
+						"edge consume-log outbox quarantined event=%s after %d deterministic failures",
+						claim.EventUID, claim.Attempts,
+					))
+				}
+			} else {
+				retryAt := markNow.Add(consumeLogOutboxBackoff(claim.Attempts))
+				if markErr := model.MarkEdgeConsumeLogOutboxFailed(ctx, claim, err, retryAt, markNow); markErr != nil {
+					err = errors.Join(err, markErr)
+				}
 			}
 			publishErrors = append(publishErrors, fmt.Errorf("event %s: %w", claim.EventUID, err))
 			continue
@@ -122,40 +138,49 @@ func publishMasterConsumeLogClaim(ctx context.Context, claim *model.EdgeConsumeL
 	}
 	var payload edgeConsumeLogOutboxPayload
 	if err := common.UnmarshalJsonStr(claim.Payload, &payload); err != nil {
-		return fmt.Errorf("decode outbox payload: %w", err)
+		return fmt.Errorf("%w: decode outbox payload: %v", errConsumeLogProjectionInvalid, err)
 	}
 
 	db := model.DB.WithContext(ctx)
 	var stored model.EdgeUsageEvent
 	if err := db.First(&stored, claim.EventID).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return fmt.Errorf("%w: edge usage event %d is missing", errConsumeLogProjectionInvalid, claim.EventID)
+		}
 		return fmt.Errorf("load edge usage event: %w", err)
 	}
 	var node model.EdgeNode
 	if err := db.First(&node, stored.NodeID).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return fmt.Errorf("%w: edge usage node %d is missing", errConsumeLogProjectionInvalid, stored.NodeID)
+		}
 		return fmt.Errorf("load edge usage node: %w", err)
 	}
 	var snapshot model.EdgeCompiledSnapshot
 	if err := db.First(&snapshot, stored.SnapshotID).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return fmt.Errorf("%w: edge usage snapshot %d is missing", errConsumeLogProjectionInvalid, stored.SnapshotID)
+		}
 		return fmt.Errorf("load edge usage snapshot: %w", err)
 	}
 	billingEventKey, err := validateConsumeLogOutboxProjection(claim, payload, stored, node)
 	if err != nil {
-		return err
+		return fmt.Errorf("%w: %v", errConsumeLogProjectionInvalid, err)
 	}
 
 	var usage *dto.BillingUsage
 	if err := common.UnmarshalJsonStr(stored.UsagePayload, &usage); err != nil {
-		return fmt.Errorf("decode stored edge usage: %w", err)
+		return fmt.Errorf("%w: decode stored edge usage: %v", errConsumeLogProjectionInvalid, err)
 	}
 	var billing dto.EdgeUsageBillingV1
 	if err := common.UnmarshalJsonStr(stored.BillingPayload, &billing); err != nil {
-		return fmt.Errorf("decode stored edge billing: %w", err)
+		return fmt.Errorf("%w: decode stored edge billing: %v", errConsumeLogProjectionInvalid, err)
 	}
 	var consumeLogSnapshot *dto.EdgeConsumeLogSnapshotV1
 	if stored.ConsumeLogSnapshotPayload != nil {
 		var decoded dto.EdgeConsumeLogSnapshotV1
 		if err := common.UnmarshalJsonStr(*stored.ConsumeLogSnapshotPayload, &decoded); err != nil {
-			return fmt.Errorf("decode stored edge consume-log snapshot: %w", err)
+			return fmt.Errorf("%w: decode stored edge consume-log snapshot: %v", errConsumeLogProjectionInvalid, err)
 		}
 		consumeLogSnapshot = &decoded
 	}
@@ -180,7 +205,7 @@ func publishMasterConsumeLogClaim(ctx context.Context, claim *model.EdgeConsumeL
 		ConsumeLogSnapshot: consumeLogSnapshot,
 	}
 	if err := event.Validate(); err != nil {
-		return fmt.Errorf("validate stored edge usage event: %w", err)
+		return fmt.Errorf("%w: validate stored edge usage event: %v", errConsumeLogProjectionInvalid, err)
 	}
 	if !common.LogConsumeEnabled {
 		return nil
@@ -219,12 +244,12 @@ func publishMasterConsumeLogClaim(ctx context.Context, claim *model.EdgeConsumeL
 	settlementFacts := coreservice.TextConsumeLogSettlementFacts{}
 	if stored.ConsumeLogSettlementPayload != nil {
 		if err := common.UnmarshalJsonStr(*stored.ConsumeLogSettlementPayload, &settlementFacts); err != nil {
-			return fmt.Errorf("decode stored edge consume-log settlement: %w", err)
+			return fmt.Errorf("%w: decode stored edge consume-log settlement: %v", errConsumeLogProjectionInvalid, err)
 		}
 	}
 	finalSnapshot, err := coreservice.FinalizeTextConsumeLogSnapshot(consumeLogSnapshot, settlementFacts)
 	if err != nil {
-		return fmt.Errorf("finalize edge consume-log snapshot: %w", err)
+		return fmt.Errorf("%w: finalize edge consume-log snapshot: %v", errConsumeLogProjectionInvalid, err)
 	}
 	adminInfo, _ := finalSnapshot.Other["admin_info"].(map[string]interface{})
 	if adminInfo == nil {

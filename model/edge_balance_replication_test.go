@@ -166,6 +166,48 @@ func TestPrepareEdgeBalanceDeltaTxConcurrentHeartbeatIsIdempotent(t *testing.T) 
 	assert.Equal(t, received[0], received[1])
 }
 
+func TestPrepareEdgeBalanceDeltaTxTombstonesOnlyMalformedAccounts(t *testing.T) {
+	forEachEdgeBalanceTestDatabase(t, func(t *testing.T, db *gorm.DB) {
+		now := time.Unix(1_800_000_000, 0)
+		require.NoError(t, db.Create(&User{Id: 1, Username: "valid-wallet", AffCode: "valid-wallet-aff", Quota: 100}).Error)
+		require.NoError(t, db.Create(&User{Id: 2, Username: "invalid-wallet", AffCode: "invalid-wallet-aff", Quota: 200}).Error)
+		require.NoError(t, db.Create(&Token{Id: 10, UserId: 1, Key: "valid-token", RemainQuota: 50}).Error)
+		require.NoError(t, db.Create(&Token{Id: 20, UserId: 2, Key: "invalid-token", RemainQuota: 60}).Error)
+		require.NoError(t, db.Create(&UserSubscription{
+			Id: 30, UserId: 2, AmountTotal: 1_000, AmountUsed: 100,
+			Status: "active", StartTime: now.Add(-time.Hour).Unix(), EndTime: now.Add(time.Hour).Unix(),
+		}).Error)
+
+		var initial *dto.EdgeBalanceDeltaV2
+		require.NoError(t, db.Transaction(func(tx *gorm.DB) error {
+			var err error
+			initial, err = PrepareEdgeBalanceDeltaTx(tx, 1, 1, 0, 0, now)
+			return err
+		}))
+		require.NotNil(t, initial)
+		assert.Len(t, initial.Wallets, 2)
+		assert.Len(t, initial.Tokens, 2)
+		assert.Len(t, initial.Subscriptions, 1)
+
+		invalidQuota := int64(common.MaxQuota) + 1
+		require.NoError(t, db.Model(&User{}).Where("id = ?", 2).UpdateColumn("quota", invalidQuota).Error)
+		require.NoError(t, db.Model(&Token{}).Where("id = ?", 20).UpdateColumn("remain_quota", invalidQuota).Error)
+		require.NoError(t, db.Model(&UserSubscription{}).Where("id = ?", 30).
+			UpdateColumn("amount_used", invalidQuota+1_000).Error)
+
+		var changed *dto.EdgeBalanceDeltaV2
+		require.NoError(t, db.Transaction(func(tx *gorm.DB) error {
+			var err error
+			changed, err = PrepareEdgeBalanceDeltaTx(tx, 1, 1, initial.Revision, 0, now)
+			return err
+		}))
+		require.NotNil(t, changed)
+		assert.Equal(t, []dto.EdgeWalletBalanceV2{{UserID: 2, Deleted: true}}, changed.Wallets)
+		assert.Equal(t, []dto.EdgeTokenBalanceV2{{TokenID: 20, UserID: 2, Deleted: true}}, changed.Tokens)
+		assert.Equal(t, []dto.EdgeSubscriptionBalanceV2{{SubscriptionID: 30, UserID: 2, Deleted: true}}, changed.Subscriptions)
+	})
+}
+
 func forEachEdgeBalanceTestDatabase(t *testing.T, test func(*testing.T, *gorm.DB)) {
 	t.Helper()
 	cases := []struct {

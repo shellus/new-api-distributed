@@ -35,6 +35,8 @@
 
 master 每次心跳从主数据库读取非软删除用户、token 和仍可能参与计费的订阅，构造按账户类型、主键升序排列的规范向量。比较字段包含上述全部余额和生命周期字段；任一字段变化都产生 delta。某条记录不再存在或不再可参与计费时发送 tombstone，而不是依赖 edge 猜测删除。
 
+单个账户的额度、归属或时间字段超出协议安全范围时，该账户从目标向量省略并记录错误日志；相对上一 revision 的 diff 会为它生成 tombstone，限制影响范围为对应用户、token 或订阅。主数据库查询失败、pending vector 损坏或 revision 状态错误仍中止本次 heartbeat，不能伪装成账户删除。
+
 余额数据集是 `edge-control.v2` 的独立可变 dataset，不进入 `EdgeSnapshotManifestV1`，不参与策略快照编译、内容摘要或 detached signature。传输仍位于现有经过节点 Ed25519 认证、HTTPS 保护且带 request correlation 的心跳请求/响应内；不新增连接或轮询。策略快照继续只承载低频鉴权、分组、渠道、定价和 token 启停信息。
 
 ## 协议 v2 与 DTO 草案
@@ -215,10 +217,13 @@ available_quota = replicated_quota - reserved_quota - unsettled_quota
 master 对一个区块执行两遍处理：
 
 1. 第一遍验证 block 链、事件唯一性、节点/代次、固定策略快照、用户/token/订阅归属并重新计算每个 charge；同时构造本区块的权威扣账明细。
-2. 在通过节点滑动窗口熔断后，第二遍在同一事务实际扣减 `users.quota` 或增加 `user_subscriptions.amount_used`，并扣减有限 `tokens.remain_quota`。余额不足不拒绝已经发生的可信 edge 消费，权威余额允许为负；所有 quota 运算继续使用项目的 int32 安全边界。
-3. 同一事务写 accepted block、usage event、统计和 consume-log outbox，并推进节点事件水位。重复区块只返回原 ack，不再次扣账。
+2. 在通过节点滑动窗口熔断后，第二遍为每个事件建立独立保存点，实际扣减 `users.quota` 或增加 `user_subscriptions.amount_used`，并扣减有限 `tokens.remain_quota`。余额不足不拒绝已经发生的可信 edge 消费，权威余额允许为负；所有 quota 运算继续使用项目的 int32 安全边界。
+3. 当前用户、token 或订阅已经缺失、改属、改变 quota 模式或超出安全数值范围时，只回滚该事件保存点并写入 Settlement Skip；当前订阅套餐标题缺失不阻断扣账。渠道和消费统计属于辅助投影，其状态差异只记录警告，不回滚权威余额与 usage。
+4. 同一事务写 accepted block、已应用 usage、Settlement Skip 和 consume-log outbox，并按区块总事件数推进节点事件水位。重复区块只返回原 ack，不再次扣账或重复写 skip。
 
 usage event 固定的订阅 ID 和快照 ID 都是账务外键，而不是可随生命周期清理的缓存键。已取消或过期的 `user_subscriptions` 行必须保留并排除在新 reservation 之外；所有曾发布的编译快照也必须继续可供 settlement 复核。当前协议没有全局“最老未结算引用”水位，因此不能仅根据订阅状态或快照 TTL 物理删除这些记录。
+
+历史行应尽量保留，但系统可用性不再依赖所有当前业务表永久保留。若维护或历史操作已经物理删除引用，可信事件会形成 Settlement Skip；该 charge 仍参与节点滑动窗口，edge 在后续余额水位回冲时清除相应 unsettled overlay。
 
 master 普通钱包请求已经在用户余额 `<= 0` 时拒绝，有限 token 也在 `remain_quota <= 0` 时失效（`service/billing_session.go:436`、`model/token.go:216`）。订阅 `remain_quota <= 0` 后不能满足下一次订阅预扣；若策略允许钱包回退且钱包仍为正，仍可按既有规则切换资金来源（`service/billing_session.go:524`）。因此负值会阻止对应钱包、订阅或有限 token 继续消费，而不会擅自改变既有 funding fallback 语义。
 

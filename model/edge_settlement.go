@@ -21,9 +21,10 @@ const (
 type EdgeConsumeLogOutboxStatus string
 
 const (
-	EdgeConsumeLogOutboxStatusPending   EdgeConsumeLogOutboxStatus = "pending"
-	EdgeConsumeLogOutboxStatusPublished EdgeConsumeLogOutboxStatus = "published"
-	EdgeConsumeLogOutboxStatusFailed    EdgeConsumeLogOutboxStatus = "failed"
+	EdgeConsumeLogOutboxStatusPending     EdgeConsumeLogOutboxStatus = "pending"
+	EdgeConsumeLogOutboxStatusPublished   EdgeConsumeLogOutboxStatus = "published"
+	EdgeConsumeLogOutboxStatusFailed      EdgeConsumeLogOutboxStatus = "failed"
+	EdgeConsumeLogOutboxStatusQuarantined EdgeConsumeLogOutboxStatus = "quarantined"
 )
 
 var (
@@ -47,11 +48,40 @@ type EdgeSettlementBlock struct {
 	FirstSequence           int64                     `json:"first_sequence" gorm:"type:bigint;not null"`
 	LastSequence            int64                     `json:"last_sequence" gorm:"type:bigint;not null;index"`
 	EventCount              int                       `json:"event_count" gorm:"not null"`
+	AppliedEventCount       int                       `json:"applied_event_count" gorm:"not null;default:0"`
+	SkippedEventCount       int                       `json:"skipped_event_count" gorm:"not null;default:0"`
 	BlockDigest             string                    `json:"block_digest" gorm:"type:char(64);not null"`
 	Status                  EdgeSettlementBlockStatus `json:"status" gorm:"type:varchar(32);not null;index"`
 	EdgeCreatedAtUnixMilli  int64                     `json:"edge_created_at_unix_milli" gorm:"type:bigint;not null"`
 	AcknowledgedAtUnixMilli int64                     `json:"acknowledged_at_unix_milli" gorm:"type:bigint;not null;index"`
 	CreatedAt               int64                     `json:"created_at" gorm:"type:bigint;not null;index"`
+}
+
+// EdgeSettlementSkippedEvent is a trusted usage event whose immutable
+// snapshot and charge were verified, but whose current authoritative subject
+// could no longer be charged. The sequence remains acknowledged so one stale
+// business reference cannot stop the node settlement chain.
+type EdgeSettlementSkippedEvent struct {
+	ID                  int64  `json:"id" gorm:"primaryKey"`
+	NodeID              int64  `json:"node_id" gorm:"not null;uniqueIndex:ux_edge_skip_seq,priority:1;uniqueIndex:ux_edge_skip_event,priority:1;uniqueIndex:ux_edge_skip_res,priority:1"`
+	NodeGeneration      int64  `json:"node_generation" gorm:"type:bigint;not null;uniqueIndex:ux_edge_skip_seq,priority:2;uniqueIndex:ux_edge_skip_event,priority:2;uniqueIndex:ux_edge_skip_res,priority:2"`
+	BlockID             int64  `json:"block_id" gorm:"not null;index"`
+	EventUID            string `json:"event_uid" gorm:"type:varchar(64);not null;uniqueIndex:ux_edge_skip_event,priority:3"`
+	ReservationUID      string `json:"reservation_uid" gorm:"type:varchar(64);not null;uniqueIndex:ux_edge_skip_res,priority:3"`
+	Sequence            int64  `json:"sequence" gorm:"type:bigint;not null;uniqueIndex:ux_edge_skip_seq,priority:3"`
+	UserID              int    `json:"user_id" gorm:"not null;index"`
+	TokenID             int    `json:"token_id" gorm:"not null;index"`
+	ChannelID           int    `json:"channel_id" gorm:"not null;index"`
+	UserSubscriptionID  int    `json:"user_subscription_id" gorm:"not null;index"`
+	SnapshotID          int64  `json:"snapshot_id" gorm:"not null;index"`
+	SnapshotRevision    int64  `json:"snapshot_revision" gorm:"type:bigint;not null"`
+	ChargedQuota        int64  `json:"charged_quota" gorm:"type:bigint;not null"`
+	FinishedAtUnixMilli int64  `json:"finished_at_unix_milli" gorm:"type:bigint;not null;index"`
+	ReasonCode          string `json:"reason_code" gorm:"type:varchar(64);not null;index"`
+	Reason              string `json:"reason" gorm:"type:text;not null"`
+	EventPayload        string `json:"event_payload" gorm:"type:text;not null"`
+	EventPayloadSHA256  string `json:"event_payload_sha256" gorm:"type:char(64);not null"`
+	CreatedAt           int64  `json:"created_at" gorm:"type:bigint;not null;index"`
 }
 
 // EdgeUsageEvent is the immutable accounting fact accepted from an edge.
@@ -125,7 +155,8 @@ func (s EdgeSettlementBlockStatus) Valid() bool {
 
 func (s EdgeConsumeLogOutboxStatus) Valid() bool {
 	switch s {
-	case EdgeConsumeLogOutboxStatusPending, EdgeConsumeLogOutboxStatusPublished, EdgeConsumeLogOutboxStatusFailed:
+	case EdgeConsumeLogOutboxStatusPending, EdgeConsumeLogOutboxStatusPublished,
+		EdgeConsumeLogOutboxStatusFailed, EdgeConsumeLogOutboxStatusQuarantined:
 		return true
 	default:
 		return false
@@ -178,11 +209,46 @@ func validateEdgeSettlementBlock(b *EdgeSettlementBlock) error {
 		b.EventCount > dto.EdgeControlMaxSettlementEventsV1 {
 		return errors.New("invalid edge settlement block sequence range")
 	}
+	if b.AppliedEventCount < 0 || b.SkippedEventCount < 0 ||
+		b.AppliedEventCount+b.SkippedEventCount != b.EventCount {
+		return errors.New("invalid edge settlement block outcome counts")
+	}
 	if !b.Status.Valid() {
 		return ErrInvalidEdgeSettlementBlockStatus
 	}
 	if b.EdgeCreatedAtUnixMilli <= 0 || b.AcknowledgedAtUnixMilli <= 0 {
 		return errors.New("invalid edge settlement block timestamps")
+	}
+	return nil
+}
+
+func (e *EdgeSettlementSkippedEvent) BeforeCreate(_ *gorm.DB) error {
+	if e == nil {
+		return errors.New("edge settlement skipped event is nil")
+	}
+	if e.CreatedAt == 0 {
+		e.CreatedAt = common.GetTimestamp()
+	}
+	if e.NodeID <= 0 || e.NodeGeneration <= 0 || e.BlockID <= 0 || e.Sequence <= 0 ||
+		e.UserID <= 0 || e.TokenID <= 0 || e.ChannelID <= 0 || e.SnapshotID <= 0 ||
+		e.SnapshotRevision <= 0 || e.ChargedQuota < 0 || e.ChargedQuota > int64(common.MaxQuota) ||
+		e.FinishedAtUnixMilli <= 0 {
+		return errors.New("invalid edge settlement skipped event identity")
+	}
+	if err := validateEdgeStoredIdentifier("event UID", e.EventUID); err != nil {
+		return err
+	}
+	if err := validateEdgeStoredIdentifier("reservation UID", e.ReservationUID); err != nil {
+		return err
+	}
+	if err := validateEdgeStoredIdentifier("skip reason code", e.ReasonCode); err != nil {
+		return err
+	}
+	if strings.TrimSpace(e.Reason) == "" || strings.TrimSpace(e.EventPayload) == "" {
+		return errors.New("edge settlement skipped event audit payload is empty")
+	}
+	if err := validateEdgeStoredHash(e.EventPayloadSHA256); err != nil {
+		return fmt.Errorf("invalid skipped event payload hash: %w", err)
 	}
 	return nil
 }
@@ -300,4 +366,13 @@ func validateEdgeStoredIdentifier(name string, value string) error {
 func validateEdgeStoredHash(value string) error {
 	_, err := normalizeEdgeControlHash(value)
 	return err
+}
+
+func backfillEdgeSettlementBlockOutcomeCounts() error {
+	if DB == nil || !DB.Migrator().HasTable(&EdgeSettlementBlock{}) {
+		return nil
+	}
+	return DB.Model(&EdgeSettlementBlock{}).
+		Where("event_count > 0 AND applied_event_count = 0 AND skipped_event_count = 0").
+		UpdateColumn("applied_event_count", gorm.Expr("event_count")).Error
 }

@@ -252,15 +252,15 @@ edge SQLite 保存：
 
 ## Master exact-once 投影
 
-master 在接收结算区块的权威事务中校验节点代次、连续事件序列、资金来源、快照、价格和事件时间窗口，随后 exactly-once 扣减钱包或订阅及有限 token，并写入 usage event 与消费日志 outbox。重复区块、重复事件和重放请求返回幂等结果，不重复扣费。
+master 在接收结算区块的权威事务中校验节点代次、连续事件序列、资金来源、快照、价格和事件时间窗口，随后按事件保存点 exactly-once 扣减钱包或订阅及有限 token，并写入 usage event 与消费日志 outbox。当前用户、token 或订阅已经无法安全扣账时，该事件写入持久化 Settlement Skip，区块仍按总事件数确认；渠道和累计统计缺失只跳过辅助投影。重复区块、重复事件和重放请求返回幂等结果，不重复扣费或重复登记 skip。
 
 PostgreSQL 在两个 edge 并发结算且锁顺序交叉时可能返回 `SQLSTATE 40P01`。master 当前会回滚整个事务并返回可重试的 `5xx`，edge 复用同一 durable block 重试，因此不会产生部分扣费或事件序号缺口；若该错误频率升高，应在 master 增加有界的事务级 deadlock retry，并持续监控 `40P01`。
 
-结算事件固定引用 admission 时的快照 ID 和订阅 ID，因此 master 必须保留所有已发布/退役快照，以及已取消/过期的订阅账务行。快照 TTL 只限制新应用，不授权删除结算依据；管理端删除订阅也只取消其新请求资格，不物理删除历史账务行。只有从未发布的陈旧 draft 可以自动清理。
+结算事件固定引用 admission 时的快照 ID 和订阅 ID，因此 master 必须保留所有已发布/退役快照，并应保留已取消/过期的订阅账务行。快照 TTL 只限制新应用，不授权删除结算依据；管理端删除订阅也只取消其新请求资格，不物理删除历史账务行。若历史维护已经物理删除当前业务引用，可信事件形成 Settlement Skip，不再永久阻塞结算链。只有从未发布的陈旧 draft 可以自动清理。
 
 当任一节点事件时间窗口的 charge 超过阈值时，master 使用受限的 committed rejection：只提交节点 circuit 标记和拒绝 receipt，不提交区块、usage、余额扣减、事件水位或日志 outbox。edge 在后续 heartbeat 收到 circuit 后停止新 admission，但继续心跳并保留本地 outbox。熔断不自动恢复；管理员核账后调用 `POST /api/edge/nodes/:id/settlement-circuit/clear`，清除 circuit 并递增 epoch，edge 随后用新的 HTTP request ID 重试同一 durable block，block ID、事件、序号和 digest 不变。
 
-消费日志 worker 使用全局 billing event key 投影正式 consume log；启用数据统计时，`quota_data` 使用独立事件标记在主数据库中原子累加。SQL 日志库、独立日志库和 ClickHouse 投影都必须以同一 billing event key 保持重试幂等。投影成功前 outbox 不会被删除；失败会退避重试，master 崩溃后可继续领取过期 claim。
+消费日志 worker 使用全局 billing event key 投影正式 consume log；启用数据统计时，`quota_data` 使用独立事件标记在主数据库中原子累加。SQL 日志库、独立日志库和 ClickHouse 投影都必须以同一 billing event key 保持重试幂等。暂时性数据库错误持续退避重试；确定性损坏连续失败达到边界后进入 `quarantined`，后续正常 outbox 继续处理，master 崩溃后仍可继续领取过期 claim。
 
 ## 健康检查语义
 

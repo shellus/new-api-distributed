@@ -80,6 +80,8 @@ func Run(config Config) (runErr error) {
 		}()
 	}
 	if config.Mode == common.RuntimeModeEdge {
+		service.SetEdgeTaskRecoveryQuarantine(edgeservice.QuarantineEdgeTaskReservation)
+		defer service.SetEdgeTaskRecoveryQuarantine(nil)
 		if err := edgeservice.InitializeEdgeAccountingReadiness(context.Background(), model.DB); err != nil {
 			return fmt.Errorf("failed to initialize edge accounting readiness: %w", err)
 		}
@@ -92,6 +94,7 @@ func Run(config Config) (runErr error) {
 	}
 
 	backgroundContext, cancelBackground := context.WithCancel(context.Background())
+	backgroundFatalErrors := make(chan error, 1)
 	var backgroundWorkers sync.WaitGroup
 	var stopBackgroundOnce sync.Once
 	stopBackground := func() {
@@ -110,7 +113,12 @@ func Run(config Config) (runErr error) {
 		go func() {
 			defer backgroundWorkers.Done()
 			if err := edgeservice.RunEdgeControlLoops(backgroundContext); err != nil && !errors.Is(err, context.Canceled) {
-				common.SysError("edge control loops stopped: " + err.Error())
+				fatalErr := fmt.Errorf("edge control loops stopped: %w", err)
+				common.SysError(fatalErr.Error())
+				select {
+				case backgroundFatalErrors <- fatalErr:
+				default:
+				}
 			}
 		}()
 		backgroundWorkers.Add(1)
@@ -311,6 +319,9 @@ func Run(config Config) (runErr error) {
 		if err != nil && !errors.Is(err, http.ErrServerClosed) {
 			serveErr = fmt.Errorf("HTTP server stopped unexpectedly: %w", err)
 		}
+	case err := <-backgroundFatalErrors:
+		serveErr = err
+		common.SysError("fatal background worker error, shutting down edge process: " + err.Error())
 	case sig := <-quit:
 		common.SysLog(fmt.Sprintf("received signal: %v, shutting down...", sig))
 	}

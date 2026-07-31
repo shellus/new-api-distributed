@@ -321,6 +321,7 @@ func migrateDB() error {
 		&EdgeCompiledSnapshotPage{},
 		&EdgeSettlementBlock{},
 		&EdgeUsageEvent{},
+		&EdgeSettlementSkippedEvent{},
 		&EdgeConsumeLogOutbox{},
 		&EdgeQuotaDataEvent{},
 		&EdgeQuotaDataBucket{},
@@ -328,6 +329,9 @@ func migrateDB() error {
 		&AuthzRole{},
 	)
 	if err != nil {
+		return err
+	}
+	if err := backfillEdgeSettlementBlockOutcomeCounts(); err != nil {
 		return err
 	}
 	if common.UsingMainDatabase(common.DatabaseTypeSQLite) {
@@ -399,6 +403,7 @@ func migrateDBFast() error {
 		{&EdgeCompiledSnapshotPage{}, "EdgeCompiledSnapshotPage"},
 		{&EdgeSettlementBlock{}, "EdgeSettlementBlock"},
 		{&EdgeUsageEvent{}, "EdgeUsageEvent"},
+		{&EdgeSettlementSkippedEvent{}, "EdgeSettlementSkippedEvent"},
 		{&EdgeConsumeLogOutbox{}, "EdgeConsumeLogOutbox"},
 		{&EdgeQuotaDataEvent{}, "EdgeQuotaDataEvent"},
 		{&EdgeQuotaDataBucket{}, "EdgeQuotaDataBucket"},
@@ -425,6 +430,9 @@ func migrateDBFast() error {
 		if err != nil {
 			return err
 		}
+	}
+	if err := backfillEdgeSettlementBlockOutcomeCounts(); err != nil {
+		return err
 	}
 	if common.UsingMainDatabase(common.DatabaseTypeSQLite) {
 		if err := ensureSubscriptionPlanTableSQLite(); err != nil {
