@@ -8,6 +8,7 @@ ENV GOEXPERIMENT=greenteagc
 
 WORKDIR /build
 COPY go.mod go.sum ./
+COPY relaykit/go.mod ./relaykit/go.mod
 RUN go mod download
 COPY . .
 ARG BUILD_VERSION=distributed-edge
