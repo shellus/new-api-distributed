@@ -27,6 +27,7 @@ import (
 	"github.com/QuantumNous/new-api/oauth"
 	perfmetrics "github.com/QuantumNous/new-api/pkg/perf_metrics"
 	"github.com/QuantumNous/new-api/relay"
+	kitutil "github.com/QuantumNous/new-api/relaykit/relayconvert/kitutil"
 	"github.com/QuantumNous/new-api/router"
 	"github.com/QuantumNous/new-api/service"
 	"github.com/QuantumNous/new-api/service/authz"
@@ -35,21 +36,23 @@ import (
 	"github.com/QuantumNous/new-api/setting/ratio_setting"
 
 	"github.com/bytedance/gopkg/util/gopool"
-	"github.com/gin-contrib/sessions"
-	"github.com/gin-contrib/sessions/cookie"
 	"github.com/gin-gonic/gin"
 	"github.com/joho/godotenv"
 )
 
 type Config struct {
-	Mode        common.RuntimeMode
-	ThemeAssets router.ThemeAssets
+	Mode      common.RuntimeMode
+	WebAssets router.WebAssets
 }
 
 func Run(config Config) (runErr error) {
 	if err := common.SetRuntimeMode(config.Mode); err != nil {
 		return err
 	}
+	kitutil.SetLogging(common.SysLog, func(message string) {
+		logger.LogError(nil, message)
+	})
+	kitutil.SetSystemErrorLogging(common.SysError)
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 	defer signal.Stop(quit)
@@ -71,6 +74,7 @@ func Run(config Config) (runErr error) {
 	if common.DebugEnabled {
 		common.SysLog("running in debug mode")
 	}
+	kitutil.Debug.Store(common.DebugEnabled)
 
 	if databaseInitialized {
 		defer func() {
@@ -291,7 +295,10 @@ func Run(config Config) (runErr error) {
 		common.SysError(fmt.Sprintf("start pyroscope error : %v", err))
 	}
 
-	server := newHTTPServer(config)
+	server, err := newHTTPServer(config)
+	if err != nil {
+		return err
+	}
 	port := os.Getenv("PORT")
 	if port == "" {
 		port = strconv.Itoa(*common.Port)
@@ -373,8 +380,11 @@ func Run(config Config) (runErr error) {
 	return serveErr
 }
 
-func newHTTPServer(config Config) *gin.Engine {
+func newHTTPServer(config Config) (*gin.Engine, error) {
 	server := gin.New()
+	if err := middleware.ConfigureTrustedProxies(server); err != nil {
+		return nil, fmt.Errorf("failed to configure trusted proxies: %w", err)
+	}
 	server.Use(gin.CustomRecovery(func(c *gin.Context, err any) {
 		common.SysLog(fmt.Sprintf("panic detected: %v", err))
 		c.JSON(http.StatusInternalServerError, gin.H{
@@ -391,25 +401,15 @@ func newHTTPServer(config Config) *gin.Engine {
 
 	if config.Mode == common.RuntimeModeEdge {
 		router.SetEdgeRouter(server)
-		return server
+		return server, nil
 	}
 
-	store := cookie.NewStore([]byte(common.SessionSecret))
-	store.Options(sessions.Options{
-		Path:     "/",
-		MaxAge:   2592000, // 30 days
-		HttpOnly: true,
-		Secure:   common.SessionCookieSecure,
-		SameSite: http.SameSiteStrictMode,
-	})
-	server.Use(sessions.Sessions("session", store))
-
-	assets := injectAnalytics(config.ThemeAssets)
+	assets := injectAnalytics(config.WebAssets)
 	router.SetRouter(server, assets)
-	return server
+	return server, nil
 }
 
-func injectAnalytics(assets router.ThemeAssets) router.ThemeAssets {
+func injectAnalytics(assets router.WebAssets) router.WebAssets {
 	umamiInjectBuilder := &strings.Builder{}
 	if os.Getenv("UMAMI_WEBSITE_ID") != "" {
 		umamiSiteID := os.Getenv("UMAMI_WEBSITE_ID")
@@ -426,8 +426,7 @@ func injectAnalytics(assets router.ThemeAssets) router.ThemeAssets {
 	umamiInjectBuilder.WriteString("<!--Umami QuantumNous-->\n")
 	umamiInject := []byte(umamiInjectBuilder.String())
 	umamiPlaceholder := []byte("<!--umami-->\n")
-	assets.DefaultIndexPage = bytes.ReplaceAll(assets.DefaultIndexPage, umamiPlaceholder, umamiInject)
-	assets.ClassicIndexPage = bytes.ReplaceAll(assets.ClassicIndexPage, umamiPlaceholder, umamiInject)
+	assets.IndexPage = bytes.ReplaceAll(assets.IndexPage, umamiPlaceholder, umamiInject)
 
 	googleInjectBuilder := &strings.Builder{}
 	if os.Getenv("GOOGLE_ANALYTICS_ID") != "" {
@@ -447,8 +446,7 @@ func injectAnalytics(assets router.ThemeAssets) router.ThemeAssets {
 	googleInjectBuilder.WriteString("<!--Google Analytics QuantumNous-->\n")
 	googleInject := []byte(googleInjectBuilder.String())
 	googlePlaceholder := []byte("<!--Google Analytics-->\n")
-	assets.DefaultIndexPage = bytes.ReplaceAll(assets.DefaultIndexPage, googlePlaceholder, googleInject)
-	assets.ClassicIndexPage = bytes.ReplaceAll(assets.ClassicIndexPage, googlePlaceholder, googleInject)
+	assets.IndexPage = bytes.ReplaceAll(assets.IndexPage, googlePlaceholder, googleInject)
 	return assets
 }
 
@@ -484,6 +482,11 @@ func initResources(mode common.RuntimeMode) (bool, error) {
 		return false, fmt.Errorf("failed to initialize authorization: %w", err)
 	}
 	model.CheckSetup()
+	if common.IsMasterNode {
+		if err := model.MigrateRetiredFrontendOptions(); err != nil {
+			common.SysError("failed to migrate retired frontend options: " + err.Error())
+		}
+	}
 
 	model.InitOptionMap()
 	common.CleanupOldCacheFiles()
@@ -505,6 +508,7 @@ func initResources(mode common.RuntimeMode) (bool, error) {
 	if err := oauth.LoadCustomProviders(); err != nil {
 		common.SysError("failed to load custom OAuth providers: " + err.Error())
 	}
+	service.StartAuthArtifactCleanup()
 
 	return true, nil
 }

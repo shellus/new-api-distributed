@@ -9,7 +9,7 @@ import (
 	"github.com/QuantumNous/new-api/dto"
 	"github.com/QuantumNous/new-api/pkg/billingexpr"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
-	"github.com/QuantumNous/new-api/types"
+	"github.com/QuantumNous/new-api/relaykit/types"
 
 	"github.com/gin-gonic/gin"
 )
@@ -163,28 +163,11 @@ func buildTextConsumeLogSnapshot(
 		other["image_ratio"] = summary.ImageRatio
 		other["image_output"] = summary.ImageTokens
 	}
-	if summary.WebSearchCallCount > 0 {
-		other["web_search"] = true
-		other["web_search_call_count"] = summary.WebSearchCallCount
-		other["web_search_price"] = summary.WebSearchPrice
-	} else if summary.ClaudeWebSearchCallCount > 0 {
-		other["web_search"] = true
-		other["web_search_call_count"] = summary.ClaudeWebSearchCallCount
-		other["web_search_price"] = summary.ClaudeWebSearchPrice
-	}
-	if summary.FileSearchCallCount > 0 {
-		other["file_search"] = true
-		other["file_search_call_count"] = summary.FileSearchCallCount
-		other["file_search_price"] = summary.FileSearchPrice
-	}
+	appendToolSurchargeLogInfo(other, summary.ToolSurchargeItems)
 	if summary.AudioInputPrice > 0 && summary.AudioTokens > 0 {
 		other["audio_input_seperate_price"] = true
 		other["audio_input_token_count"] = summary.AudioTokens
 		other["audio_input_price"] = summary.AudioInputPrice
-	}
-	if summary.ImageGenerationCallPrice > 0 {
-		other["image_generation_call"] = true
-		other["image_generation_call_price"] = summary.ImageGenerationCallPrice
 	}
 	if summary.CacheCreationTokens > 0 {
 		other["cache_creation_tokens"] = summary.CacheCreationTokens

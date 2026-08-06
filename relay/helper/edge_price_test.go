@@ -10,8 +10,9 @@ import (
 	"github.com/QuantumNous/new-api/dto"
 	"github.com/QuantumNous/new-api/model"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
+	relaytypes "github.com/QuantumNous/new-api/relaykit/types"
 	"github.com/QuantumNous/new-api/setting/ratio_setting"
-	"github.com/QuantumNous/new-api/types"
+	hosttypes "github.com/QuantumNous/new-api/types"
 
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/assert"
@@ -23,7 +24,7 @@ func TestEdgeModelPriceHelperRatioDefaultsMatchMasterSemantics(t *testing.T) {
 	priceData := edgePriceDataForTest(t, dto.EdgePricingPolicyV1{
 		PolicyID: "ratio-defaults", Version: "v1", Model: "gpt-ratio-defaults",
 		BillingMode: dto.EdgeBillingModeRatioV1, ModelRatio: &modelRatio, QuotaPerUnit: 500_000,
-	}, &types.TokenCountMeta{})
+	}, &relaytypes.TokenCountMeta{})
 
 	assert.False(t, priceData.UsePrice)
 	assert.Equal(t, float64(-1), priceData.ModelPrice)
@@ -47,7 +48,7 @@ func TestEdgeModelPriceHelperUsesSignedPreConsumedQuota(t *testing.T) {
 		PolicyID: "ratio-signed-pre-consume", Version: "v1", Model: "gpt-ratio-signed-pre-consume",
 		BillingMode: dto.EdgeBillingModeRatioV1, ModelRatio: &modelRatio, QuotaPerUnit: 500_000,
 		PreConsumedQuota: &preConsumedQuota,
-	}, &types.TokenCountMeta{})
+	}, &relaytypes.TokenCountMeta{})
 
 	assert.Equal(t, 4_000, priceData.QuotaToPreConsume)
 }
@@ -92,7 +93,7 @@ func TestEdgeAndMasterPriceDataLogSemanticsMatchForRatioBilling(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	masterCtx, _ := gin.CreateTestContext(httptest.NewRecorder())
 	masterInfo := &relaycommon.RelayInfo{OriginModelName: modelName, UserGroup: "default", UsingGroup: "default"}
-	masterPrice, err := ModelPriceHelper(masterCtx, masterInfo, 100, &types.TokenCountMeta{})
+	masterPrice, err := ModelPriceHelper(masterCtx, masterInfo, 100, &relaytypes.TokenCountMeta{})
 	require.NoError(t, err)
 	modelRatio := 0.375
 	completionRatio := 6.0
@@ -104,7 +105,7 @@ func TestEdgeAndMasterPriceDataLogSemanticsMatchForRatioBilling(t *testing.T) {
 		ModelRatio: &modelRatio, CompletionRatio: &completionRatio, CacheReadRatio: &cacheReadRatio,
 		CacheCreationRatio: &cacheCreationRatio, CacheCreation1hRatio: &cacheCreation1hRatio,
 		QuotaPerUnit: 500_000,
-	}, &types.TokenCountMeta{})
+	}, &relaytypes.TokenCountMeta{})
 
 	assert.Equal(t, masterPrice.ModelPrice, edgePrice.ModelPrice)
 	assert.Equal(t, masterPrice.UsePrice, edgePrice.UsePrice)
@@ -125,7 +126,7 @@ func TestEdgeModelPriceHelperFixedPriceZeroRemainsExplicit(t *testing.T) {
 	priceData := edgePriceDataForTest(t, dto.EdgePricingPolicyV1{
 		PolicyID: "fixed-zero", Version: "v1", Model: "gpt-fixed-zero",
 		BillingMode: dto.EdgeBillingModeFixedPriceV1, ModelPrice: &modelPrice, QuotaPerUnit: 500_000,
-	}, &types.TokenCountMeta{})
+	}, &relaytypes.TokenCountMeta{})
 
 	assert.True(t, priceData.UsePrice)
 	assert.Equal(t, float64(0), priceData.ModelPrice)
@@ -143,7 +144,7 @@ func TestEdgeModelPriceHelperPreservesExplicitZeroOptionalRatios(t *testing.T) {
 		BillingMode: dto.EdgeBillingModeRatioV1, ModelRatio: &modelRatio,
 		CompletionRatio: &zero, CacheReadRatio: &zero, CacheCreationRatio: &zero,
 		CacheCreation1hRatio: &zero, QuotaPerUnit: 500_000,
-	}, &types.TokenCountMeta{})
+	}, &relaytypes.TokenCountMeta{})
 
 	assert.Zero(t, priceData.CompletionRatio)
 	assert.Zero(t, priceData.CacheRatio)
@@ -157,20 +158,20 @@ func TestEdgeModelPriceHelperAppliesRequestSpecificRatios(t *testing.T) {
 	priceData, err := edgePriceDataForTestResult(t, dto.EdgePricingPolicyV1{
 		PolicyID: "fixed-request-ratio", Version: "v1", Model: "gpt-fixed-request-ratio",
 		BillingMode: dto.EdgeBillingModeFixedPriceV1, ModelPrice: &modelPrice, QuotaPerUnit: 500_000,
-	}, &types.TokenCountMeta{ImagePriceRatio: 2, BillingRatios: map[string]float64{"n": 2}})
+	}, &relaytypes.TokenCountMeta{ImagePriceRatio: 2, BillingRatios: map[string]float64{"n": 2}})
 	require.NoError(t, err)
 	assert.Equal(t, map[string]float64{"image_price_ratio": 2, "n": 2}, priceData.OtherRatios())
 	assert.Equal(t, 40_000, priceData.QuotaToPreConsume)
 }
 
-func edgePriceDataForTest(t *testing.T, policy dto.EdgePricingPolicyV1, meta *types.TokenCountMeta) types.PriceData {
+func edgePriceDataForTest(t *testing.T, policy dto.EdgePricingPolicyV1, meta *relaytypes.TokenCountMeta) hosttypes.PriceData {
 	t.Helper()
 	priceData, err := edgePriceDataForTestResult(t, policy, meta)
 	require.NoError(t, err)
 	return priceData
 }
 
-func edgePriceDataForTestResult(t *testing.T, policy dto.EdgePricingPolicyV1, meta *types.TokenCountMeta) (types.PriceData, error) {
+func edgePriceDataForTestResult(t *testing.T, policy dto.EdgePricingPolicyV1, meta *relaytypes.TokenCountMeta) (hosttypes.PriceData, error) {
 	t.Helper()
 	db, err := model.OpenEdgeSQLite(filepath.Join(t.TempDir(), "edge-price.db"))
 	require.NoError(t, err)

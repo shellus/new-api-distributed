@@ -35,12 +35,12 @@ func TestLogStartupSuccessUsesEdgeIdentityWithoutSessionWarning(t *testing.T) {
 	LogStartupSuccess(time.Now(), "3000")
 
 	assert.Contains(t, output.String(), "Test API Edge")
-	assert.NotContains(t, output.String(), "Session cookie is not secure")
+	assert.NotContains(t, output.String(), "Refresh cookie is not secure")
 
 	require.NoError(t, SetRuntimeMode(RuntimeModeMaster))
 	output.Reset()
 	LogStartupSuccess(time.Now(), "3000")
 	assert.Contains(t, output.String(), "Test API")
 	assert.NotContains(t, output.String(), "Test API Edge")
-	assert.Contains(t, output.String(), "Session cookie is not secure")
+	assert.Contains(t, output.String(), "Refresh cookie is not secure")
 }

@@ -556,9 +556,17 @@ func masterToolSurchargeQuota(
 			Mul(decimal.NewFromInt(int64(count))).
 			Div(decimal.NewFromInt(1000)).Mul(groupRatio).Mul(quotaPerUnit))
 	}
-	addCalls("web_search_preview", facts.WebSearchPreviewCalls)
-	addCalls("web_search", facts.WebSearchCalls)
-	addCalls("file_search", facts.FileSearchCalls)
+	if len(facts.ToolCalls) > 0 {
+		for name, count := range facts.ToolCalls {
+			addCalls(name, count)
+		}
+	} else {
+		// Backward compatibility for usage events emitted before generic tool
+		// accounting facts were introduced.
+		addCalls("web_search_preview", facts.WebSearchPreviewCalls)
+		addCalls("web_search", facts.WebSearchCalls)
+		addCalls("file_search", facts.FileSearchCalls)
+	}
 	if facts.ImageGenerationCall {
 		quota = quota.Add(decimal.NewFromFloat(operation_setting.GetGPTImage1PriceOnceCall(
 			facts.ImageGenerationQuality, facts.ImageGenerationSize,

@@ -47,6 +47,8 @@ var dataReplacer = strings.NewReplacer(
 	"\n", "\n",
 	"\r", "\\r")
 
+// CustomEvent does not synchronize writes to the response writer. Streaming
+// callers must serialize event writes at the stream level.
 type CustomEvent struct {
 	Event string
 	Id    string

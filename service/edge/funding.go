@@ -13,8 +13,8 @@ import (
 	"github.com/QuantumNous/new-api/model"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	relayconstant "github.com/QuantumNous/new-api/relay/constant"
+	"github.com/QuantumNous/new-api/relaykit/types"
 	coreservice "github.com/QuantumNous/new-api/service"
-	"github.com/QuantumNous/new-api/types"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
@@ -257,6 +257,12 @@ func (f *EdgeBalanceFunding) buildUsageEvent(actualQuota int64) (*dto.EdgeUsageE
 	facts := dto.EdgeBillingFactsV1{}
 	if f.relayInfo.EdgeBillingFacts != nil {
 		facts = *f.relayInfo.EdgeBillingFacts
+		if len(f.relayInfo.EdgeBillingFacts.ToolCalls) > 0 {
+			facts.ToolCalls = make(map[string]int, len(f.relayInfo.EdgeBillingFacts.ToolCalls))
+			for name, count := range f.relayInfo.EdgeBillingFacts.ToolCalls {
+				facts.ToolCalls[name] = count
+			}
+		}
 		if f.relayInfo.EdgeBillingFacts.TieredQuotaBeforeGroup != nil {
 			value := *f.relayInfo.EdgeBillingFacts.TieredQuotaBeforeGroup
 			facts.TieredQuotaBeforeGroup = &value

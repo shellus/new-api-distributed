@@ -12,7 +12,7 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-func SetRouter(router *gin.Engine, assets ThemeAssets) {
+func SetRouter(router *gin.Engine, assets WebAssets) {
 	if common.GetEnvOrDefaultBool("EDGE_DISTRIBUTED_ENABLED", false) {
 		SetEdgeControlRouter(router)
 	}

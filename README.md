@@ -91,21 +91,15 @@ ops/master-switch/     原版/master 演练、切换和回滚脚本
 docker build -t <master-image> .
 ```
 
-Dockerfile 会构建 default/classic 两套前端，并生成默认 master 二进制。
+Dockerfile 会构建统一的 `web/` 前端，并生成默认 master 二进制。
 
 ### 本地构建 master 与 edge
 
 ```bash
 cd web
 bun install --frozen-lockfile
-
-cd default
 bun run build
-
-cd ../classic
-bun run build
-
-cd ../..
+cd ..
 go build -o new-api .
 go build -o newapi-edge ./cmd/newapi-edge
 ```
@@ -141,7 +135,7 @@ go vet ./...
 go build ./...
 ```
 
-前端分别在 `web/default/` 和 `web/classic/` 中执行：
+前端在 `web/` 中执行：
 
 ```bash
 bun run build

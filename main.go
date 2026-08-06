@@ -8,26 +8,18 @@ import (
 	"github.com/QuantumNous/new-api/router"
 )
 
-//go:embed web/default/dist
+//go:embed web/dist
 var buildFS embed.FS
 
-//go:embed web/default/dist/index.html
+//go:embed web/dist/index.html
 var indexPage []byte
-
-//go:embed web/classic/dist
-var classicBuildFS embed.FS
-
-//go:embed web/classic/dist/index.html
-var classicIndexPage []byte
 
 func main() {
 	err := app.Run(app.Config{
 		Mode: common.RuntimeModeMaster,
-		ThemeAssets: router.ThemeAssets{
-			DefaultBuildFS:   buildFS,
-			DefaultIndexPage: indexPage,
-			ClassicBuildFS:   classicBuildFS,
-			ClassicIndexPage: classicIndexPage,
+		WebAssets: router.WebAssets{
+			BuildFS:   buildFS,
+			IndexPage: indexPage,
 		},
 	})
 	if err != nil {

@@ -11,10 +11,11 @@ import (
 	"time"
 
 	"github.com/QuantumNous/new-api/common"
-	"github.com/QuantumNous/new-api/dto"
+	edgedto "github.com/QuantumNous/new-api/dto"
 	"github.com/QuantumNous/new-api/pkg/cachex"
+	"github.com/QuantumNous/new-api/relaykit/dto"
+	"github.com/QuantumNous/new-api/relaykit/types"
 	"github.com/QuantumNous/new-api/setting/operation_setting"
-	"github.com/QuantumNous/new-api/types"
 	"github.com/gin-gonic/gin"
 	"github.com/samber/hot"
 	"github.com/tidwall/gjson"
@@ -56,7 +57,7 @@ func effectiveChannelAffinitySetting() *operation_setting.ChannelAffinitySetting
 // snapshot has been verified and atomically applied. The converted structure
 // is immutable after publication, so concurrent relay requests never observe
 // a partially updated rule set.
-func SetEdgeChannelAffinityPolicy(policy dto.EdgeChannelAffinityPolicyV1) error {
+func SetEdgeChannelAffinityPolicy(policy edgedto.EdgeChannelAffinityPolicyV1) error {
 	if err := policy.Validate(); err != nil {
 		return err
 	}

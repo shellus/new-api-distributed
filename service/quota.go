@@ -9,12 +9,13 @@ import (
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
-	"github.com/QuantumNous/new-api/dto"
+	edgedto "github.com/QuantumNous/new-api/dto"
 	"github.com/QuantumNous/new-api/logger"
 	"github.com/QuantumNous/new-api/model"
 	"github.com/QuantumNous/new-api/pkg/billingexpr"
 	perfmetrics "github.com/QuantumNous/new-api/pkg/perf_metrics"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
+	"github.com/QuantumNous/new-api/relaykit/dto"
 	"github.com/QuantumNous/new-api/setting/ratio_setting"
 	"github.com/QuantumNous/new-api/types"
 
@@ -285,7 +286,7 @@ func PostWssConsumeQuota(ctx *gin.Context, relayInfo *relaycommon.RelayInfo, mod
 				Source: dto.BillingUsageSourceOAIChat, Semantic: dto.BillingUsageSemanticOpenAI, OpenAIUsage: settlementUsage,
 			}
 		}
-		facts := &dto.EdgeBillingFactsV1{}
+		facts := &edgedto.EdgeBillingFactsV1{}
 		if relayInfo.TieredBillingSnapshot != nil {
 			quotaBeforeGroup := relayInfo.TieredBillingSnapshot.EstimatedQuotaBeforeGroup
 			if tieredResult != nil {
@@ -436,7 +437,7 @@ func PostAudioConsumeQuota(ctx *gin.Context, relayInfo *relaycommon.RelayInfo, u
 		relayInfo.SettlementUsage = buildEdgeTextSettlementUsage(relayInfo, usage, usage, textQuotaSummary{
 			PromptTokens: usage.PromptTokens, CompletionTokens: usage.CompletionTokens, TotalTokens: usage.TotalTokens,
 		})
-		facts := &dto.EdgeBillingFactsV1{}
+		facts := &edgedto.EdgeBillingFactsV1{}
 		if relayInfo.TieredBillingSnapshot != nil {
 			quotaBeforeGroup := relayInfo.TieredBillingSnapshot.EstimatedQuotaBeforeGroup
 			if tieredResult != nil {
@@ -572,7 +573,7 @@ func checkAndSendQuotaNotify(relayInfo *relaycommon.RelayInfo, quota int, preCon
 		}
 		if quotaTooLow {
 			prompt := "您的额度即将用尽"
-			topUpLink := PaymentReturnURL("/console/topup")
+			topUpLink := PaymentReturnURL("/wallet")
 
 			// 根据通知方式生成不同的内容格式
 			var content string
@@ -626,7 +627,7 @@ func checkAndSendSubscriptionQuotaNotify(relayInfo *relaycommon.RelayInfo) {
 		}
 
 		prompt := "您的订阅额度即将用尽"
-		topUpLink := PaymentReturnURL("/console/topup")
+		topUpLink := PaymentReturnURL("/wallet")
 
 		var content string
 		var values []interface{}

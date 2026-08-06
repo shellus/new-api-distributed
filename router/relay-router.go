@@ -5,7 +5,7 @@ import (
 	"github.com/QuantumNous/new-api/controller"
 	"github.com/QuantumNous/new-api/middleware"
 	"github.com/QuantumNous/new-api/relay"
-	"github.com/QuantumNous/new-api/types"
+	"github.com/QuantumNous/new-api/relaykit/types"
 
 	"github.com/gin-gonic/gin"
 )
@@ -118,6 +118,9 @@ func registerRelayV1DataPlane(relayV1Router *gin.RouterGroup) {
 	})
 	relayRouter.POST("/responses/compact", func(c *gin.Context) {
 		controller.Relay(c, types.RelayFormatOpenAIResponsesCompaction)
+	})
+	relayRouter.POST("/alpha/search", func(c *gin.Context) {
+		controller.Relay(c, types.RelayFormatOpenAIAlphaSearch)
 	})
 	relayRouter.POST("/edits", func(c *gin.Context) {
 		controller.Relay(c, types.RelayFormatOpenAIImage)

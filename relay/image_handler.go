@@ -9,13 +9,13 @@ import (
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
-	"github.com/QuantumNous/new-api/dto"
 	"github.com/QuantumNous/new-api/logger"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	"github.com/QuantumNous/new-api/relay/helper"
+	"github.com/QuantumNous/new-api/relaykit/dto"
+	"github.com/QuantumNous/new-api/relaykit/types"
 	"github.com/QuantumNous/new-api/service"
 	"github.com/QuantumNous/new-api/setting/model_setting"
-	"github.com/QuantumNous/new-api/types"
 
 	"github.com/gin-gonic/gin"
 )
@@ -51,6 +51,8 @@ func ImageHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *type
 		if err != nil {
 			return types.NewErrorWithStatusCode(err, types.ErrorCodeReadRequestBodyFailed, http.StatusBadRequest, types.ErrOptionWithSkipRetry())
 		}
+		info.UpstreamRequestBodySize = storage.Size()
+		info.UpstreamRequestGetBody = storage.NewReader
 		requestBody = common.ReaderOnly(storage)
 	} else {
 		convertedRequest, err := adaptor.ConvertImageRequest(c, info, *request)
@@ -77,13 +79,14 @@ func ImageHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *type
 			}
 
 			logger.LogDebug(c, "image request body: %s", jsonData)
-			body, size, closer, err := relaycommon.NewOutboundJSONBody(jsonData)
+			body, size, getBody, closer, err := relaycommon.NewOutboundJSONBody(jsonData)
 			if err != nil {
 				return types.NewError(err, types.ErrorCodeConvertRequestFailed, types.ErrOptionWithSkipRetry())
 			}
 			defer closer.Close()
 			jsonData = nil
 			info.UpstreamRequestBodySize = size
+			info.UpstreamRequestGetBody = getBody
 			requestBody = body
 		}
 	}

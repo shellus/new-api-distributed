@@ -204,31 +204,35 @@ func taskModelName(task *model.Task) string {
 
 // RefundTaskQuota 统一的任务失败退款逻辑。
 // 当异步任务失败时，将预扣的 quota 退还给用户（支持钱包和订阅），并退还令牌额度。
-func RefundTaskQuota(ctx context.Context, task *model.Task, reason string) {
+// 返回资金来源是否已成功退还；失败时保留持久化标记，供显式重试或人工对账。
+func RefundTaskQuota(ctx context.Context, task *model.Task, reason string) bool {
 	if common.IsEdgeMode() {
 		if task == nil || task.PrivateData.EdgeReservationID == "" {
-			return
+			return true
 		}
 		if err := model.RefundEdgeLocalReservation(model.DB, task.PrivateData.EdgeReservationID, time.Now().UnixMilli()); err != nil {
 			logger.LogError(ctx, fmt.Sprintf("退还 edge 任务 reservation 失败 task %s: %s", task.TaskID, err.Error()))
-			return
+			return false
 		}
 		task.PrivateData.EdgeReservationID = ""
 		task.Quota = 0
 		if err := task.Update(); err != nil {
 			logger.LogError(ctx, fmt.Sprintf("更新 edge 任务退款状态失败 task %s: %s", task.TaskID, err.Error()))
 		}
-		return
+		return true
+	}
+	if task == nil {
+		return true
 	}
 	quota := task.Quota
 	if quota == 0 {
-		return
+		return true
 	}
 
 	// 1. 退还资金来源（钱包或订阅）
 	if err := taskAdjustFunding(task, -quota); err != nil {
 		logger.LogWarn(ctx, fmt.Sprintf("退还资金来源失败 task %s: %s", task.TaskID, err.Error()))
-		return
+		return false
 	}
 
 	// 2. 退还令牌额度
@@ -249,6 +253,12 @@ func RefundTaskQuota(ctx context.Context, task *model.Task, reason string) {
 		Group:     task.Group,
 		Other:     other,
 	})
+
+	task.Quota = 0
+	if err := task.UpdateQuota(); err != nil {
+		logger.LogError(ctx, fmt.Sprintf("退款成功但清除 task quota 失败 task %s: %s", task.TaskID, err.Error()))
+	}
+	return true
 }
 
 // RecalculateTaskQuota 通用的异步差额结算。

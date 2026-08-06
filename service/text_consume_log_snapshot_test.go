@@ -9,7 +9,8 @@ import (
 	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/dto"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
-	"github.com/QuantumNous/new-api/types"
+	relaytypes "github.com/QuantumNous/new-api/relaykit/types"
+	hosttypes "github.com/QuantumNous/new-api/types"
 
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/assert"
@@ -41,14 +42,14 @@ func TestBuildAndFinalizeTextConsumeLogSnapshotPreservesRichOtherContract(t *tes
 		OriginModelName: "gpt-4o-gizmo-request", IsStream: true,
 		StartTime: start, FirstResponseTime: start.Add(250 * time.Millisecond),
 		ReasoningEffort: "high", UserSetting: dto.UserSetting{BillingPreference: "subscription_first", RecordIpLog: true},
-		RequestConversionChain:  []types.RelayFormat{types.RelayFormatClaude, types.RelayFormatOpenAIResponses},
-		FinalRequestRelayFormat: types.RelayFormatOpenAIResponses,
+		RequestConversionChain:  []relaytypes.RelayFormat{relaytypes.RelayFormatClaude, relaytypes.RelayFormatOpenAIResponses},
+		FinalRequestRelayFormat: relaytypes.RelayFormatOpenAIResponses,
 		ParamOverrideAudit:      []string{"set temperature = 0.5"},
 		StreamStatus:            streamStatus,
-		PriceData: types.PriceData{
+		PriceData: hosttypes.PriceData{
 			ModelRatio: 1.5, CompletionRatio: 2, CacheRatio: 0.1, ModelPrice: 0,
 			CacheCreationRatio: 1.25, CacheCreation5mRatio: 1.25, CacheCreation1hRatio: 2,
-			GroupRatioInfo: types.GroupRatioInfo{GroupRatio: 0.8, GroupSpecialRatio: 0.8, HasSpecialRatio: true},
+			GroupRatioInfo: hosttypes.GroupRatioInfo{GroupRatio: 0.8, GroupSpecialRatio: 0.8, HasSpecialRatio: true},
 		},
 		ChannelMeta: &relaycommon.ChannelMeta{ChannelId: 31, IsModelMapped: true, UpstreamModelName: "claude-upstream"},
 		QuotaClamp:  &common.QuotaClamp{Op: "QuotaRound", Kind: common.QuotaClampOverflow, Original: 1e20, Clamped: common.MaxQuota},
@@ -152,7 +153,7 @@ func TestBuildAndFinalizeTextConsumeLogSnapshotFixedWalletAndIPDisabled(t *testi
 		RequestId: "wallet-request", OriginModelName: "gpt-fixed", RequestURLPath: "/v1/chat/completions",
 		StartTime: time.Now(), FirstResponseTime: time.Now().Add(-time.Second),
 		UserSetting: dto.UserSetting{BillingPreference: "wallet_only", RecordIpLog: false},
-		PriceData:   types.PriceData{UsePrice: true, ModelPrice: 0.02, GroupRatioInfo: types.GroupRatioInfo{GroupRatio: 1, GroupSpecialRatio: -1}},
+		PriceData:   hosttypes.PriceData{UsePrice: true, ModelPrice: 0.02, GroupRatioInfo: hosttypes.GroupRatioInfo{GroupRatio: 1, GroupSpecialRatio: -1}},
 		ChannelMeta: &relaycommon.ChannelMeta{ChannelId: 31},
 	}
 	summary := textQuotaSummary{

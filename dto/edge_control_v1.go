@@ -476,14 +476,15 @@ type EdgePricingPolicyV1 struct {
 // reconstructed from token usage alone. They are deliberately narrower than
 // the request body and contain no prompt, file content or upstream credential.
 type EdgeBillingFactsV1 struct {
-	WebSearchPreviewCalls  int      `json:"web_search_preview_calls,omitempty"`
-	WebSearchCalls         int      `json:"web_search_calls,omitempty"`
-	FileSearchCalls        int      `json:"file_search_calls,omitempty"`
-	ImageGenerationCall    bool     `json:"image_generation_call,omitempty"`
-	ImageGenerationQuality string   `json:"image_generation_quality,omitempty"`
-	ImageGenerationSize    string   `json:"image_generation_size,omitempty"`
-	TieredQuotaBeforeGroup *float64 `json:"tiered_quota_before_group,omitempty"`
-	TaskQuotaBeforeRatios  *float64 `json:"task_quota_before_ratios,omitempty"`
+	ToolCalls              map[string]int `json:"tool_calls,omitempty"`
+	WebSearchPreviewCalls  int            `json:"web_search_preview_calls,omitempty"`
+	WebSearchCalls         int            `json:"web_search_calls,omitempty"`
+	FileSearchCalls        int            `json:"file_search_calls,omitempty"`
+	ImageGenerationCall    bool           `json:"image_generation_call,omitempty"`
+	ImageGenerationQuality string         `json:"image_generation_quality,omitempty"`
+	ImageGenerationSize    string         `json:"image_generation_size,omitempty"`
+	TieredQuotaBeforeGroup *float64       `json:"tiered_quota_before_group,omitempty"`
+	TaskQuotaBeforeRatios  *float64       `json:"task_quota_before_ratios,omitempty"`
 }
 
 // EdgeChannelAffinityKeySourceV1 describes one ordered affinity-key probe.
@@ -1919,6 +1920,17 @@ func (b EdgeUsageBillingV1) Validate() error {
 }
 
 func (f EdgeBillingFactsV1) Validate(mode EdgeBillingModeV1) error {
+	if len(f.ToolCalls) > EdgeControlMaxAppliedRatiosV1 {
+		return fmt.Errorf("usage.billing.facts.tool_calls exceeds %d items", EdgeControlMaxAppliedRatiosV1)
+	}
+	for name, count := range f.ToolCalls {
+		if err := validateEdgeControlIdentifierV1("usage.billing.facts.tool_calls key", name); err != nil {
+			return err
+		}
+		if err := validateEdgeBillingCountV1("usage.billing.facts.tool_calls["+name+"]", count); err != nil {
+			return err
+		}
+	}
 	for name, count := range map[string]int{
 		"web_search_preview_calls": f.WebSearchPreviewCalls,
 		"web_search_calls":         f.WebSearchCalls,
